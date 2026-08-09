@@ -13,21 +13,22 @@
 // consumers with incompatible exit-code contracts (one reserving a
 // dedicated code for "update available", one folding it into a general
 // findings code) both build a working command from this same adapter.
+//
+// The prompting, refusal, and output-formatting logic RunE actually
+// performs lives in the cliui subpackage, which imports neither Cobra nor
+// any other command framework — this package is only the Cobra flag/wiring
+// layer on top of it, kept as the ONE place that logic is implemented so a
+// CLI with no framework at all (see cliui's own doc comment) can reuse it
+// directly instead of re-deriving it.
 package cobracmd
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 
 	"github.com/strongo/selfupdate"
+	"github.com/strongo/selfupdate/cliui"
 )
 
 // Test seams: overridable indirections over selfupdate.Config's own methods,
@@ -86,10 +87,13 @@ type CommandOptions struct {
 	// output is always the human-readable text form.
 	JSONFormat bool
 	// Interactive reports whether the process is attached to an interactive
-	// terminal, used to implement REQ: non-interactive-refusal. Defaults to
-	// checking whether os.Stdin is a character device. Tests should always
-	// override this — it is the seam that makes the confirmation-prompt and
-	// non-interactive-refusal paths exercisable without a real TTY.
+	// terminal, used to implement REQ: non-interactive-refusal. Passed
+	// straight through to cliui.ConfirmOptions.Interactive; nil means that
+	// package's own default (cliui.IsTerminal, a term.IsTerminal check on
+	// stdin — never an os.ModeCharDevice check, which /dev/null also
+	// satisfies). Tests should always override this — it is the seam that
+	// makes the confirmation-prompt and non-interactive-refusal paths
+	// exercisable without a real TTY.
 	Interactive func() bool
 }
 
@@ -99,10 +103,10 @@ type CommandOptions struct {
 // when opts.JSONFormat is set — --format.
 //
 // RunE performs no work itself beyond flag parsing, calling
-// selfupdate.Config.Check or .Update, and formatting the result: all
-// decision logic lives in the core package, per REQ: no-io-side-effects-in-
-// core — this adapter is where the I/O those decisions require (prompting,
-// printing, choosing an output format) is allowed to live.
+// selfupdate.Config.Check or .Update, and formatting the result via cliui:
+// all decision logic lives in the core package, per REQ: no-io-side-effects-
+// in-core — this adapter is where the I/O those decisions require
+// (prompting, printing, choosing an output format) is allowed to live.
 func New(cfg selfupdate.Config, opts CommandOptions) *cobra.Command {
 	use := opts.Use
 	if use == "" {
@@ -111,10 +115,6 @@ func New(cfg selfupdate.Config, opts CommandOptions) *cobra.Command {
 	short := opts.Short
 	if short == "" {
 		short = "Update the installed binary in place"
-	}
-	interactive := opts.Interactive
-	if interactive == nil {
-		interactive = defaultIsInteractive
 	}
 
 	cmd := &cobra.Command{
@@ -131,7 +131,7 @@ func New(cfg selfupdate.Config, opts CommandOptions) *cobra.Command {
 			if check, _ := cmd.Flags().GetBool("check"); check {
 				return runCheck(cmd, cfg, opts, format)
 			}
-			return runUpdate(cmd, cfg, opts, interactive, format)
+			return runUpdate(cmd, cfg, opts, format)
 		},
 	}
 
@@ -148,42 +148,21 @@ func New(cfg selfupdate.Config, opts CommandOptions) *cobra.Command {
 
 // runUpdate handles every non-check invocation: the managed redirect, the
 // already-current no-op, a dry run, a declined confirmation, and an actual
-// swap.
-func runUpdate(cmd *cobra.Command, cfg selfupdate.Config, opts CommandOptions, interactive func() bool, format string) error {
+// swap. The confirmation callback and every line it, and the outcome, print
+// are cliui's — this function is only flag parsing and dispatch.
+func runUpdate(cmd *cobra.Command, cfg selfupdate.Config, opts CommandOptions, format string) error {
 	yes, _ := cmd.Flags().GetBool("yes")
 	pinned, _ := cmd.Flags().GetString("version")
 	allowDowngrade, _ := cmd.Flags().GetBool("allow-downgrade")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 
 	out := cmd.OutOrStdout()
-	confirm := func(transition string) (bool, error) {
-		_, _ = fmt.Fprintln(out, transition)
-		if yes {
-			return true, nil
-		}
-		if !interactive() {
-			return false, &selfupdate.Failure{
-				Kind: selfupdate.KindNonInteractive,
-				Err:  fmt.Errorf("--yes is required for non-interactive use; refusing to replace the binary"),
-			}
-		}
-		_, _ = fmt.Fprint(out, "Proceed? [y/N] ")
-		reader := bufio.NewReader(cmd.InOrStdin())
-		line, readErr := reader.ReadString('\n')
-		answer := strings.ToLower(strings.TrimSpace(line))
-		if readErr != nil && answer == "" {
-			// The terminal check said interactive and the read still returned
-			// nothing: stdin is closed or empty, so nobody was ever asked.
-			// "Nobody answered" is a refusal to proceed, not a user declining
-			// — and it must exit non-zero like every other non-interactive
-			// refusal, or a script reads exit 0 and believes an update ran.
-			return false, &selfupdate.Failure{
-				Kind: selfupdate.KindNonInteractive,
-				Err:  fmt.Errorf("no answer read from stdin; pass --yes to replace the binary without confirmation"),
-			}
-		}
-		return answer == "y" || answer == "yes", nil
-	}
+	confirm := cliui.Confirm(cliui.ConfirmOptions{
+		In:          cmd.InOrStdin(),
+		Out:         out,
+		Yes:         yes,
+		Interactive: opts.Interactive,
+	})
 
 	outcome, err := updateFunc(cfg, cmd.Context(), selfupdate.Options{
 		PinnedVersion:  pinned,
@@ -193,15 +172,15 @@ func runUpdate(cmd *cobra.Command, cfg selfupdate.Config, opts CommandOptions, i
 	})
 	if err != nil {
 		if selfupdate.KindOf(err) == selfupdate.KindAmbiguous {
-			printAmbiguousGuidance(out, cfg)
+			cliui.WriteAmbiguousGuidance(out, cfg)
 		}
 		return mapFailure(opts, err)
 	}
 
 	if format == "json" {
-		return writeOutcomeJSON(out, outcome)
+		return cliui.WriteOutcomeJSON(out, outcome)
 	}
-	writeOutcomeText(out, cmd.ErrOrStderr(), cfg, outcome)
+	cliui.WriteOutcome(out, cmd.ErrOrStderr(), cfg, outcome)
 	return nil
 }
 
@@ -227,23 +206,13 @@ func runCheck(cmd *cobra.Command, cfg selfupdate.Config, opts CommandOptions, fo
 
 	out := cmd.OutOrStdout()
 	if format == "json" {
-		payload := checkJSON{
-			Current:       result.Current,
-			Latest:        result.Latest,
-			Verdict:       result.Verdict.String(),
-			InstallMethod: detection.Method.String(),
-		}
-		if m := detection.Manager; m != nil {
-			payload.Manager = m.Name
-			payload.UpgradeCommand = m.UpgradeCommand
-		}
-		if err := json.NewEncoder(out).Encode(payload); err != nil {
+		if err := cliui.WriteCheckJSON(out, cfg, result, detection); err != nil {
 			return err
 		}
 	} else {
-		writeCheckText(out, cfg, result)
+		cliui.WriteCheck(out, cfg, result)
 		if result.Verdict != selfupdate.UpToDate {
-			writeNextStep(out, cfg, detection, cmd.CommandPath())
+			cliui.WriteNextStep(out, cfg, detection, cmd.CommandPath())
 		}
 	}
 
@@ -262,36 +231,3 @@ func mapFailure(opts CommandOptions, err error) error {
 	}
 	return err
 }
-
-// printAmbiguousGuidance prints the manual-update guidance REQ: ambiguous-
-// safe-default assigns to the consumer: the core package only reports that
-// classification failed, not what the user should do about it.
-func printAmbiguousGuidance(out io.Writer, cfg selfupdate.Config) {
-	fmt.Fprintf(out, //nolint:errcheck
-		"%s could not determine how this binary was installed, so the install method is ambiguous.\n"+
-			"To avoid replacing a binary that may be managed by a package manager, self-update will not modify it.\n\n"+
-			"To update manually, re-download the latest release from https://github.com/%s/releases",
-		cfg.BinaryName, cfg.Repository)
-	for _, m := range cfg.Managers {
-		fmt.Fprintf(out, ", or run: %s", m.UpgradeCommand) //nolint:errcheck
-	}
-	fmt.Fprintln(out, ".") //nolint:errcheck
-}
-
-// defaultIsInteractive reports whether stdin is a real terminal.
-//
-// The obvious test — os.Stdin.Stat() and a check for os.ModeCharDevice — is
-// wrong, and wrong in the direction that matters: /dev/null IS a character
-// device, so a command run as `cmd < /dev/null` (how agents, cron and CI
-// habitually invoke things) was classified interactive, prompted into the
-// void, read EOF, and reported "aborted" with exit 0. A caller reading that
-// exit code sees success where nothing happened, which is precisely what
-// REQ: non-interactive-refusal exists to prevent. Ask the terminal driver
-// instead: an ioctl either answers for a tty or it does not.
-func defaultIsInteractive() bool {
-	return terminalCheck(int(os.Stdin.Fd()))
-}
-
-// terminalCheck is a seam over the tty probe so the interactive and
-// non-interactive branches are both exercisable without a pty.
-var terminalCheck = term.IsTerminal

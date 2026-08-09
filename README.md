@@ -119,7 +119,46 @@ func (wbErrors) UpdateAvailable(res selfupdate.CheckResult) error {
 
 A CLI that doesn't use Cobra calls `cfg.Check(ctx)` and `cfg.Update(ctx,
 opts)` directly — `cobracmd` is optional sugar over the same two calls; the
-root package has no command-framework dependency at all.
+root package has no command-framework dependency at all. It doesn't have to
+be hand-rolled from scratch either: `github.com/strongo/selfupdate/cliui`
+holds the same confirmation prompt, non-interactive refusal, and text/JSON
+writers `cobracmd` itself is built from, with no Cobra (or any other
+framework) dependency:
+
+```go
+package cli
+
+import (
+	"context"
+	"os"
+
+	"github.com/strongo/selfupdate"
+	"github.com/strongo/selfupdate/cliui"
+)
+
+func selfUpdate(ctx context.Context, cfg selfupdate.Config, yes bool) error {
+	confirm := cliui.Confirm(cliui.ConfirmOptions{
+		In:  os.Stdin,
+		Out: os.Stdout,
+		Yes: yes, // wire from your own --yes/-y flag; nil Interactive -> cliui.IsTerminal
+	})
+
+	outcome, err := cfg.Update(ctx, selfupdate.Options{Confirm: confirm})
+	if err != nil {
+		if selfupdate.KindOf(err) == selfupdate.KindAmbiguous {
+			cliui.WriteAmbiguousGuidance(os.Stdout, cfg)
+		}
+		return err // map to your own exit code however you already do
+	}
+	cliui.WriteOutcome(os.Stdout, os.Stderr, cfg, outcome)
+	return nil
+}
+```
+
+`cobracmd` and `cliui` implement the exact same behavior — the former is
+just the Cobra flag/wiring layer on top of the latter — so a Cobra CLI and a
+hand-rolled one built from `cliui` directly print byte-identical output for
+the same `Outcome`/`CheckResult`.
 
 ### Why exit codes and output belong to the host, not this package
 

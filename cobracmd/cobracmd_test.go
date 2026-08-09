@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
@@ -652,47 +651,11 @@ func TestUpdate_NilErrorMapperFailurePassthrough(t *testing.T) {
 	}
 }
 
-// defaultIsInteractive is exercised directly since CommandOptions.Interactive
-// is nil in normal (non-test) use; its actual boolean result depends on the
-// test runner's stdin, so this only asserts it runs without panicking.
-func TestDefaultIsInteractive_Runs(t *testing.T) {
-	_ = defaultIsInteractive()
-}
-
-// defaultIsInteractive reports whatever the terminal probe says, both ways.
-func TestDefaultIsInteractive_FollowsTerminalCheck(t *testing.T) {
-	for _, want := range []bool{true, false} {
-		orig := terminalCheck
-		terminalCheck = func(int) bool { return want }
-		got := defaultIsInteractive()
-		terminalCheck = orig
-		if got != want {
-			t.Errorf("defaultIsInteractive() = %v with a terminal probe returning %v", got, want)
-		}
-	}
-}
-
-// Regression: /dev/null is a character device, so the ModeCharDevice test
-// this function used to perform called `cmd < /dev/null` interactive — the
-// exact shape an agent, a cron job or a CI runner uses. The command then
-// prompted into the void, read EOF, and reported "aborted" with exit 0,
-// which a caller reads as success. This asserts the real probe (not the
-// seam) against the real device.
-func TestDefaultIsInteractive_DevNullIsNotATerminal(t *testing.T) {
-	devNull, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = devNull.Close() })
-
-	origStdin := os.Stdin
-	t.Cleanup(func() { os.Stdin = origStdin })
-	os.Stdin = devNull
-
-	if defaultIsInteractive() {
-		t.Errorf("defaultIsInteractive() = true for %s; a character device is not a terminal", os.DevNull)
-	}
-}
+// The terminal-check seam that used to live here (defaultIsInteractive /
+// terminalCheck, including the /dev/null-is-not-a-terminal regression test)
+// moved to cliui.IsTerminal along with the rest of the confirmation logic —
+// see cliui/confirm_test.go. CommandOptions.Interactive is now passed
+// straight through to cliui.Confirm, which owns the nil-default.
 
 // When the terminal probe says interactive but the read yields nothing,
 // nobody was actually asked. That is a non-interactive refusal — non-zero
