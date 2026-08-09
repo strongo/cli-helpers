@@ -659,24 +659,83 @@ func TestDefaultIsInteractive_Runs(t *testing.T) {
 	_ = defaultIsInteractive()
 }
 
-// defaultIsInteractive's os.Stdin.Stat() error branch is forced by pointing
-// os.Stdin at an already-closed file: Stat on a closed *os.File reliably
-// returns an error, without needing a stat seam or any real terminal state.
-func TestDefaultIsInteractive_StatError(t *testing.T) {
-	origStdin := os.Stdin
-	t.Cleanup(func() { os.Stdin = origStdin })
+// defaultIsInteractive reports whatever the terminal probe says, both ways.
+func TestDefaultIsInteractive_FollowsTerminalCheck(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		orig := terminalCheck
+		terminalCheck = func(int) bool { return want }
+		got := defaultIsInteractive()
+		terminalCheck = orig
+		if got != want {
+			t.Errorf("defaultIsInteractive() = %v with a terminal probe returning %v", got, want)
+		}
+	}
+}
 
-	f, err := os.CreateTemp(t.TempDir(), "stdin-stand-in-*")
+// Regression: /dev/null is a character device, so the ModeCharDevice test
+// this function used to perform called `cmd < /dev/null` interactive — the
+// exact shape an agent, a cron job or a CI runner uses. The command then
+// prompted into the void, read EOF, and reported "aborted" with exit 0,
+// which a caller reads as success. This asserts the real probe (not the
+// seam) against the real device.
+func TestDefaultIsInteractive_DevNullIsNotATerminal(t *testing.T) {
+	devNull, err := os.Open(os.DevNull)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Close(); err != nil {
-		t.Fatal(err)
-	}
-	os.Stdin = f
+	t.Cleanup(func() { _ = devNull.Close() })
+
+	origStdin := os.Stdin
+	t.Cleanup(func() { os.Stdin = origStdin })
+	os.Stdin = devNull
 
 	if defaultIsInteractive() {
-		t.Error("defaultIsInteractive() = true, want false when Stat() errors")
+		t.Errorf("defaultIsInteractive() = true for %s; a character device is not a terminal", os.DevNull)
+	}
+}
+
+// When the terminal probe says interactive but the read yields nothing,
+// nobody was actually asked. That is a non-interactive refusal — non-zero
+// exit — and never a user declining, which would exit 0.
+func TestUpdate_EmptyStdinRefusesInsteadOfAborting(t *testing.T) {
+	var captured selfupdate.Options
+	withStubUpdate(t, &captured, selfupdate.Outcome{}, nil)
+
+	cmd := New(testConfig(), CommandOptions{Interactive: func() bool { return true }})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetIn(strings.NewReader(""))
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	proceed, cerr := captured.Confirm("1.0.0 → 1.1.0")
+	if proceed {
+		t.Error("Confirm proceeded on empty stdin")
+	}
+	if selfupdate.KindOf(cerr) != selfupdate.KindNonInteractive {
+		t.Errorf("Confirm on empty stdin returned %v (kind %v), want a KindNonInteractive failure",
+			cerr, selfupdate.KindOf(cerr))
+	}
+}
+
+// A user who is asked and answers "n" is a different outcome: (false, nil),
+// which the core reports as ActionAborted and the host exits 0 on.
+func TestUpdate_ExplicitNoIsAnAbortNotAFailure(t *testing.T) {
+	var captured selfupdate.Options
+	withStubUpdate(t, &captured, selfupdate.Outcome{}, nil)
+
+	cmd := New(testConfig(), CommandOptions{Interactive: func() bool { return true }})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetIn(strings.NewReader("n\n"))
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	proceed, cerr := captured.Confirm("1.0.0 → 1.1.0")
+	if proceed || cerr != nil {
+		t.Errorf("Confirm with 'n' = (%v, %v), want (false, nil)", proceed, cerr)
 	}
 }
 

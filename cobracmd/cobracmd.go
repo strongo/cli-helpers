@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/strongo/selfupdate"
 )
@@ -165,8 +166,19 @@ func runUpdate(cmd *cobra.Command, cfg selfupdate.Config, opts CommandOptions, i
 		}
 		_, _ = fmt.Fprint(out, "Proceed? [y/N] ")
 		reader := bufio.NewReader(cmd.InOrStdin())
-		line, _ := reader.ReadString('\n')
+		line, readErr := reader.ReadString('\n')
 		answer := strings.ToLower(strings.TrimSpace(line))
+		if readErr != nil && answer == "" {
+			// The terminal check said interactive and the read still returned
+			// nothing: stdin is closed or empty, so nobody was ever asked.
+			// "Nobody answered" is a refusal to proceed, not a user declining
+			// — and it must exit non-zero like every other non-interactive
+			// refusal, or a script reads exit 0 and believes an update ran.
+			return false, &selfupdate.Failure{
+				Kind: selfupdate.KindNonInteractive,
+				Err:  fmt.Errorf("no answer read from stdin; pass --yes to replace the binary without confirmation"),
+			}
+		}
 		return answer == "y" || answer == "yes", nil
 	}
 
@@ -242,10 +254,20 @@ func printAmbiguousGuidance(out io.Writer, cfg selfupdate.Config) {
 	fmt.Fprintln(out, ".") //nolint:errcheck
 }
 
+// defaultIsInteractive reports whether stdin is a real terminal.
+//
+// The obvious test — os.Stdin.Stat() and a check for os.ModeCharDevice — is
+// wrong, and wrong in the direction that matters: /dev/null IS a character
+// device, so a command run as `cmd < /dev/null` (how agents, cron and CI
+// habitually invoke things) was classified interactive, prompted into the
+// void, read EOF, and reported "aborted" with exit 0. A caller reading that
+// exit code sees success where nothing happened, which is precisely what
+// REQ: non-interactive-refusal exists to prevent. Ask the terminal driver
+// instead: an ioctl either answers for a tty or it does not.
 func defaultIsInteractive() bool {
-	fi, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeCharDevice != 0
+	return terminalCheck(int(os.Stdin.Fd()))
 }
+
+// terminalCheck is a seam over the tty probe so the interactive and
+// non-interactive branches are both exercisable without a pty.
+var terminalCheck = term.IsTerminal
