@@ -135,6 +135,24 @@ When the pinned tag has no published release, or that release carries no asset
 for the host platform, the package MUST fail with an error naming the requested
 tag and MUST leave the existing binary untouched.
 
+#### REQ: multi-product-repository
+
+The consumer MUST be able to declare a tag prefix identifying which releases
+belong to its binary, so one repository can publish several products. When a
+prefix is declared, latest-stable resolution MUST ignore every release whose
+tag does not carry it, a pin MUST resolve within that product's releases only,
+and the version compared against the running build MUST be what remains after
+the prefix and an optional leading `v` — the running binary reports a bare
+version and cannot be expected to know the publisher's tag scheme.
+
+The release path and the asset name come from different halves of that tag: the
+download URL MUST use the full published tag, while the asset name MUST use the
+bare version. Conflating them yields a URL that resolves to a real release and
+a filename that exists nowhere, which is a 404 at download time rather than an
+error at resolution time.
+
+An empty prefix MUST behave exactly as a single-product repository does.
+
 #### REQ: download-matching-asset
 
 For an eligible self-replace the package MUST download the release asset
@@ -331,7 +349,7 @@ behavior above is inherited, not restated.
 
 ### AC: only-verified-bytes-are-installed
 
-**Requirements:** self-update#req:latest-release-source, self-update#req:download-matching-asset, self-update#req:checksum-before-extract, self-update#req:atomic-replace, self-update#req:post-swap-version-check, self-update#req:no-op-when-current
+**Requirements:** self-update#req:latest-release-source, self-update#req:multi-product-repository, self-update#req:download-matching-asset, self-update#req:checksum-before-extract, self-update#req:atomic-replace, self-update#req:post-swap-version-check, self-update#req:no-op-when-current
 
 **Given** a manual install older than the latest stable release, where drafts and prereleases exist alongside it
 **When** the update runs
