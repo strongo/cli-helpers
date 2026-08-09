@@ -216,6 +216,19 @@ and no interactive terminal is attached, the operation MUST refuse rather than
 block on input. A CLI driven by scripts and agents must never silently wait for
 a keystroke.
 
+#### REQ: check-states-the-next-step
+
+A check-only report MUST state what to do about an available update, not only
+that one exists: the manager's upgrade command for a managed install, the
+self-update command itself for a manual one, and the manual-update guidance for
+an ambiguous one. Machine-readable check output MUST carry the same facts —
+the install method, and the manager and its upgrade command when there is one —
+so a caller need not parse prose to reach the same conclusion. Classifying the
+install reads no network and writes nothing, so this costs the read-only
+guarantee nothing; a classification failure MUST NOT fail the check, which
+still reports the version comparison. An up-to-date result MUST NOT print a
+next step, because there is nothing to do.
+
 #### REQ: cobra-adapter-optional
 
 The package MUST provide an optional adapter that builds a ready-made
@@ -338,7 +351,7 @@ behavior above is inherited, not restated.
 
 ### AC: two-cli-contracts-coexist
 
-**Requirements:** self-update#req:consumer-configured-identity, self-update#req:host-owned-exit-codes, self-update#req:no-io-side-effects-in-core, self-update#req:cobra-adapter-optional, self-update#req:no-network-in-tests
+**Requirements:** self-update#req:consumer-configured-identity, self-update#req:host-owned-exit-codes, self-update#req:no-io-side-effects-in-core, self-update#req:check-states-the-next-step, self-update#req:cobra-adapter-optional, self-update#req:no-network-in-tests
 
 **Given** two consumers whose exit-code contracts disagree — one reserving a dedicated code for "update available", one folding it into a general findings code
 **When** both build their command from this package

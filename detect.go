@@ -30,6 +30,22 @@ const (
 	Ambiguous
 )
 
+// String renders the install method as a stable, lower_snake_case token
+// suitable for machine-readable output, matching the convention Action and
+// Verdict already follow.
+func (m InstallMethod) String() string {
+	switch m {
+	case Managed:
+		return "managed"
+	case Manual:
+		return "manual"
+	case Ambiguous:
+		return "ambiguous"
+	default:
+		return "unknown"
+	}
+}
+
 // Detection is the result of classifying an executable path.
 type Detection struct {
 	// Method is how the binary was installed.

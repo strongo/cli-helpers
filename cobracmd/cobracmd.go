@@ -43,6 +43,9 @@ var (
 	updateFunc = func(cfg selfupdate.Config, ctx context.Context, opts selfupdate.Options) (selfupdate.Outcome, error) {
 		return cfg.Update(ctx, opts)
 	}
+	detectFunc = func(cfg selfupdate.Config) (selfupdate.Detection, error) {
+		return cfg.DetectSelf()
+	}
 )
 
 // ErrorMapper translates this package's typed outcomes into the host CLI's
@@ -204,23 +207,44 @@ func runUpdate(cmd *cobra.Command, cfg selfupdate.Config, opts CommandOptions, i
 
 // runCheck implements the read-only --check mode: it resolves availability
 // and reports it, performing no download or write on any branch.
+//
+// It also classifies the install, because "an update exists" is only half an
+// answer — what the user does next differs entirely between a Homebrew
+// install (run brew) and a manual one (run this command), and a check that
+// withholds that forces them to run the real thing to find out. Detection is
+// a pure path classification: it reads no network and writes nothing, so it
+// costs the read-only guarantee nothing. A detection failure is deliberately
+// not fatal here; the version comparison is still worth reporting on its own.
 func runCheck(cmd *cobra.Command, cfg selfupdate.Config, opts CommandOptions, format string) error {
 	result, err := checkFunc(cfg, cmd.Context())
 	if err != nil {
 		return mapFailure(opts, err)
 	}
+	detection, detectErr := detectFunc(cfg)
+	if detectErr != nil {
+		detection = selfupdate.Detection{Method: selfupdate.Ambiguous}
+	}
 
 	out := cmd.OutOrStdout()
 	if format == "json" {
-		if err := json.NewEncoder(out).Encode(checkJSON{
-			Current: result.Current,
-			Latest:  result.Latest,
-			Verdict: result.Verdict.String(),
-		}); err != nil {
+		payload := checkJSON{
+			Current:       result.Current,
+			Latest:        result.Latest,
+			Verdict:       result.Verdict.String(),
+			InstallMethod: detection.Method.String(),
+		}
+		if m := detection.Manager; m != nil {
+			payload.Manager = m.Name
+			payload.UpgradeCommand = m.UpgradeCommand
+		}
+		if err := json.NewEncoder(out).Encode(payload); err != nil {
 			return err
 		}
 	} else {
 		writeCheckText(out, cfg, result)
+		if result.Verdict != selfupdate.UpToDate {
+			writeNextStep(out, cfg, detection, cmd.CommandPath())
+		}
 	}
 
 	if result.Verdict != selfupdate.UpToDate && opts.Errors != nil {

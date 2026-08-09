@@ -8,11 +8,17 @@ import (
 	"github.com/strongo/selfupdate"
 )
 
-// checkJSON is the --format json shape for --check.
+// checkJSON is the --format json shape for --check. InstallMethod and the
+// manager fields are what let a machine caller decide the next step the same
+// way the text output states it — without them the caller learns an update
+// exists but not whether this install may be replaced at all.
 type checkJSON struct {
-	Current string `json:"current"`
-	Latest  string `json:"latest"`
-	Verdict string `json:"verdict"`
+	Current        string `json:"current"`
+	Latest         string `json:"latest"`
+	Verdict        string `json:"verdict"`
+	InstallMethod  string `json:"install_method,omitempty"`
+	Manager        string `json:"manager,omitempty"`
+	UpgradeCommand string `json:"upgrade_command,omitempty"`
 }
 
 // outcomeJSON is the --format json shape for a non-check invocation. Fields
@@ -79,6 +85,28 @@ func writeOutcomeText(out, errOut io.Writer, cfg selfupdate.Config, outcome self
 		if outcome.PostSwapWarning != nil {
 			fmt.Fprintf(errOut, "self-update: warning: %v\n", outcome.PostSwapWarning) //nolint:errcheck
 		}
+	}
+}
+
+// writeNextStep states what to actually do about an available update, which
+// depends entirely on how the binary was installed: a managed install must go
+// through its manager, a manual one can run this very command, and an
+// ambiguous one gets the same refusal guidance the update path would print.
+// commandPath is the fully-qualified invocation (e.g. "wb self-update") so
+// the instruction is copy-pasteable in whatever CLI embeds this command.
+func writeNextStep(out io.Writer, cfg selfupdate.Config, detection selfupdate.Detection, commandPath string) {
+	switch detection.Method {
+	case selfupdate.Managed:
+		if m := detection.Manager; m != nil {
+			fmt.Fprintf(out, "%s was installed via %s. Run the following to upgrade:\n\n    %s\n", //nolint:errcheck
+				cfg.BinaryName, m.Name, m.UpgradeCommand)
+			return
+		}
+		printAmbiguousGuidance(out, cfg)
+	case selfupdate.Manual:
+		fmt.Fprintf(out, "To upgrade, run: %s\n", commandPath) //nolint:errcheck
+	default:
+		printAmbiguousGuidance(out, cfg)
 	}
 }
 

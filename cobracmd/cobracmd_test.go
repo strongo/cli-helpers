@@ -776,3 +776,133 @@ func TestWriteOutcomeJSON_AllActions(t *testing.T) {
 		})
 	}
 }
+
+// withStubDetect pins the install classification so --check's next-step
+// guidance is exercisable without the test binary's own path deciding it.
+func withStubDetect(t *testing.T, detection selfupdate.Detection, err error) {
+	t.Helper()
+	prev := detectFunc
+	detectFunc = func(selfupdate.Config) (selfupdate.Detection, error) { return detection, err }
+	t.Cleanup(func() { detectFunc = prev })
+}
+
+// "An update exists" is only half an answer: what the user does next differs
+// entirely between a managed install (go through the manager) and a manual
+// one (run this command). A check that withholds it forces the user to run
+// the real thing to find out.
+func TestCheck_StatesTheNextStepPerInstallMethod(t *testing.T) {
+	mgr := selfupdate.Homebrew("brew upgrade --cask tool")
+	cases := []struct {
+		name      string
+		detection selfupdate.Detection
+		detectErr error
+		want      []string
+		absent    []string
+	}{
+		{
+			name:      "managed names the manager command",
+			detection: selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr},
+			want:      []string{"update available: 1.0.0 → 1.1.0", "Homebrew", "brew upgrade --cask tool"},
+		},
+		{
+			name:      "manual names this very command",
+			detection: selfupdate.Detection{Method: selfupdate.Manual},
+			want:      []string{"To upgrade, run: self-update"},
+		},
+		{
+			name:      "ambiguous prints the refusal guidance",
+			detection: selfupdate.Detection{Method: selfupdate.Ambiguous},
+			want:      []string{"ambiguous"},
+		},
+		{
+			// Detection is a path classification, not a network call — but if
+			// it fails, the version comparison is still worth reporting, so
+			// the check must not fail with it.
+			name:      "a detection failure still reports the comparison",
+			detectErr: errors.New("cannot resolve executable"),
+			want:      []string{"update available: 1.0.0 → 1.1.0"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withStubCheck(t, selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0", Verdict: selfupdate.UpdateAvailable}, nil)
+			withStubDetect(t, tc.detection, tc.detectErr)
+
+			cmd := New(testConfig(), CommandOptions{})
+			out, _, err := runCmd(t, cmd, "--check")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("check output missing %q:\n%s", want, out)
+				}
+			}
+			for _, absent := range tc.absent {
+				if strings.Contains(out, absent) {
+					t.Errorf("check output unexpectedly contains %q:\n%s", absent, out)
+				}
+			}
+		})
+	}
+}
+
+// An up-to-date binary needs no next step — there is nothing to do.
+func TestCheck_UpToDateHasNoNextStep(t *testing.T) {
+	mgr := selfupdate.Homebrew("brew upgrade --cask tool")
+	withStubCheck(t, selfupdate.CheckResult{Current: "1.0.0", Latest: "1.0.0", Verdict: selfupdate.UpToDate}, nil)
+	withStubDetect(t, selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr}, nil)
+
+	cmd := New(testConfig(), CommandOptions{})
+	out, _, err := runCmd(t, cmd, "--check")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(out, "brew upgrade") {
+		t.Errorf("an up-to-date check told the user to upgrade:\n%s", out)
+	}
+}
+
+// A managed classification that carries no manager is a contradiction; it
+// must fall back to guidance rather than print a half-sentence.
+func TestCheck_ManagedWithoutManagerFallsBackToGuidance(t *testing.T) {
+	withStubCheck(t, selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0", Verdict: selfupdate.UpdateAvailable}, nil)
+	withStubDetect(t, selfupdate.Detection{Method: selfupdate.Managed}, nil)
+
+	cmd := New(testConfig(), CommandOptions{})
+	out, _, err := runCmd(t, cmd, "--check")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "ambiguous") {
+		t.Errorf("managed-without-manager did not fall back to guidance:\n%s", out)
+	}
+}
+
+// The JSON shape carries the same facts the text states, so a machine caller
+// can decide the next step without parsing prose.
+func TestCheck_JSONCarriesInstallMethod(t *testing.T) {
+	mgr := selfupdate.Homebrew("brew upgrade --cask tool")
+	withStubCheck(t, selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0", Verdict: selfupdate.UpdateAvailable}, nil)
+	withStubDetect(t, selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr}, nil)
+
+	cmd := New(testConfig(), CommandOptions{JSONFormat: true})
+	out, _, err := runCmd(t, cmd, "--check", "--format", "json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got map[string]any
+	if uerr := json.Unmarshal([]byte(out), &got); uerr != nil {
+		t.Fatalf("check JSON does not parse: %v\n%s", uerr, out)
+	}
+	for key, want := range map[string]string{
+		"verdict":         "update_available",
+		"install_method":  "managed",
+		"manager":         "Homebrew",
+		"upgrade_command": "brew upgrade --cask tool",
+	} {
+		if got[key] != want {
+			t.Errorf("check JSON[%q] = %v, want %q\n%s", key, got[key], want, out)
+		}
+	}
+}

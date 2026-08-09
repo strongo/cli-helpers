@@ -166,3 +166,19 @@ func TestDetectSelf_SymlinkFallback(t *testing.T) {
 		t.Fatalf("DetectSelf fallback = %+v, want Manual", got)
 	}
 }
+
+// InstallMethod's token spelling is part of the machine-readable contract a
+// consumer's JSON output exposes, so it is pinned here rather than left to
+// whatever %v would print.
+func TestInstallMethodString(t *testing.T) {
+	for method, want := range map[InstallMethod]string{
+		Managed:           "managed",
+		Manual:            "manual",
+		Ambiguous:         "ambiguous",
+		InstallMethod(99): "unknown",
+	} {
+		if got := method.String(); got != want {
+			t.Errorf("InstallMethod(%d).String() = %q, want %q", method, got, want)
+		}
+	}
+}
