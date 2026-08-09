@@ -710,6 +710,144 @@ func TestUpdate_PostSwapVersionMismatchIsWarningNotFailure(t *testing.T) {
 	}
 }
 
+// --- TagPrefix: multi-product repository (the synchestra-releases case) ---
+
+// The real case driving TagPrefix: one repository publishes multiple
+// products, e.g. tag "servers-v0.26.1" holding asset
+// "synchestra-channel_0.26.1_<os>_<arch>.tar.gz" — the download URL's tag
+// segment is the FULL prefixed tag (that is the actual release path on
+// GitHub) while the asset filename carries only the bare version. Getting
+// this pair backwards is the single most likely bug, so both directions are
+// asserted explicitly, and a decoy release for another product proves the
+// swap never touched it.
+func TestUpdate_TagPrefixFullSwapUsesFullTagAndBareVersionAsset(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake binary not portable to windows")
+	}
+	h := newUpdateHarness(t, "bin/synchestra-channel", "old binary")
+	h.cfg.BinaryName = "synchestra-channel"
+	h.cfg.TagPrefix = "servers-"
+	h.cfg.CurrentVersion = "0.26.0"
+	h.setReleases(stableReleaseJSON("cli-v0.15.1", "servers-v0.26.1"))
+	h.addAsset("servers-v0.26.1", "0.26.1", "#!/bin/sh\necho \"synchestra-channel version 0.26.1\"\n")
+	// Deliberately do NOT register any cli- asset: if the servers- binary
+	// ever resolved the cli- tag/version pairing instead of its own, this
+	// download would 404.
+
+	var requestedURLs []string
+	origDownloadURL := h.cfg.DownloadURL
+	h.cfg.DownloadURL = func(repo, tag, asset string) string {
+		u := origDownloadURL(repo, tag, asset)
+		requestedURLs = append(requestedURLs, u)
+		return u
+	}
+
+	outcome, err := h.cfg.Update(context.Background(), Options{Confirm: func(string) (bool, error) { return true, nil }})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome.Action != ActionUpdated {
+		t.Fatalf("Action = %v, want ActionUpdated", outcome.Action)
+	}
+	if outcome.Target != "0.26.1" {
+		t.Errorf("Target = %q, want %q (the bare version, from the prefixed tag)", outcome.Target, "0.26.1")
+	}
+	if got := h.targetBytes(); !strings.Contains(got, "0.26.1") {
+		t.Errorf("target content = %q, does not look like the servers- product's own script", got)
+	}
+	if len(requestedURLs) == 0 {
+		t.Fatal("no download URLs were requested")
+	}
+	assetURL := requestedURLs[0]
+	if !strings.Contains(assetURL, "/servers-v0.26.1/") {
+		t.Errorf("asset URL %q does not use the full prefixed tag %q as its release path", assetURL, "servers-v0.26.1")
+	}
+	if !strings.HasSuffix(assetURL, "synchestra-channel_0.26.1_"+goosName+"_"+goarchName+".tar.gz") {
+		t.Errorf("asset URL %q does not name the asset with the bare version 0.26.1 (not the tag prefix)", assetURL)
+	}
+	if strings.Contains(assetURL[strings.LastIndex(assetURL, "/")+1:], "servers-") {
+		t.Errorf("asset URL %q: the asset FILENAME must never carry the tag prefix, only the release path does", assetURL)
+	}
+}
+
+// A pin on the multi-product repository must also resolve to this product's
+// own tag/asset pairing, never the other product's, even when both publish
+// the exact same bare version.
+func TestUpdate_TagPrefixPinnedResolvesOwnProductAssetOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake binary not portable to windows")
+	}
+	h := newUpdateHarness(t, "bin/synchestra-channel", "old binary")
+	h.cfg.BinaryName = "synchestra-channel"
+	h.cfg.TagPrefix = "servers-"
+	h.cfg.CurrentVersion = "0.10.0"
+	h.setReleases(stableReleaseJSON("cli-v0.15.1", "servers-v0.15.1"))
+	h.addAsset("servers-v0.15.1", "0.15.1", "#!/bin/sh\necho \"synchestra-channel version 0.15.1\"\n")
+	// A decoy: same bare version, wrong product. If a pin of "0.15.1" ever
+	// matched this instead, the swap would install the wrong binary.
+	h.addAsset("cli-v0.15.1", "0.15.1", "#!/bin/sh\necho \"WRONG PRODUCT\"\n")
+
+	outcome, err := h.cfg.Update(context.Background(), Options{
+		PinnedVersion: "0.15.1",
+		Confirm:       func(string) (bool, error) { return true, nil },
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome.Target != "0.15.1" {
+		t.Errorf("Target = %q, want 0.15.1", outcome.Target)
+	}
+	got := h.targetBytes()
+	if strings.Contains(got, "WRONG PRODUCT") {
+		t.Fatal("the pin resolved to the OTHER product's release")
+	}
+	if !strings.Contains(got, "0.15.1") {
+		t.Errorf("target content = %q, does not look like the servers- product's own script", got)
+	}
+}
+
+// Dry run must report the exact URL a real run would fetch — verified here
+// by comparing DryRun's PlannedURL against the asset URL an actual run
+// requests for the identical multi-product scenario.
+func TestUpdate_DryRun_URLMatchesRealRunWithTagPrefix(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake binary not portable to windows")
+	}
+	h := newUpdateHarness(t, "bin/synchestra-channel", "old binary")
+	h.cfg.BinaryName = "synchestra-channel"
+	h.cfg.TagPrefix = "servers-"
+	h.cfg.CurrentVersion = "0.26.0"
+	h.setReleases(stableReleaseJSON("cli-v0.15.1", "servers-v0.26.1"))
+	h.addAsset("servers-v0.26.1", "0.26.1", "#!/bin/sh\necho \"synchestra-channel version 0.26.1\"\n")
+
+	dryOutcome, err := h.cfg.Update(context.Background(), Options{DryRun: true})
+	if err != nil {
+		t.Fatalf("unexpected error on dry run: %v", err)
+	}
+	if dryOutcome.PlannedURL == "" {
+		t.Fatal("PlannedURL is empty")
+	}
+
+	var gotAssetURL string
+	origDownloadURL := h.cfg.DownloadURL
+	first := true
+	h.cfg.DownloadURL = func(repo, tag, asset string) string {
+		u := origDownloadURL(repo, tag, asset)
+		if first {
+			gotAssetURL = u // the asset request is always the first DownloadURL call
+			first = false
+		}
+		return u
+	}
+
+	if _, err := h.cfg.Update(context.Background(), Options{Confirm: func(string) (bool, error) { return true, nil }}); err != nil {
+		t.Fatalf("unexpected error on real run: %v", err)
+	}
+	if gotAssetURL != dryOutcome.PlannedURL {
+		t.Errorf("real run fetched %q, dry run planned %q — must match", gotAssetURL, dryOutcome.PlannedURL)
+	}
+}
+
 // --- Configured undetermined placeholder feeds through Update's Result ---
 
 func TestUpdate_ConfiguredUndeterminedPlaceholder(t *testing.T) {

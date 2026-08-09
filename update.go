@@ -167,7 +167,7 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 			return Outcome{Detection: detection}, err
 		}
 		tag = resolvedTag
-		target = normalize(resolvedTag)
+		target = cfg.versionFromTag(resolvedTag)
 
 		result.Latest = target
 		if undetermined {
@@ -190,7 +190,7 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 			return Outcome{Detection: detection}, &Failure{Kind: KindReleaseLookup, Err: err}
 		}
 		tag = latestTag
-		target = normalize(latestTag)
+		target = cfg.versionFromTag(latestTag)
 		result.Latest = target
 
 		if undetermined {

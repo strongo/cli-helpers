@@ -3,6 +3,7 @@ package selfupdate
 import (
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // Platform identifies one OS/architecture pair a consumer publishes release
@@ -54,6 +55,11 @@ type Config struct {
 	// pairs (REQ: unsupported-platform). Empty means all platforms the host
 	// Go toolchain runs on are assumed supported.
 	SupportedPlatforms []Platform
+	// TagPrefix selects which releases belong to this binary when one
+	// repository publishes several products, e.g. "cli-" for tags like
+	// "cli-v1.2.3". Empty means every release belongs to this binary (the
+	// single-product default).
+	TagPrefix string
 	// VersionProbeArgs are the arguments run against the newly installed
 	// binary to confirm it reports the expected version after a swap
 	// (REQ: post-swap-version-check). Defaults to {"--version"}.
@@ -150,6 +156,18 @@ func (c Config) isUndetermined(v string) bool {
 		}
 	}
 	return false
+}
+
+// versionFromTag strips c.TagPrefix and then a leading "v" from a published
+// release tag, producing the bare version this package compares against
+// CurrentVersion and uses for asset/checksum naming. E.g. "cli-v0.15.1" with
+// TagPrefix "cli-" becomes "0.15.1". CurrentVersion is never prefixed — a
+// running binary reports its bare version regardless of how its releases are
+// tagged — so this is the one place a prefixed tag is translated into that
+// same shape. With an empty TagPrefix (the single-product default) this is
+// exactly normalize(tag), unchanged from before TagPrefix existed.
+func (c Config) versionFromTag(tag string) string {
+	return normalize(strings.TrimPrefix(tag, c.TagPrefix))
 }
 
 // platformSupported reports whether the host platform (goosName/goarchName —

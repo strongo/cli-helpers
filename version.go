@@ -59,7 +59,7 @@ func (c Config) Check(ctx context.Context) (CheckResult, error) {
 	if err != nil {
 		return CheckResult{}, &Failure{Kind: KindReleaseLookup, Err: err}
 	}
-	latest := normalize(latestTag)
+	latest := cfg.versionFromTag(latestTag)
 
 	if cfg.isUndetermined(cfg.CurrentVersion) {
 		return CheckResult{Current: cfg.CurrentVersion, Latest: latest, Verdict: Undetermined}, nil

@@ -140,6 +140,34 @@ func TestCheck_DefaultUndeterminedPlaceholder(t *testing.T) {
 	}
 }
 
+// The channel binary in a multi-product repository must report ITS OWN
+// version as latest, not another product's — a --check that names the wrong
+// product while still exiting clean is the exact failure mode TagPrefix
+// exists to prevent. Latest is reported bare (no product prefix), matching
+// the shape CurrentVersion is already in.
+func TestCheck_TagPrefixReportsOwnProductOnly(t *testing.T) {
+	body := `[
+		{"tag_name": "cli-v0.15.1", "prerelease": false, "draft": false},
+		{"tag_name": "servers-v0.26.1", "prerelease": false, "draft": false}
+	]`
+	srv := newReleasesServer(t, body)
+	cfg := Config{
+		Repository: "synchestra-io/synchestra-releases", CurrentVersion: "0.26.0",
+		TagPrefix: "servers-", ReleasesAPIURL: srv.URL, HTTPClient: srv.Client(),
+	}
+
+	got, err := cfg.Check(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Latest != "0.26.1" {
+		t.Fatalf("Latest = %q, want %q (the servers- product's own bare version, not cli-'s)", got.Latest, "0.26.1")
+	}
+	if got.Verdict != UpdateAvailable {
+		t.Fatalf("Verdict = %v, want UpdateAvailable", got.Verdict)
+	}
+}
+
 func TestCheck_ReleaseLookupFailureIsTypedFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "rate limited", http.StatusForbidden)

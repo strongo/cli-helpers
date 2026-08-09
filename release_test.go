@@ -90,6 +90,100 @@ func TestLatestStableTag_NoStableRelease(t *testing.T) {
 	}
 }
 
+// --- TagPrefix: multi-product repository filtering ---
+
+// The real synchestra-releases case: one repository, two products, the
+// product encoded as a tag prefix. Each binary's latest resolution must
+// ignore the other product's releases entirely, including when the other
+// product's release is newer (REQ: tag-prefix — latest-stable resolution
+// ignores non-matching tags).
+func TestLatestStableTag_FiltersByTagPrefix(t *testing.T) {
+	body := `[
+		{"tag_name": "servers-v0.26.1", "prerelease": false, "draft": false},
+		{"tag_name": "cli-v0.15.1", "prerelease": false, "draft": false},
+		{"tag_name": "cli-v0.14.0", "prerelease": false, "draft": false}
+	]`
+	srv := newReleasesServer(t, body)
+	cfg := testConfig(srv.URL)
+
+	cfg.TagPrefix = "cli-"
+	tag, err := cfg.latestStableTag(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tag != "cli-v0.15.1" {
+		t.Fatalf("latest stable tag = %q, want %q (must ignore the servers- product)", tag, "cli-v0.15.1")
+	}
+
+	cfg.TagPrefix = "servers-"
+	tag, err = cfg.latestStableTag(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tag != "servers-v0.26.1" {
+		t.Fatalf("latest stable tag = %q, want %q (must ignore the cli- product)", tag, "servers-v0.26.1")
+	}
+}
+
+// Prefix filtering and draft/prerelease filtering both apply: the newest
+// same-product release is a draft, so the next-newest same-product stable
+// release must win — never a newer OTHER product's release, and never the
+// draft.
+func TestLatestStableTag_PrefixAndDraftPrereleaseFilteringCombine(t *testing.T) {
+	body := `[
+		{"tag_name": "cli-v0.16.0-rc.1", "prerelease": true, "draft": false},
+		{"tag_name": "servers-v9.9.9", "prerelease": false, "draft": false},
+		{"tag_name": "cli-v0.15.1", "prerelease": false, "draft": true},
+		{"tag_name": "cli-v0.14.0", "prerelease": false, "draft": false}
+	]`
+	srv := newReleasesServer(t, body)
+	cfg := testConfig(srv.URL)
+	cfg.TagPrefix = "cli-"
+
+	tag, err := cfg.latestStableTag(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tag != "cli-v0.14.0" {
+		t.Fatalf("latest stable tag = %q, want %q", tag, "cli-v0.14.0")
+	}
+}
+
+// A TagPrefix that matches no release fails the same way "no stable release"
+// fails today, even though stable releases exist for another product.
+func TestLatestStableTag_TagPrefixMatchesNothing(t *testing.T) {
+	srv := newReleasesServer(t, `[{"tag_name":"servers-v0.26.1","prerelease":false,"draft":false}]`)
+	cfg := testConfig(srv.URL)
+	cfg.TagPrefix = "cli-"
+
+	_, err := cfg.latestStableTag(context.Background())
+	if err == nil {
+		t.Fatal("expected no-stable-release error when the prefix matches nothing, got nil")
+	}
+	if err.Error() != "no stable release found" {
+		t.Errorf("error = %q, want the same message the no-stable-release case uses today", err.Error())
+	}
+}
+
+// An empty TagPrefix (the single-product default) is exactly the pre-
+// TagPrefix behavior: every release belongs to this binary.
+func TestLatestStableTag_EmptyTagPrefixUnchanged(t *testing.T) {
+	body := `[
+		{"tag_name": "cli-v0.15.1", "prerelease": false, "draft": false},
+		{"tag_name": "v0.6.0", "prerelease": false, "draft": false}
+	]`
+	srv := newReleasesServer(t, body)
+	cfg := testConfig(srv.URL)
+
+	tag, err := cfg.latestStableTag(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tag != "cli-v0.15.1" {
+		t.Fatalf("latest stable tag = %q, want %q (newest release, prefix filtering is a no-op)", tag, "cli-v0.15.1")
+	}
+}
+
 // --- resolveTag (pinned) ---
 
 // A pin resolves ignoring a leading "v" on either side.
@@ -154,5 +248,87 @@ func TestResolveTag_ReleaseLookupFailureIsTyped(t *testing.T) {
 	}
 	if KindOf(err) != KindReleaseLookup {
 		t.Errorf("KindOf(err) = %v, want KindReleaseLookup", KindOf(err))
+	}
+}
+
+// --- resolveTag + TagPrefix ---
+
+// A bare-version pin resolves to the full prefixed tag for THIS product,
+// even though another product in the same repository publishes a release
+// carrying the exact same bare version (REQ: tag-prefix — a pin must never
+// resolve to another product's release).
+func TestResolveTag_PrefixedPinResolvesToFullTag(t *testing.T) {
+	body := `[
+		{"tag_name": "servers-v0.15.1", "prerelease": false, "draft": false},
+		{"tag_name": "cli-v0.15.1", "prerelease": false, "draft": false}
+	]`
+	srv := newReleasesServer(t, body)
+	cfg := testConfig(srv.URL)
+	cfg.TagPrefix = "cli-"
+
+	tag, err := cfg.resolveTag(context.Background(), "0.15.1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tag != "cli-v0.15.1" {
+		t.Fatalf("resolveTag(%q) = %q, want the cli- product's own tag %q", "0.15.1", tag, "cli-v0.15.1")
+	}
+
+	// The leading "v" is optional on a prefixed pin too.
+	tag, err = cfg.resolveTag(context.Background(), "v0.15.1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tag != "cli-v0.15.1" {
+		t.Fatalf("resolveTag(%q) = %q, want %q", "v0.15.1", tag, "cli-v0.15.1")
+	}
+}
+
+// The fully-qualified tag also resolves, without accidentally matching the
+// other product's release of the same bare version.
+func TestResolveTag_FullyQualifiedPrefixedTagResolves(t *testing.T) {
+	body := `[
+		{"tag_name": "servers-v0.15.1", "prerelease": false, "draft": false},
+		{"tag_name": "cli-v0.15.1", "prerelease": false, "draft": false}
+	]`
+	srv := newReleasesServer(t, body)
+	cfg := testConfig(srv.URL)
+	cfg.TagPrefix = "cli-"
+
+	tag, err := cfg.resolveTag(context.Background(), "cli-v0.15.1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tag != "cli-v0.15.1" {
+		t.Fatalf("resolveTag(%q) = %q, want %q", "cli-v0.15.1", tag, "cli-v0.15.1")
+	}
+}
+
+// A pin that only exists for another product must not resolve at all — it
+// is reported the same way a wholly unknown tag is (REQ: tag-prefix — never
+// resolve to another product's release).
+func TestResolveTag_PinDoesNotCrossProducts(t *testing.T) {
+	body := `[
+		{"tag_name": "servers-v0.26.1", "prerelease": false, "draft": false}
+	]`
+	srv := newReleasesServer(t, body)
+	cfg := testConfig(srv.URL)
+	cfg.TagPrefix = "cli-"
+
+	_, err := cfg.resolveTag(context.Background(), "0.26.1")
+	if err == nil {
+		t.Fatal("expected error: a servers- release must not satisfy a cli- pin, got nil")
+	}
+	if KindOf(err) != KindUnknownTag {
+		t.Errorf("KindOf(err) = %v, want KindUnknownTag", KindOf(err))
+	}
+
+	// Even the fully-qualified other product's tag must not resolve.
+	_, err = cfg.resolveTag(context.Background(), "servers-v0.26.1")
+	if err == nil {
+		t.Fatal("expected error: the fully-qualified servers- tag must not satisfy a cli- pin, got nil")
+	}
+	if KindOf(err) != KindUnknownTag {
+		t.Errorf("KindOf(err) = %v, want KindUnknownTag", KindOf(err))
 	}
 }
