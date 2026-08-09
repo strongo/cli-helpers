@@ -29,3 +29,12 @@ jobs:
       COVERALLS_REPO_TOKEN: ${{ secrets.COVERALLS_REPO_TOKEN }}
     with:
       code_coverage: true
+      # Version bumping and tagging belong to release.yml, which also builds
+      # the reference CLI's release artifacts. Leaving it on here too would
+      # give one push to main two independent bumpers racing for the next tag.
+      disable-version-bumping: true
+      # This module reached 100% on the commit that introduced it, and its
+      # whole purpose is replacing users' binaries — the one code path where an
+      # untested branch has no safe failure mode. The floor is the number, not
+      # a margin below it.
+      min_test_coverage_percent: 100
