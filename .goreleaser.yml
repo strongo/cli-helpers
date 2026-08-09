@@ -1,0 +1,50 @@
+version: 2
+
+project_name: selfupdate
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: selfupdate
+    main: ./cmd/selfupdate
+    binary: selfupdate
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+
+# Plain GitHub release archives only — this module owns no Homebrew tap,
+# Scoop bucket, or WinGet fork, so there is no homebrew_casks/scoops/winget
+# block here and no GORELEASER_GITHUB_TOKEN is needed to release it (see
+# .github/workflows/release.yml). The naming below is also this package's
+# own default AssetName/ChecksumsName convention (see config.go), so the
+# reference CLI in cmd/selfupdate needs no naming overrides to update itself.
+archives:
+  - id: selfupdate
+    ids:
+      - selfupdate
+    name_template: "selfupdate_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+
+checksum:
+  name_template: "selfupdate_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch

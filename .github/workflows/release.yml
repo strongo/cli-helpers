@@ -1,0 +1,41 @@
+name: Release
+
+# Continuous delivery: every merge to `main` runs the shared strongo/cicd
+# release workflow, which bumps the version from conventional commits and
+# releases it in one run. Pushing an explicit `vX.Y.Z` tag also works and
+# releases that exact version (the shared workflow skips the bump on a tag
+# ref).
+#
+# This module publishes plain GitHub release archives only (see
+# .goreleaser.yml) — no Homebrew cask, Scoop bucket, or WinGet manifest — so
+# none of the shared workflow's optional cross-repo publish secrets
+# (GORELEASER_GITHUB_TOKEN, WINGET_GITHUB_TOKEN, AUR_SSH_PRIVATE_KEY) are
+# needed: the default GITHUB_TOKEN this job already has under
+# `permissions: contents: write` is sufficient for GoReleaser to create the
+# release itself.
+#
+# selfupdate is pre-1.0: allow_major_version_bump stays false, so a stray
+# `feat!:` is capped to a minor bump instead of jumping to v1.0.0.
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    uses: strongo/cicd/.github/workflows/release.yml@v1
+    permissions:
+      contents: write
+    with:
+      allow_major_version_bump: false

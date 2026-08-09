@@ -1,0 +1,7 @@
+# SpecScore Repo Config Schema: https://specscore.md/repo-config
+
+project:
+    title: selfupdate — shared self-update for Go CLIs
+    host: github.com
+    org: strongo
+    repo: selfupdate
