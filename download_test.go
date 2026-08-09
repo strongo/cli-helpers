@@ -338,6 +338,155 @@ func TestFetchBytes_DoError(t *testing.T) {
 	}
 }
 
+// A response whose declared Content-Length exceeds what the handler actually
+// writes forces the net/http client to fail the body read mid-stream (the
+// server closes the connection once it detects it wrote less than promised),
+// exercising fetchBytes' own io.ReadAll error branch distinctly from a
+// request-build or transport (Do) error.
+func TestFetchBytes_BodyReadError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("short body"))
+	}))
+	t.Cleanup(srv.Close)
+
+	if _, _, err := fetchBytes(context.Background(), srv.Client(), srv.URL); err == nil {
+		t.Fatal("expected a body read error from the truncated response, got nil")
+	}
+}
+
+// errTransport is an http.RoundTripper stub that always fails without
+// opening any real connection, so downloadAndVerify's OWN fetchBytes-error
+// branches (as opposed to a non-200 status) can be exercised deterministically
+// and without touching the network at all.
+type errTransport struct{ err error }
+
+func (rt errTransport) RoundTrip(*http.Request) (*http.Response, error) { return nil, rt.err }
+
+// downloadAndVerify's asset request is the FIRST fetchBytes call it makes;
+// a transport that always errors therefore fails on that first call.
+func TestDownloadAndVerify_AssetTransportError(t *testing.T) {
+	cfg := Config{
+		BinaryName:  "wb",
+		Repository:  "acme/wb",
+		HTTPClient:  &http.Client{Transport: errTransport{err: errors.New("boom")}},
+		DownloadURL: func(_, tag, asset string) string { return "http://unused.test/" + tag + "/" + asset },
+	}.withDefaults()
+
+	_, err := cfg.downloadAndVerify(context.Background(), "v1.0.0", "1.0.0")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if KindOf(err) != KindDownload {
+		t.Errorf("KindOf(err) = %v, want KindDownload", KindOf(err))
+	}
+}
+
+// downloadAndVerify's checksums request is a SEPARATE fetchBytes call from
+// the asset request. DownloadURL routes the asset name to a real server and
+// the checksums name to an address nothing listens on, so the asset fetch
+// succeeds and the checksums fetch fails with a transport (not status) error.
+func TestDownloadAndVerify_ChecksumsTransportError(t *testing.T) {
+	version := "1.2.3"
+	tag := "v1.2.3"
+	asset := defaultAssetName("wb", version, "linux", "amd64")
+	archive := makeTarGz(t, "wb", []byte("bytes"))
+	checksumsFile := defaultChecksumsName("wb", version)
+
+	srv, files := servePerTagRelease(t)
+	files["/"+tag+"/"+asset] = archive
+
+	origOS, origArch := goosName, goarchName
+	goosName, goarchName = "linux", "amd64"
+	t.Cleanup(func() { goosName, goarchName = origOS, origArch })
+
+	cfg := Config{
+		BinaryName: "wb", Repository: "acme/wb", HTTPClient: srv.Client(),
+		DownloadURL: func(_, tag, name string) string {
+			if name == checksumsFile {
+				return "http://127.0.0.1:1/" + tag + "/" + name
+			}
+			return srv.URL + "/" + tag + "/" + name
+		},
+	}.withDefaults()
+
+	_, err := cfg.downloadAndVerify(context.Background(), tag, version)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if KindOf(err) != KindDownload {
+		t.Errorf("KindOf(err) = %v, want KindDownload", KindOf(err))
+	}
+}
+
+// A checksums fetch that fails with a non-200, non-404 status (e.g. a 500)
+// is KindDownload, distinct from both TestDownloadAndVerify_
+// ChecksumsNotFoundIsUnknownTag (404) and the asset-side equivalent
+// TestDownloadAndVerify_AssetServerErrorIsDownload.
+func TestDownloadAndVerify_ChecksumsServerErrorIsDownload(t *testing.T) {
+	version := "1.2.3"
+	tag := "v1.2.3"
+	asset := defaultAssetName("wb", version, "linux", "amd64")
+	archive := makeTarGz(t, "wb", []byte("bytes"))
+	checksumsFile := defaultChecksumsName("wb", version)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, asset):
+			_, _ = w.Write(archive)
+		case strings.HasSuffix(r.URL.Path, checksumsFile):
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	origOS, origArch := goosName, goarchName
+	goosName, goarchName = "linux", "amd64"
+	t.Cleanup(func() { goosName, goarchName = origOS, origArch })
+
+	cfg := Config{BinaryName: "wb", Repository: "acme/wb", HTTPClient: srv.Client(), DownloadURL: perTagDownloadURL(srv.URL)}.withDefaults()
+	_, err := cfg.downloadAndVerify(context.Background(), tag, version)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if KindOf(err) != KindDownload {
+		t.Errorf("KindOf(err) = %v, want KindDownload", KindOf(err))
+	}
+}
+
+// A checksum that verifies correctly against corrupt archive bytes still
+// must fail — at extraction, not verification — proving downloadAndVerify's
+// own post-verification extractBinary error branch (KindUnexpected) is
+// reachable even though checksum verification (which runs first, per
+// REQ: checksum-before-extract) already passed.
+func TestDownloadAndVerify_ExtractionErrorAfterChecksumVerified(t *testing.T) {
+	version := "1.2.3"
+	tag := "v1.2.3"
+	asset := defaultAssetName("wb", version, "linux", "amd64")
+	garbage := []byte("not a valid gzip archive at all")
+	checksums := fmt.Sprintf("%s  %s\n", sha256Hex(garbage), asset)
+
+	srv, files := servePerTagRelease(t)
+	files["/"+tag+"/"+asset] = garbage
+	files["/"+tag+"/"+defaultChecksumsName("wb", version)] = []byte(checksums)
+
+	origOS, origArch := goosName, goarchName
+	goosName, goarchName = "linux", "amd64"
+	t.Cleanup(func() { goosName, goarchName = origOS, origArch })
+
+	cfg := Config{BinaryName: "wb", Repository: "acme/wb", HTTPClient: srv.Client(), DownloadURL: perTagDownloadURL(srv.URL)}.withDefaults()
+	_, err := cfg.downloadAndVerify(context.Background(), tag, version)
+	if err == nil {
+		t.Fatal("expected extraction error, got nil")
+	}
+	if KindOf(err) != KindUnexpected {
+		t.Errorf("KindOf(err) = %v, want KindUnexpected", KindOf(err))
+	}
+}
+
 // --- findChecksum ---
 
 func TestFindChecksum_SkipsBlankAndMalformedLines(t *testing.T) {

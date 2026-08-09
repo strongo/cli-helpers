@@ -48,11 +48,27 @@ const repository = "strongo/selfupdate"
 // ("selfupdate_<version>_<os>_<arch>.tar.gz").
 const binaryName = "selfupdate"
 
+// osExit is a seam over os.Exit so main can be exercised in-process by a
+// test (which sets os.Args, stubs osExit to a recorder instead of a real
+// process termination, calls main(), and restores both) without spawning a
+// subprocess or needing GOCOVERDIR machinery.
+var osExit = os.Exit
+
 func main() {
+	osExit(run())
+}
+
+// run executes the root command and returns the process exit code this
+// module has always used: 0 on success, 1 if the command returned an error
+// (also printed to stderr, exactly as the previous inline main() body did).
+// It is a plain function, not inlined into main, purely so main's own body
+// is a single trivial statement a test can drive via the osExit seam.
+func run() int {
 	if err := newRootCmd().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err) //nolint:errcheck
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 // buildConfig returns this CLI's own selfupdate.Config. It is a plain
@@ -94,6 +110,14 @@ func buildConfig() selfupdate.Config {
 	}
 }
 
+// buildConfigFunc is a seam over buildConfig so a test can point newRootCmd
+// at a Config with a local/fake ReleasesAPIURL and HTTPClient instead of
+// this CLI's own real GitHub repository — the only way to exercise the
+// subcommand's real (non-explain-path) RunE from this package's own tests
+// without touching the network (REQ: no-network-in-tests). Only tests
+// override this.
+var buildConfigFunc = buildConfig
+
 // newRootCmd builds the root command: a bare version-reporting root (via
 // cobra's own --version flag) plus the self-update subcommand built
 // entirely through the public API, plus --explain-path, a reference-CLI-
@@ -110,7 +134,7 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 	}
 
-	cfg := buildConfig()
+	cfg := buildConfigFunc()
 	update := cobracmd.New(cfg, cobracmd.CommandOptions{
 		Aliases:     []string{"update"},
 		Errors:      passthroughErrors{},

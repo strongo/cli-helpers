@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"net/http"
+	"os"
 	"strings"
 	"testing"
 
@@ -139,6 +141,81 @@ func TestExplainPath_EmptyFlagFallsThroughToUpdate(t *testing.T) {
 	}
 	if p, _ := sub.Flags().GetString("explain-path"); p != "" {
 		t.Errorf("--explain-path default = %q, want empty", p)
+	}
+}
+
+// Without --explain-path, the subcommand's real RunE (built entirely by
+// cobracmd.New) runs. buildConfigFunc is overridden so this exercises that
+// real code path — including the actual self-update Check logic — against a
+// loopback address that refuses the connection immediately, never the real
+// network and never this CLI's own real repository (REQ: no-network-in-tests).
+func TestNewRootCmd_FallthroughReachesRealSelfUpdateLogic(t *testing.T) {
+	origBuildConfig := buildConfigFunc
+	buildConfigFunc = func() selfupdate.Config {
+		return selfupdate.Config{
+			BinaryName:     binaryName,
+			Repository:     repository,
+			CurrentVersion: "1.0.0",
+			ReleasesAPIURL: "http://127.0.0.1:1", // nothing listens here: fails fast, touches no real network
+			HTTPClient:     http.DefaultClient,
+		}
+	}
+	t.Cleanup(func() { buildConfigFunc = origBuildConfig })
+
+	root := newRootCmd()
+	root.SetArgs([]string{"self-update", "--check"})
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected an error from the unreachable releases endpoint, got nil")
+	}
+	if selfupdate.KindOf(err) != selfupdate.KindReleaseLookup {
+		t.Errorf("KindOf(err) = %v, want KindReleaseLookup (proves the real cobracmd RunE ran, not --explain-path)", selfupdate.KindOf(err))
+	}
+}
+
+// main() is exercised in-process via the osExit seam: os.Args is set, osExit
+// is stubbed to a recorder instead of really terminating the process, and
+// both are restored on cleanup (per the documented technique for covering
+// main() without a subprocess or GOCOVERDIR).
+func TestMain_Success(t *testing.T) {
+	origArgs := os.Args
+	origExit := osExit
+	var exited bool
+	var gotCode int
+	osExit = func(code int) { exited = true; gotCode = code }
+	t.Cleanup(func() { os.Args = origArgs; osExit = origExit })
+
+	// A safe, network-free, real-binary-free invocation: --explain-path only
+	// classifies a string, per explainPath's own doc comment.
+	os.Args = []string{"selfupdate", "self-update", "--explain-path", "/usr/local/bin/selfupdate"}
+	main()
+
+	if !exited {
+		t.Fatal("osExit was never called")
+	}
+	if gotCode != 0 {
+		t.Errorf("exit code = %d, want 0 for a successful command", gotCode)
+	}
+}
+
+func TestMain_Failure(t *testing.T) {
+	origArgs := os.Args
+	origExit := osExit
+	var exited bool
+	var gotCode int
+	osExit = func(code int) { exited = true; gotCode = code }
+	t.Cleanup(func() { os.Args = origArgs; osExit = origExit })
+
+	// An unrecognized flag fails during cobra's own flag parsing, before any
+	// RunE (and therefore before any I/O) is reached.
+	os.Args = []string{"selfupdate", "self-update", "--this-flag-does-not-exist"}
+	main()
+
+	if !exited {
+		t.Fatal("osExit was never called")
+	}
+	if gotCode != 1 {
+		t.Errorf("exit code = %d, want 1 for a failed command", gotCode)
 	}
 }
 

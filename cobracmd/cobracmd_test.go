@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -158,6 +161,47 @@ func withStubUpdate(t *testing.T, capture *selfupdate.Options, outcome selfupdat
 	t.Cleanup(func() { updateFunc = prev })
 }
 
+// checkFunc and updateFunc default to calling cfg.Check/cfg.Update directly;
+// every other test in this file stubs them via withStubCheck/withStubUpdate,
+// which never exercises those default closures themselves. These two tests
+// deliberately do NOT stub them, so the real default bodies run — against a
+// local httptest.Server (never the real network) for Check, and against a
+// Config whose release endpoint is a loopback address nothing listens on
+// (so Update fails fast, before any write) for Update.
+
+func TestCheckFunc_RealDefaultCallsConfigCheck(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"tag_name":"v1.0.0","prerelease":false,"draft":false}]`))
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := selfupdate.Config{
+		BinaryName: "tool", Repository: "acme/tool", CurrentVersion: "1.0.0",
+		ReleasesAPIURL: srv.URL, HTTPClient: srv.Client(),
+	}
+	cmd := New(cfg, CommandOptions{})
+	out, _, err := runCmd(t, cmd, "--check")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "up to date") {
+		t.Errorf("stdout %q does not report up to date", out)
+	}
+}
+
+func TestUpdateFunc_RealDefaultCallsConfigUpdate(t *testing.T) {
+	cfg := selfupdate.Config{
+		BinaryName: "tool", Repository: "acme/tool", CurrentVersion: "1.0.0",
+		ReleasesAPIURL: "http://127.0.0.1:1", // nothing listens here: fails fast, no real network
+		HTTPClient:     http.DefaultClient,
+	}
+	cmd := New(cfg, CommandOptions{Interactive: func() bool { return false }})
+	_, _, err := runCmd(t, cmd, "--yes")
+	if err == nil {
+		t.Fatal("expected an error (ambiguous test-binary install or an unreachable release endpoint), got nil")
+	}
+}
+
 // --- --check: two-contract coexistence (AC: two-cli-contracts-coexist) ---
 
 func TestCheck_UpToDate_TextAndExitCode(t *testing.T) {
@@ -258,6 +302,27 @@ func TestCheck_Failure_MapperReceivesIt(t *testing.T) {
 	ec, ok := err.(exitCoder)
 	if !ok || ec.ExitCode() != 4 {
 		t.Errorf("error = %v, want specscore-style general failure code 4", err)
+	}
+}
+
+// errWriter is an io.Writer stub whose Write always fails, used to exercise
+// the error-return branches that only trigger when writing to the host's
+// own io.Writer fails (e.g. a closed pipe or a full disk on the real CLI's
+// stdout).
+type errWriter struct{ err error }
+
+func (w errWriter) Write([]byte) (int, error) { return 0, w.err }
+
+// runCheck's --format json branch propagates a failing writer's error
+// instead of swallowing it.
+func TestRunCheck_JSONEncodeWriteError(t *testing.T) {
+	withStubCheck(t, selfupdate.CheckResult{Current: "1.0.0", Latest: "1.0.0", Verdict: selfupdate.UpToDate}, nil)
+	cmd := New(testConfig(), CommandOptions{JSONFormat: true})
+	cmd.SetOut(errWriter{err: errors.New("write fail")})
+	cmd.SetArgs([]string{"--check", "--format", "json"})
+
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected the writer's error to propagate, got nil")
 	}
 }
 
@@ -419,6 +484,28 @@ func TestUpdate_AmbiguousPrintsGuidanceAndMapsFailure(t *testing.T) {
 	}
 }
 
+// printAmbiguousGuidance's per-manager suffix loop only runs when
+// cfg.Managers is non-empty — TestUpdate_AmbiguousPrintsGuidanceAndMapsFailure
+// above uses a Manager-less testConfig(), so it never reaches that loop body.
+func TestUpdate_AmbiguousPrintsGuidanceWithManagers(t *testing.T) {
+	ambErr := &selfupdate.Failure{Kind: selfupdate.KindAmbiguous, Path: "/opt/x/tool", Err: errors.New("ambiguous")}
+	withStubUpdate(t, nil, selfupdate.Outcome{}, ambErr)
+
+	cfg := testConfig()
+	cfg.Managers = []selfupdate.Manager{
+		selfupdate.Homebrew("brew upgrade tool"),
+		selfupdate.Scoop("scoop update tool"),
+	}
+	cmd := New(cfg, CommandOptions{})
+	out, _, err := runCmd(t, cmd)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(out, "brew upgrade tool") || !strings.Contains(out, "scoop update tool") {
+		t.Errorf("stdout %q does not list every configured manager's upgrade command", out)
+	}
+}
+
 func TestUpdate_AlreadyCurrentText(t *testing.T) {
 	withStubUpdate(t, nil, selfupdate.Outcome{
 		Action: selfupdate.ActionAlreadyCurrent,
@@ -466,6 +553,28 @@ func TestUpdate_PlannedDryRunText(t *testing.T) {
 	}
 	if !strings.Contains(out, "tool_1.1.0_linux_amd64.tar.gz") {
 		t.Errorf("stdout %q does not contain the planned asset URL", out)
+	}
+}
+
+// The ActionPlanned case's verb switches to "downgrade" when Outcome.
+// Downgrade is set — TestUpdate_PlannedDryRunText above only covers the
+// (default) "update" verb.
+func TestUpdate_PlannedDryRunDowngradeText(t *testing.T) {
+	withStubUpdate(t, nil, selfupdate.Outcome{
+		Action:     selfupdate.ActionPlanned,
+		Result:     selfupdate.CheckResult{Current: "1.1.0", Latest: "1.0.0"},
+		Target:     "1.0.0",
+		Downgrade:  true,
+		PlannedURL: "https://github.com/acme/tool/releases/download/v1.0.0/tool_1.0.0_linux_amd64.tar.gz",
+	}, nil)
+
+	cmd := New(testConfig(), CommandOptions{})
+	out, _, err := runCmd(t, cmd, "--dry-run")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "dry run: would downgrade") {
+		t.Errorf("stdout %q does not say 'dry run: would downgrade'", out)
 	}
 }
 
@@ -548,6 +657,27 @@ func TestUpdate_NilErrorMapperFailurePassthrough(t *testing.T) {
 // test runner's stdin, so this only asserts it runs without panicking.
 func TestDefaultIsInteractive_Runs(t *testing.T) {
 	_ = defaultIsInteractive()
+}
+
+// defaultIsInteractive's os.Stdin.Stat() error branch is forced by pointing
+// os.Stdin at an already-closed file: Stat on a closed *os.File reliably
+// returns an error, without needing a stat seam or any real terminal state.
+func TestDefaultIsInteractive_StatError(t *testing.T) {
+	origStdin := os.Stdin
+	t.Cleanup(func() { os.Stdin = origStdin })
+
+	f, err := os.CreateTemp(t.TempDir(), "stdin-stand-in-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = f
+
+	if defaultIsInteractive() {
+		t.Error("defaultIsInteractive() = true, want false when Stat() errors")
+	}
 }
 
 // JSON formatting for every Action, including the redirected/aborted/
