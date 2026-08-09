@@ -229,6 +229,18 @@ guarantee nothing; a classification failure MUST NOT fail the check, which
 still reports the version comparison. An up-to-date result MUST NOT print a
 next step, because there is nothing to do.
 
+#### REQ: framework-neutral-cli-helpers
+
+The prompting, refusal, and output-formatting a consuming CLI needs — the
+confirmation gate including the non-interactive refusal, the terminal check,
+the text and machine-readable writers, and the next-step and ambiguous-install
+guidance — MUST be reusable without any command framework. A CLI that uses no
+framework at all MUST be able to reach the same behavior a framework adapter
+gives, rather than reimplementing it; that reimplementation is precisely the
+duplication this package exists to remove, and it is where the subtle rules
+live (a character device is not a terminal; an empty read is a refusal, not a
+decline).
+
 #### REQ: cobra-adapter-optional
 
 The package MUST provide an optional adapter that builds a ready-made
@@ -351,7 +363,7 @@ behavior above is inherited, not restated.
 
 ### AC: two-cli-contracts-coexist
 
-**Requirements:** self-update#req:consumer-configured-identity, self-update#req:host-owned-exit-codes, self-update#req:no-io-side-effects-in-core, self-update#req:check-states-the-next-step, self-update#req:cobra-adapter-optional, self-update#req:no-network-in-tests
+**Requirements:** self-update#req:consumer-configured-identity, self-update#req:host-owned-exit-codes, self-update#req:no-io-side-effects-in-core, self-update#req:check-states-the-next-step, self-update#req:framework-neutral-cli-helpers, self-update#req:cobra-adapter-optional, self-update#req:no-network-in-tests
 
 **Given** two consumers whose exit-code contracts disagree — one reserving a dedicated code for "update available", one folding it into a general findings code
 **When** both build their command from this package
