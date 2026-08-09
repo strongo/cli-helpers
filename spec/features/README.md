@@ -10,7 +10,7 @@ Feature specifications for this project.
 
 | Feature | Status | Description |
 |---------|--------|-------------|
-| [Self-Update Library](self-update/README.md) | Implementing | `github.com/strongo/selfupdate` lets any Go CLI update its own binary in place. |
+| [Self-Update Library](self-update/README.md) | Stable | `github.com/strongo/selfupdate` lets any Go CLI update its own binary in place. |
 
 ## Open Questions
 

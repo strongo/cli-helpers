@@ -1,12 +1,12 @@
 ---
 format: https://specscore.md/feature-specification
-status: Implementing
+status: Stable
 ---
 
 # Feature: Self-Update Library
 
 > [SpecScore.**Studio**](https://specscore.studio): | [Explore](https://specscore.studio/app/github.com/strongo/selfupdate/spec/features/self-update?op=explore) | [Edit](https://specscore.studio/app/github.com/strongo/selfupdate/spec/features/self-update?op=edit) | [Ask question](https://specscore.studio/app/github.com/strongo/selfupdate/spec/features/self-update?op=ask) | [Request change](https://specscore.studio/app/github.com/strongo/selfupdate/spec/features/self-update?op=request-change) |
-**Status:** Implementing
+**Status:** Stable
 **Source Ideas:** —
 
 ## Summary
