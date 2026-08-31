@@ -134,23 +134,18 @@ var buildConfigFunc = buildConfig
 // subcommand's own RunE logic.
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:     binaryName,
-		Short:   "selfupdate — reference CLI for github.com/strongo/selfupdate",
-		Version: info.Short(),
+		Use:   binaryName,
+		Short: "selfupdate — reference CLI for github.com/strongo/selfupdate",
 		// main() prints the returned error itself; cobra's own default
 		// error/usage printing would otherwise duplicate it.
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
-	// This repo does not use charm.land/fang (github.com/charmbracelet/fang
-	// / charm.land/fang), so buildinfo/cobracmd's Wire (which returns
-	// []fang.Option) does not apply here. Wire it by hand instead:
-	// VersionCommand for the `version` subcommand, plus cobra's own
-	// SetVersionTemplate so --version prints exactly info.Short() — cobra's
-	// default template ("<name> version <version>\n") would otherwise
-	// decorate it.
-	root.AddCommand(buildinfocobracmd.VersionCommand(info))
-	root.SetVersionTemplate("{{.Version}}\n")
+	// WireCobra sets root.Version, the `version` subcommand, and the version
+	// template in one call — buildinfo v0.2.0's cobracmd package is fang-free,
+	// so this no longer needs the hand-rolled wiring a fang-based Wire would
+	// otherwise require.
+	buildinfocobracmd.WireCobra(root, info)
 
 	cfg := buildConfigFunc()
 	update := cobracmd.New(cfg, cobracmd.CommandOptions{
