@@ -20,7 +20,9 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      - -X main.version={{ .Version }}
+      - -X github.com/strongo/buildinfo.version={{ .Version }}
+      - -X github.com/strongo/buildinfo.commit={{ .FullCommit }}
+      - -X github.com/strongo/buildinfo.date={{ .Date }}
 
 # Plain GitHub release archives only — this module owns no Homebrew tap,
 # Scoop bucket, or WinGet fork, so there is no homebrew_casks/scoops/winget
