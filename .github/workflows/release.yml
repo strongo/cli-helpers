@@ -37,7 +37,7 @@ jobs:
     # Pinned to an exact tag. The moving @v1 tag has been retired: it drifted
     # 14 patch releases behind while still accepting newer inputs, so a
     # configured release gate silently did nothing.
-    uses: strongo/cicd/.github/workflows/release.yml@v1.14.15
+    uses: strongo/cicd/.github/workflows/release.yml@v1.14.17
     permissions:
       contents: write
     with:
