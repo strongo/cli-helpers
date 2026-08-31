@@ -20,21 +20,24 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/strongo/buildinfo"
+	buildinfocobracmd "github.com/strongo/buildinfo/cobracmd"
+
 	"github.com/strongo/selfupdate"
 	"github.com/strongo/selfupdate/cobracmd"
 )
 
-// version is overridden at link time by the release build
-// (-ldflags "-X main.version=..."; see .goreleaser.yml). An unstamped local
-// build keeps the undeterminedVersion placeholder, so `selfupdate --version`
-// and `selfupdate self-update --check` both honestly report "this build
-// doesn't know its own version" instead of pretending to be a release
-// (REQ: reference-cli-self-hosting).
-var version = undeterminedVersion
-
-// undeterminedVersion is the placeholder CurrentVersion this CLI declares as
-// its one UndeterminedVersions entry.
-const undeterminedVersion = "undetermined"
+// info is this binary's own resolved build identity — version, commit and
+// date — stamped at link time via -X github.com/strongo/buildinfo.{version,
+// commit,date}=... (see .goreleaser.yml) or, for an unstamped local build
+// (`go build`/`go run`/`go test` with no -ldflags), falling back to Go's own
+// runtime/debug.ReadBuildInfo(), which never panics and degrades to the
+// "dev" placeholder instead of pretending to be a release. Resolving it
+// once, package-level, is what keeps the root --version flag, the `version`
+// subcommand, and buildConfig's CurrentVersion from being able to
+// independently drift the way a hand-rolled version command elsewhere in
+// the fleet did (REQ: reference-cli-self-hosting).
+var info = buildinfo.Get(binaryName)
 
 // repository is this module's own GitHub repository: the reference CLI
 // updates itself from the same releases the package's default AssetName/
@@ -76,10 +79,15 @@ func run() int {
 // directly without constructing a command or touching any I/O.
 func buildConfig() selfupdate.Config {
 	return selfupdate.Config{
-		BinaryName:           binaryName,
-		Repository:           repository,
-		CurrentVersion:       version,
-		UndeterminedVersions: []string{undeterminedVersion},
+		BinaryName:     binaryName,
+		Repository:     repository,
+		CurrentVersion: info.Version,
+		// UndeterminedVersions is left unset deliberately: Config's own
+		// EnsureDefaults defaults it to []string{"dev"}, which is exactly
+		// the placeholder buildinfo.Get returns for an unstamped build (see
+		// github.com/strongo/buildinfo's unknownVersion) — one fewer literal
+		// to keep in sync between the two packages.
+		//
 		// These three managers are registered purely so --explain-path has
 		// something realistic to classify against layouts this machine
 		// doesn't have (REQ: reference-cli-inspection) — this binary is
@@ -119,20 +127,30 @@ func buildConfig() selfupdate.Config {
 var buildConfigFunc = buildConfig
 
 // newRootCmd builds the root command: a bare version-reporting root (via
-// cobra's own --version flag) plus the self-update subcommand built
-// entirely through the public API, plus --explain-path, a reference-CLI-
-// only inspection flag layered on top without touching the subcommand's
-// own RunE logic.
+// cobra's own --version flag, unified with the `version` subcommand through
+// github.com/strongo/buildinfo/cobracmd) plus the self-update subcommand
+// built entirely through the public API, plus --explain-path, a
+// reference-CLI-only inspection flag layered on top without touching the
+// subcommand's own RunE logic.
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:     binaryName,
 		Short:   "selfupdate — reference CLI for github.com/strongo/selfupdate",
-		Version: version,
+		Version: info.Short(),
 		// main() prints the returned error itself; cobra's own default
 		// error/usage printing would otherwise duplicate it.
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
+	// This repo does not use charm.land/fang (github.com/charmbracelet/fang
+	// / charm.land/fang), so buildinfo/cobracmd's Wire (which returns
+	// []fang.Option) does not apply here. Wire it by hand instead:
+	// VersionCommand for the `version` subcommand, plus cobra's own
+	// SetVersionTemplate so --version prints exactly info.Short() — cobra's
+	// default template ("<name> version <version>\n") would otherwise
+	// decorate it.
+	root.AddCommand(buildinfocobracmd.VersionCommand(info))
+	root.SetVersionTemplate("{{.Version}}\n")
 
 	cfg := buildConfigFunc()
 	update := cobracmd.New(cfg, cobracmd.CommandOptions{
