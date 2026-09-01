@@ -3,8 +3,9 @@
 `github.com/strongo/selfupdate` lets a Go CLI update its own binary in
 place — safely. It decides how the running binary was installed before it
 touches anything: a package-manager-owned install (Homebrew, Scoop, WinGet)
-is never overwritten, only redirected to that manager's own upgrade command;
-a manual install (a release archive someone unpacked, or a `go install`
+is never overwritten directly. It is redirected to that manager's own upgrade
+command by default, or can explicitly delegate to structured manager argv; a
+manual install (a release archive someone unpacked, or a `go install`
 target) is downloaded, sha256-verified against the release's own checksums,
 and swapped in atomically. Everything specific to one CLI — its identity,
 its managers, its naming conventions, its exit codes — is supplied by the
@@ -17,12 +18,13 @@ repository's GitHub releases using nothing but the public API below).
 
 ## Safety guarantees
 
-- **A managed install is redirected, never overwritten.** `Classify`
+- **A managed install is never overwritten directly.** `Classify`
   resolves symlinks first (a Homebrew cask shim usually is one) and checks
-  the result against each configured `Manager`'s path markers. A match
-  routes to `ActionRedirected` under every option combination — including an
-  explicit version pin and a skipped confirmation — before any download or
-  write is even considered.
+  the result against each configured `Manager`'s path markers. A match routes
+  to `ActionRedirected` unless the consumer explicitly configured an
+  executable and argv. Executable mode confirms and invokes the manager
+  without a shell; it still never downloads or writes the managed binary
+  itself, and it refuses release pins the manager cannot guarantee.
 - **An unrecognized install is never treated as safe to overwrite.** A path
   that matches neither a manager nor a plausible manual location (`go/bin`,
   or directly inside a `bin` directory) is `Ambiguous`, not `Manual`.
@@ -78,7 +80,8 @@ func newSelfUpdateCommand() *cobra.Command {
 		// "unknown" instead.
 		UndeterminedVersions: []string{"unknown"},
 		Managers: []selfupdate.Manager{
-			selfupdate.Homebrew("brew upgrade --cask wb"),
+			selfupdate.Homebrew("brew upgrade --cask wb").
+				WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
 		},
 		SupportedPlatforms: []selfupdate.Platform{
 			{GOOS: "darwin", GOARCH: "amd64"},

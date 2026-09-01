@@ -146,9 +146,9 @@ func New(cfg selfupdate.Config, opts CommandOptions) *cobra.Command {
 	return cmd
 }
 
-// runUpdate handles every non-check invocation: the managed redirect, the
-// already-current no-op, a dry run, a declined confirmation, and an actual
-// swap. The confirmation callback and every line it, and the outcome, print
+// runUpdate handles every non-check invocation: a managed redirect or manager
+// command, the already-current no-op, a dry run, a declined confirmation, and
+// an actual swap. The confirmation callback and every line it, and the outcome, print
 // are cliui's — this function is only flag parsing and dispatch.
 func runUpdate(cmd *cobra.Command, cfg selfupdate.Config, opts CommandOptions, format string) error {
 	yes, _ := cmd.Flags().GetBool("yes")
@@ -157,9 +157,15 @@ func runUpdate(cmd *cobra.Command, cfg selfupdate.Config, opts CommandOptions, f
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 
 	out := cmd.OutOrStdout()
+	interactionOut := out
+	if format == "json" {
+		// Keep stdout valid JSON while still streaming prompts and package-
+		// manager progress to the caller's stderr.
+		interactionOut = cmd.ErrOrStderr()
+	}
 	confirm := cliui.Confirm(cliui.ConfirmOptions{
 		In:          cmd.InOrStdin(),
-		Out:         out,
+		Out:         interactionOut,
 		Yes:         yes,
 		Interactive: opts.Interactive,
 	})
@@ -169,6 +175,8 @@ func runUpdate(cmd *cobra.Command, cfg selfupdate.Config, opts CommandOptions, f
 		AllowDowngrade: allowDowngrade,
 		DryRun:         dryRun,
 		Confirm:        confirm,
+		RunManaged:     cliui.ManagedCommandRunner(cmd.InOrStdin(), interactionOut, cmd.ErrOrStderr()),
+		VerifyManaged:  cliui.VerifyManagedBinary,
 	})
 	if err != nil {
 		if selfupdate.KindOf(err) == selfupdate.KindAmbiguous {

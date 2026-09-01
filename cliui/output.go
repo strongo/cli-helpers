@@ -14,12 +14,13 @@ import (
 // caller learns an update exists but not whether this install may be
 // replaced at all.
 type checkJSON struct {
-	Current        string `json:"current"`
-	Latest         string `json:"latest"`
-	Verdict        string `json:"verdict"`
-	InstallMethod  string `json:"install_method,omitempty"`
-	Manager        string `json:"manager,omitempty"`
-	UpgradeCommand string `json:"upgrade_command,omitempty"`
+	Current                 string `json:"current"`
+	Latest                  string `json:"latest"`
+	Verdict                 string `json:"verdict"`
+	InstallMethod           string `json:"install_method,omitempty"`
+	Manager                 string `json:"manager,omitempty"`
+	UpgradeCommand          string `json:"upgrade_command,omitempty"`
+	ManagedUpdateExecutable bool   `json:"managed_update_executable,omitempty"`
 }
 
 // outcomeJSON is the --format json shape for an Update outcome. Fields are
@@ -41,21 +42,24 @@ type outcomeJSON struct {
 // WriteOutcomeJSON writes outcome's --format json shape to out.
 func WriteOutcomeJSON(out io.Writer, outcome selfupdate.Outcome) error {
 	oj := outcomeJSON{Action: outcome.Action.String()}
+	if m := outcome.Detection.Manager; m != nil {
+		oj.Manager = m.Name
+		oj.Command = m.UpgradeCommand
+	}
 	switch outcome.Action {
 	case selfupdate.ActionRedirected:
-		if outcome.Detection.Manager != nil {
-			oj.Manager = outcome.Detection.Manager.Name
-			oj.Command = outcome.Detection.Manager.UpgradeCommand
-		}
 	case selfupdate.ActionAlreadyCurrent:
 		oj.Current = outcome.Result.Current
-	case selfupdate.ActionUpdated, selfupdate.ActionAborted, selfupdate.ActionPlanned:
+	case selfupdate.ActionUpdated, selfupdate.ActionAborted, selfupdate.ActionPlanned, selfupdate.ActionManagerExecuted:
 		oj.Current = outcome.Result.Current
 		oj.Latest = outcome.Result.Latest
 		oj.Target = outcome.Target
 		oj.Downgrade = outcome.Downgrade
 		if outcome.Action == selfupdate.ActionPlanned {
 			oj.PlannedURL = outcome.PlannedURL
+			if outcome.PlannedCommand != "" {
+				oj.Command = outcome.PlannedCommand
+			}
 		}
 		if outcome.PostSwapWarning != nil {
 			oj.Warning = outcome.PostSwapWarning.Error()
@@ -79,6 +83,14 @@ func WriteOutcome(out, errOut io.Writer, cfg selfupdate.Config, outcome selfupda
 	case selfupdate.ActionAborted:
 		fmt.Fprintln(out, "self-update: aborted; binary left unchanged.") //nolint:errcheck
 	case selfupdate.ActionPlanned:
+		if outcome.PlannedCommand != "" {
+			manager := "package manager"
+			if outcome.Detection.Manager != nil {
+				manager = outcome.Detection.Manager.Name
+			}
+			fmt.Fprintf(out, "dry run: would run via %s:\n\n    %s\n", manager, outcome.PlannedCommand) //nolint:errcheck
+			break
+		}
 		verb := "update"
 		if outcome.Downgrade {
 			verb = "downgrade"
@@ -87,9 +99,13 @@ func WriteOutcome(out, errOut io.Writer, cfg selfupdate.Config, outcome selfupda
 			verb, cfg.BinaryName, outcome.Result.Current, outcome.Target, outcome.PlannedURL)
 	case selfupdate.ActionUpdated:
 		fmt.Fprintf(out, "%s updated to %s.\n", cfg.BinaryName, outcome.Target) //nolint:errcheck
-		if outcome.PostSwapWarning != nil {
-			fmt.Fprintf(errOut, "self-update: warning: %v\n", outcome.PostSwapWarning) //nolint:errcheck
+	case selfupdate.ActionManagerExecuted:
+		if m := outcome.Detection.Manager; m != nil {
+			fmt.Fprintf(out, "%s upgrade completed for %s.\n", m.Name, cfg.BinaryName) //nolint:errcheck
 		}
+	}
+	if outcome.PostSwapWarning != nil {
+		fmt.Fprintf(errOut, "self-update: warning: %v\n", outcome.PostSwapWarning) //nolint:errcheck
 	}
 }
 
@@ -122,20 +138,26 @@ func WriteCheckJSON(out io.Writer, cfg selfupdate.Config, result selfupdate.Chec
 	if m := detection.Manager; m != nil {
 		payload.Manager = m.Name
 		payload.UpgradeCommand = m.UpgradeCommand
+		payload.ManagedUpdateExecutable = m.CanExecuteUpgrade()
 	}
 	return json.NewEncoder(out).Encode(payload)
 }
 
 // WriteNextStep states what to actually do about an available update, which
-// depends entirely on how the binary was installed: a managed install must
-// go through its manager, a manual one can run this very command, and an
-// ambiguous one gets the same refusal guidance the update path would print.
+// depends entirely on how the binary was installed: an executable managed
+// install can run this command, a redirect-only managed install must run the
+// manager command directly, a manual one can run this command, and an ambiguous
+// one gets the same refusal guidance the update path would print.
 // commandPath is the fully-qualified invocation (e.g. "wb self-update") so
 // the instruction is copy-pasteable in whatever CLI embeds this command.
 func WriteNextStep(out io.Writer, cfg selfupdate.Config, detection selfupdate.Detection, commandPath string) {
 	switch detection.Method {
 	case selfupdate.Managed:
 		if m := detection.Manager; m != nil {
+			if m.CanExecuteUpgrade() {
+				fmt.Fprintf(out, "To upgrade through %s, run: %s\n", m.Name, commandPath) //nolint:errcheck
+				return
+			}
 			fmt.Fprintf(out, "%s was installed via %s. Run the following to upgrade:\n\n    %s\n", //nolint:errcheck
 				cfg.BinaryName, m.Name, m.UpgradeCommand)
 			return

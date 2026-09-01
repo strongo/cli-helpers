@@ -22,6 +22,8 @@ func TestFailureKind_String(t *testing.T) {
 		{KindUnknownTag, "unknown_tag"},
 		{KindUnsupportedPlatform, "unsupported_platform"},
 		{KindUnexpected, "unexpected"},
+		{KindManagedVersion, "managed_version"},
+		{KindManagedCommand, "managed_command"},
 		{FailureKind(999), "unknown"},
 	}
 	for _, c := range cases {
@@ -82,6 +84,7 @@ func TestAction_String(t *testing.T) {
 		{ActionUpdated, "updated"},
 		{ActionAborted, "aborted"},
 		{ActionPlanned, "planned"},
+		{ActionManagerExecuted, "manager_executed"},
 		{Action(999), "unknown"},
 	}
 	for _, c := range cases {

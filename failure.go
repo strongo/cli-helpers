@@ -50,6 +50,13 @@ const (
 	// path, or an error returned from an Options.Confirm callback that
 	// wasn't already a *Failure.
 	KindUnexpected
+	// KindManagedVersion means a version pin was requested for an
+	// executable package-manager update, which cannot promise an arbitrary
+	// historical release.
+	KindManagedVersion
+	// KindManagedCommand means the executable manager runner or its required
+	// configuration failed. The underlying process error remains unwrap-able.
+	KindManagedCommand
 )
 
 // String renders the kind as a stable, lower_snake_case token suitable for
@@ -76,6 +83,10 @@ func (k FailureKind) String() string {
 		return "unsupported_platform"
 	case KindUnexpected:
 		return "unexpected"
+	case KindManagedVersion:
+		return "managed_version"
+	case KindManagedCommand:
+		return "managed_command"
 	default:
 		return "unknown"
 	}

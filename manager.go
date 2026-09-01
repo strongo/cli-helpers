@@ -9,7 +9,10 @@ package selfupdate
 //
 // Consumers are not limited to Homebrew, Scoop, and WinGet: any manager can
 // be described by constructing a Manager literal directly with its own
-// Name, UpgradeCommand, and PathMarkers. The three constructors below exist
+// Name, UpgradeCommand, and PathMarkers. A manager remains redirect-only
+// unless WithExecutableUpgrade explicitly configures structured argv; the
+// display command is never parsed or passed to a shell. The three
+// constructors below exist
 // because those three account for effectively every managed Go CLI install
 // in the wild, and getting their marker sets right (see Homebrew's doc
 // comment for the Intel-cask gotcha) is exactly the kind of detail this
@@ -18,13 +21,38 @@ type Manager struct {
 	// Name is shown to the user, e.g. "Homebrew".
 	Name string
 	// UpgradeCommand is the exact command printed for the user to run,
-	// e.g. "brew upgrade --cask wb". The package never runs it — printing
-	// it and stopping is the entire redirect behavior.
+	// e.g. "brew upgrade --cask wb". It is display-only and is never parsed
+	// or passed to a shell.
 	UpgradeCommand string
+	// UpgradeExecutable is the program invoked for an executable managed
+	// update. Empty keeps this manager redirect-only for backward
+	// compatibility. Configure it through WithExecutableUpgrade so its argv
+	// is copied rather than aliased.
+	UpgradeExecutable string
+	// UpgradeArgs are passed directly to UpgradeExecutable without shell
+	// parsing or interpolation.
+	UpgradeArgs []string
 	// PathMarkers are lowercased, '/'-separated substrings; a resolved
 	// executable path containing any one of them classifies as this
 	// manager's install.
 	PathMarkers []string
+}
+
+// WithExecutableUpgrade opts this manager into executable updates. executable
+// and args are passed directly to the consumer-supplied ManagedCommandRunner;
+// UpgradeCommand remains the independently configured human-readable form.
+// The argument slice is copied so later caller mutations cannot change the
+// command that will run.
+func (m Manager) WithExecutableUpgrade(executable string, args ...string) Manager {
+	m.UpgradeExecutable = executable
+	m.UpgradeArgs = append([]string(nil), args...)
+	return m
+}
+
+// CanExecuteUpgrade reports whether the consumer explicitly opted this manager
+// into executable updates. A display-only UpgradeCommand is never sufficient.
+func (m Manager) CanExecuteUpgrade() bool {
+	return m.UpgradeExecutable != ""
 }
 
 // Homebrew describes a Homebrew-managed install (macOS, Linux, or

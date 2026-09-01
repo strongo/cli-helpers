@@ -7,7 +7,8 @@
 // that no longer matches the file on disk, and the next "brew upgrade" fights
 // the CLI's own write. So the package classifies how the running binary got
 // where it is before it does anything else: a managed install is redirected
-// to the manager's own upgrade command and never touched, a manual install
+// to the manager's own upgrade command by default, or can explicitly delegate
+// structured argv to that manager without directly touching its binary; a manual install
 // (a release archive someone unpacked, or a `go install` target) is eligible
 // for replacement, and anything the package cannot confidently place in
 // either bucket is treated as manual-adjacent risk and refused — ambiguity
@@ -34,16 +35,14 @@
 //
 // # What the core does not do
 //
-// Config.Update and Config.Check perform no I/O beyond the GitHub HTTP
-// requests and the filesystem writes the update itself requires: they never
-// print to a terminal, never read from stdin, and never decide a process
-// exit code. Confirmation is a caller-supplied callback (Options.Confirm);
-// output formatting and exit-code mapping belong to the caller or to the
-// optional cobracmd adapter. This is what makes the package usable by a CLI
+// Config.Update and Config.Check themselves never print to a terminal, read
+// from stdin, or decide a process exit code. Confirmation and executable
+// manager commands are caller-supplied callbacks (Options.Confirm and
+// Options.RunManaged); process I/O, output formatting, and exit-code mapping
+// belong to the caller or to the optional cobracmd adapter. This makes the package usable by a CLI
 // with any output convention, and what makes its own test suite able to
 // exercise every path without a network connection or a real installed
-// binary — every GitHub endpoint, filesystem call, and executable-resolution
-// call the package makes is an overridable package-level seam.
+// binary.
 //
 // # Typical use
 //

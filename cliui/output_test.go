@@ -34,6 +34,18 @@ func TestWriteOutcome_ManagedRedirect(t *testing.T) {
 	}
 }
 
+func TestWriteOutcome_ManagerExecuted(t *testing.T) {
+	mgr := selfupdate.Homebrew("brew upgrade --cask tool").WithExecutableUpgrade("brew", "upgrade", "--cask", "tool")
+	var out bytes.Buffer
+	WriteOutcome(&out, &bytes.Buffer{}, testConfig(), selfupdate.Outcome{
+		Action:    selfupdate.ActionManagerExecuted,
+		Detection: selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr},
+	})
+	if !strings.Contains(out.String(), "Homebrew") || !strings.Contains(out.String(), "completed") {
+		t.Errorf("stdout %q does not report the completed manager update", out.String())
+	}
+}
+
 // A redirected outcome without a Manager (a contradiction the caller should
 // never actually produce) prints nothing rather than a half-sentence.
 func TestWriteOutcome_ManagedRedirectWithoutManagerPrintsNothing(t *testing.T) {
@@ -76,6 +88,32 @@ func TestWriteOutcome_PlannedUpdate(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "tool_1.1.0_linux_amd64.tar.gz") {
 		t.Errorf("stdout %q does not contain the planned asset URL", out.String())
+	}
+}
+
+func TestWriteOutcome_PlannedManagerCommand(t *testing.T) {
+	mgr := selfupdate.Homebrew("brew upgrade --cask tool").WithExecutableUpgrade("brew", "upgrade", "--cask", "tool")
+	outcome := selfupdate.Outcome{
+		Action:         selfupdate.ActionPlanned,
+		Detection:      selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr},
+		PlannedCommand: "brew upgrade --cask tool",
+	}
+	var out bytes.Buffer
+	WriteOutcome(&out, &bytes.Buffer{}, testConfig(), outcome)
+	if !strings.Contains(out.String(), "dry run") || !strings.Contains(out.String(), "brew upgrade --cask tool") {
+		t.Errorf("stdout %q does not report the planned manager command", out.String())
+	}
+
+	out.Reset()
+	if err := WriteOutcomeJSON(&out, outcome); err != nil {
+		t.Fatalf("unexpected JSON error: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("outcome JSON does not parse: %v\n%s", err, out.String())
+	}
+	if got["command"] != "brew upgrade --cask tool" {
+		t.Errorf("command = %v, want planned manager command", got["command"])
 	}
 }
 
@@ -131,6 +169,7 @@ func TestWriteOutcomeJSON_AllActions(t *testing.T) {
 		{"already_current", selfupdate.Outcome{Action: selfupdate.ActionAlreadyCurrent, Result: selfupdate.CheckResult{Current: "1.0.0"}}, "already_current"},
 		{"aborted", selfupdate.Outcome{Action: selfupdate.ActionAborted, Target: "1.1.0"}, "aborted"},
 		{"updated", selfupdate.Outcome{Action: selfupdate.ActionUpdated, Target: "1.1.0"}, "updated"},
+		{"manager_executed", selfupdate.Outcome{Action: selfupdate.ActionManagerExecuted, Detection: selfupdate.Detection{Manager: &mgr}}, "manager_executed"},
 		{"planned", selfupdate.Outcome{Action: selfupdate.ActionPlanned, Target: "1.1.0", PlannedURL: "https://example.test/asset"}, "planned"},
 		{"updated_with_downgrade_and_warning", selfupdate.Outcome{
 			Action: selfupdate.ActionUpdated, Target: "0.9.0", Downgrade: true,
@@ -231,6 +270,23 @@ func TestWriteCheckJSON_NoManagerOmitsManagerFields(t *testing.T) {
 	}
 }
 
+func TestWriteCheckJSON_ExecutableManagerIsMachineReadable(t *testing.T) {
+	mgr := selfupdate.Homebrew("brew upgrade --cask tool").WithExecutableUpgrade("brew", "upgrade", "--cask", "tool")
+	var out bytes.Buffer
+	if err := WriteCheckJSON(&out, testConfig(),
+		selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0", Verdict: selfupdate.UpdateAvailable},
+		selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("check JSON does not parse: %v\n%s", err, out.String())
+	}
+	if got["managed_update_executable"] != true {
+		t.Errorf("managed_update_executable = %v, want true\n%s", got["managed_update_executable"], out.String())
+	}
+}
+
 func TestWriteCheckJSON_WriteError(t *testing.T) {
 	err := WriteCheckJSON(errWriter{err: errors.New("write fail")}, testConfig(),
 		selfupdate.CheckResult{Verdict: selfupdate.UpToDate}, selfupdate.Detection{})
@@ -252,6 +308,14 @@ func TestWriteNextStep_PerInstallMethod(t *testing.T) {
 			name:      "managed names the manager command",
 			detection: selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr},
 			want:      []string{"Homebrew", "brew upgrade --cask tool"},
+		},
+		{
+			name: "executable manager points back to self-update",
+			detection: func() selfupdate.Detection {
+				executable := selfupdate.Homebrew("brew upgrade --cask tool").WithExecutableUpgrade("brew", "upgrade", "--cask", "tool")
+				return selfupdate.Detection{Method: selfupdate.Managed, Manager: &executable}
+			}(),
+			want: []string{"through Homebrew", "tool self-update"},
 		},
 		{
 			name:      "manual names this very command",

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -163,6 +164,216 @@ func TestUpdate_ManagedRedirect_IgnoresPinAndConfirm(t *testing.T) {
 	}
 	if h.targetBytes() != "old binary" {
 		t.Error("target file was modified for a managed install")
+	}
+}
+
+func TestUpdate_ManagedExecutable_ConfirmsRunsArgvAndVerifies(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.Managers = []Manager{
+		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
+	}
+
+	var transition, executable string
+	var args []string
+	verified := false
+	outcome, err := h.cfg.Update(context.Background(), Options{
+		Confirm: func(got string) (bool, error) { transition = got; return true, nil },
+		RunManaged: func(_ context.Context, gotExecutable string, gotArgs []string) error {
+			executable = gotExecutable
+			args = append([]string(nil), gotArgs...)
+			return nil
+		},
+		VerifyManaged: func(_ context.Context, binary string, probeArgs []string) error {
+			verified = true
+			if binary != "wb" || !reflect.DeepEqual(probeArgs, []string{"--version"}) {
+				t.Errorf("managed probe = %q %v, want wb [--version]", binary, probeArgs)
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome.Action != ActionManagerExecuted {
+		t.Fatalf("Action = %v, want ActionManagerExecuted", outcome.Action)
+	}
+	if !strings.Contains(transition, "Homebrew") || !strings.Contains(transition, "brew upgrade --cask wb") {
+		t.Errorf("transition = %q, want manager and command", transition)
+	}
+	if executable != "brew" || !reflect.DeepEqual(args, []string{"upgrade", "--cask", "wb"}) {
+		t.Errorf("managed command = %q %v, want brew [upgrade --cask wb]", executable, args)
+	}
+	if !verified {
+		t.Error("managed update did not run the post-update version probe")
+	}
+	if outcome.PostSwapWarning != nil {
+		t.Errorf("PostSwapWarning = %v, want nil", outcome.PostSwapWarning)
+	}
+	if atomic.LoadInt32(&h.hits) != 0 {
+		t.Errorf("HTTP requests were made (%d); the package manager must remain the update authority", h.hits)
+	}
+	if h.targetBytes() != "old binary" {
+		t.Error("core replaced a package-manager-owned binary")
+	}
+}
+
+func TestUpdate_ManagedExecutable_DryRunReportsCommandWithoutExecuting(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.Managers = []Manager{
+		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
+	}
+	run := false
+	outcome, err := h.cfg.Update(context.Background(), Options{
+		DryRun: true,
+		RunManaged: func(context.Context, string, []string) error {
+			run = true
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome.Action != ActionPlanned || outcome.PlannedCommand != "brew upgrade --cask wb" {
+		t.Errorf("outcome = %+v, want planned Homebrew command", outcome)
+	}
+	if run {
+		t.Error("managed command ran during --dry-run")
+	}
+}
+
+func TestUpdate_ManagedExecutable_RefusesVersionPin(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.Managers = []Manager{
+		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
+	}
+	run := false
+	_, err := h.cfg.Update(context.Background(), Options{
+		PinnedVersion: "1.2.3",
+		RunManaged: func(context.Context, string, []string) error {
+			run = true
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatal("expected a managed version-pin refusal")
+	}
+	if KindOf(err) != KindManagedVersion {
+		t.Errorf("KindOf(err) = %v, want KindManagedVersion", KindOf(err))
+	}
+	if run {
+		t.Error("managed command ran despite an unsupported version pin")
+	}
+}
+
+func TestUpdate_ManagedExecutable_CommandFailureIsTyped(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.Managers = []Manager{
+		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
+	}
+	_, err := h.cfg.Update(context.Background(), Options{
+		Confirm: func(string) (bool, error) { return true, nil },
+		RunManaged: func(context.Context, string, []string) error {
+			return errors.New("brew failed")
+		},
+		VerifyManaged: func(context.Context, string, []string) error { return nil },
+	})
+	if err == nil {
+		t.Fatal("expected managed command failure")
+	}
+	if KindOf(err) != KindManagedCommand {
+		t.Errorf("KindOf(err) = %v, want KindManagedCommand", KindOf(err))
+	}
+}
+
+func TestUpdate_ManagedExecutable_RequiresRunnerAndVerifier(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.Managers = []Manager{
+		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
+	}
+
+	_, err := h.cfg.Update(context.Background(), Options{})
+	if KindOf(err) != KindManagedCommand || !strings.Contains(err.Error(), "runner") {
+		t.Errorf("missing-runner error = %v, want KindManagedCommand naming runner", err)
+	}
+
+	_, err = h.cfg.Update(context.Background(), Options{
+		RunManaged: func(context.Context, string, []string) error { return nil },
+	})
+	if KindOf(err) != KindManagedCommand || !strings.Contains(err.Error(), "probe") {
+		t.Errorf("missing-verifier error = %v, want KindManagedCommand naming probe", err)
+	}
+}
+
+func TestUpdate_ManagedExecutable_ConfirmationOutcomes(t *testing.T) {
+	newHarness := func(t *testing.T) *updateHarness {
+		h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+		h.cfg.Managers = []Manager{
+			Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
+		}
+		return h
+	}
+	baseOptions := func() Options {
+		return Options{
+			RunManaged:    func(context.Context, string, []string) error { return nil },
+			VerifyManaged: func(context.Context, string, []string) error { return nil },
+		}
+	}
+
+	t.Run("typed refusal passes through", func(t *testing.T) {
+		h := newHarness(t)
+		opts := baseOptions()
+		opts.Confirm = func(string) (bool, error) {
+			return false, &Failure{Kind: KindNonInteractive, Err: errors.New("no terminal")}
+		}
+		_, err := h.cfg.Update(context.Background(), opts)
+		if KindOf(err) != KindNonInteractive {
+			t.Errorf("KindOf(err) = %v, want KindNonInteractive", KindOf(err))
+		}
+	})
+
+	t.Run("plain confirmation error is unexpected", func(t *testing.T) {
+		h := newHarness(t)
+		opts := baseOptions()
+		opts.Confirm = func(string) (bool, error) { return false, errors.New("prompt failed") }
+		_, err := h.cfg.Update(context.Background(), opts)
+		if KindOf(err) != KindUnexpected {
+			t.Errorf("KindOf(err) = %v, want KindUnexpected", KindOf(err))
+		}
+	})
+
+	t.Run("decline aborts without running", func(t *testing.T) {
+		h := newHarness(t)
+		run := false
+		opts := baseOptions()
+		opts.Confirm = func(string) (bool, error) { return false, nil }
+		opts.RunManaged = func(context.Context, string, []string) error { run = true; return nil }
+		outcome, err := h.cfg.Update(context.Background(), opts)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if outcome.Action != ActionAborted || run {
+			t.Errorf("outcome = %+v, run = %v; want aborted without execution", outcome, run)
+		}
+	})
+}
+
+func TestUpdate_ManagedExecutable_ProbeFailureIsWarning(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.Managers = []Manager{
+		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
+	}
+	outcome, err := h.cfg.Update(context.Background(), Options{
+		Confirm:    func(string) (bool, error) { return true, nil },
+		RunManaged: func(context.Context, string, []string) error { return nil },
+		VerifyManaged: func(context.Context, string, []string) error {
+			return errors.New("version probe failed")
+		},
+	})
+	if err != nil {
+		t.Fatalf("probe after a successful manager command must not fail Update: %v", err)
+	}
+	if outcome.Action != ActionManagerExecuted || outcome.PostSwapWarning == nil {
+		t.Errorf("outcome = %+v, want manager executed with warning", outcome)
 	}
 }
 

@@ -378,6 +378,12 @@ func TestUpdate_FlagsMapToOptions(t *testing.T) {
 	if captured.Confirm == nil {
 		t.Fatal("Confirm is nil; the command must always supply a confirm callback")
 	}
+	if captured.RunManaged == nil {
+		t.Fatal("RunManaged is nil; the Cobra adapter must supply the streaming argv runner")
+	}
+	if captured.VerifyManaged == nil {
+		t.Fatal("VerifyManaged is nil; the Cobra adapter must supply the post-update probe")
+	}
 }
 
 // --yes causes Confirm to proceed immediately without invoking Interactive.

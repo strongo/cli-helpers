@@ -24,12 +24,15 @@ const (
 	// false, nil) — the caller chose not to proceed, as opposed to Update
 	// refusing on its own account. Nothing was downloaded or replaced.
 	ActionAborted
-	// ActionPlanned means Options.DryRun was set: Update walked the full
-	// decision path — detection, target resolution, version comparison, the
-	// downgrade guard — and stopped before any download or write. Outcome.
-	// PlannedURL names exactly what a real run would have fetched
+	// ActionPlanned means Options.DryRun was set and Update stopped before
+	// any manager process, download, or write. PlannedCommand names a
+	// managed operation; PlannedURL names a manual-install asset
 	// (REQ: dry-run).
 	ActionPlanned
+	// ActionManagerExecuted means the configured package-manager command
+	// exited successfully. The manager remains the install authority; the
+	// core did not download or replace the executable itself.
+	ActionManagerExecuted
 )
 
 // String renders the action as a stable, lower_snake_case token suitable
@@ -46,6 +49,8 @@ func (a Action) String() string {
 		return "aborted"
 	case ActionPlanned:
 		return "planned"
+	case ActionManagerExecuted:
+		return "manager_executed"
 	default:
 		return "unknown"
 	}
@@ -53,9 +58,9 @@ func (a Action) String() string {
 
 // Outcome describes what Update did. Result and Target are only meaningful
 // for the actions that actually compared or resolved a version
-// (ActionAlreadyCurrent, ActionUpdated, ActionAborted, ActionPlanned); for
-// ActionRedirected, and for every error return, they are left at their zero
-// value and the caller should look at Detection.Manager instead.
+// (ActionAlreadyCurrent, ActionUpdated, and manual ActionAborted/
+// ActionPlanned); for managed outcomes and every error return, they are left
+// at their zero value and the caller should look at Detection.Manager instead.
 type Outcome struct {
 	// Action is what happened.
 	Action Action
@@ -72,21 +77,34 @@ type Outcome struct {
 	// PinnedVersion with AllowDowngrade set).
 	Downgrade bool
 	// PlannedURL is the exact asset URL a non-dry-run call would have
-	// fetched. Set only when Action is ActionPlanned.
+	// fetched for a manual install. Set only when Action is ActionPlanned.
 	PlannedURL string
-	// PostSwapWarning is set when Action is ActionUpdated but the post-swap
-	// version probe (REQ: post-swap-version-check) did not confirm the
-	// expected version. The swap itself already succeeded — this is a
-	// warning to surface to the user, not a reason to treat the call as
-	// failed, so it is reported here rather than as Update's error return.
+	// PlannedCommand is the exact display command an executable manager
+	// would run. Set for a managed ActionPlanned outcome.
+	PlannedCommand string
+	// PostSwapWarning is set when Action is ActionUpdated and the post-swap
+	// version probe did not confirm the expected version, or when
+	// ActionManagerExecuted and the installed CLI could not be probed after
+	// the manager command completed. The mutation already succeeded — this
+	// is a warning to surface, not a failed Update.
 	PostSwapWarning error
 }
 
-// Options controls one Update call. The zero value (no pin, no downgrade
-// allowance, DryRun false, Confirm nil) updates unconditionally to the
-// latest stable release with no confirmation gate at all — that's the right
-// default for a caller that has already obtained consent some other way;
-// see Confirm's doc for the interactive case.
+// ManagedCommandRunner executes a configured package-manager program and argv.
+// The core deliberately owns no process I/O; command adapters provide a runner
+// that wires stdin/stdout/stderr according to their own output contract.
+type ManagedCommandRunner func(ctx context.Context, executable string, args []string) error
+
+// ManagedBinaryVerifier probes the CLI after a successful package-manager
+// command. A failure becomes Outcome.PostSwapWarning because the manager
+// command has already completed.
+type ManagedBinaryVerifier func(ctx context.Context, binary string, args []string) error
+
+// Options controls one Update call. For a manual install, the zero value (no
+// pin, no downgrade allowance, DryRun false, Confirm nil) updates
+// unconditionally to the latest stable release with no confirmation gate.
+// An executable managed install additionally requires RunManaged and
+// VerifyManaged; see Confirm's doc for the interactive case.
 type Options struct {
 	// PinnedVersion, when non-empty, installs exactly that release instead
 	// of the latest stable one (REQ: version-pin). A leading "v" is
@@ -115,6 +133,12 @@ type Options struct {
 	// Update reports as ActionAborted with a nil error, not a failure.
 	// Nil means no confirmation gate at all — Update proceeds immediately.
 	Confirm func(transition string) (bool, error)
+	// RunManaged is required when the detected Manager opted into executable
+	// upgrades. It receives structured argv, never a shell command string.
+	RunManaged ManagedCommandRunner
+	// VerifyManaged is required alongside RunManaged and probes the CLI found
+	// after the manager command using Config.VersionProbeArgs.
+	VerifyManaged ManagedBinaryVerifier
 }
 
 // Update resolves the target release (the latest stable release, or an
@@ -134,10 +158,14 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 	}
 
 	if detection.Method == Managed {
-		// REQ: managed-no-overwrite — return before opts (a pin, a skipped
-		// confirmation, DryRun) are even inspected, so no option
-		// combination can reach the download/write path below.
-		return Outcome{Action: ActionRedirected, Detection: detection}, nil
+		// REQ: managed-no-overwrite — this branch never reaches the
+		// download/write path below. Redirect-only managers preserve the
+		// original behavior exactly; executable managers remain under the
+		// package manager's authority through the structured runner.
+		if detection.Manager == nil || !detection.Manager.CanExecuteUpgrade() {
+			return Outcome{Action: ActionRedirected, Detection: detection}, nil
+		}
+		return cfg.updateManaged(ctx, opts, detection)
 	}
 	if detection.Method != Manual {
 		// Ambiguous, or any value that is not a recognized Manual
@@ -259,6 +287,67 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 		// The swap already succeeded; a failed confirmation is reported on
 		// the outcome, not treated as a failed Update (REQ: post-swap-
 		// version-check).
+		outcome.PostSwapWarning = err
+	}
+	return outcome, nil
+}
+
+func (c Config) updateManaged(ctx context.Context, opts Options, detection Detection) (Outcome, error) {
+	m := detection.Manager
+	if opts.PinnedVersion != "" {
+		return Outcome{Detection: detection}, &Failure{
+			Kind: KindManagedVersion,
+			Err:  fmt.Errorf("%s cannot install the requested version %q; package-manager updates do not support release pins", m.Name, opts.PinnedVersion),
+		}
+	}
+
+	if opts.DryRun {
+		return Outcome{
+			Action:         ActionPlanned,
+			Detection:      detection,
+			PlannedCommand: m.UpgradeCommand,
+		}, nil
+	}
+
+	if opts.RunManaged == nil {
+		return Outcome{Detection: detection}, &Failure{
+			Kind: KindManagedCommand,
+			Err:  errors.New("managed update runner is not configured"),
+		}
+	}
+	if opts.VerifyManaged == nil {
+		return Outcome{Detection: detection}, &Failure{
+			Kind: KindManagedCommand,
+			Err:  errors.New("managed post-update version probe is not configured"),
+		}
+	}
+
+	transition := fmt.Sprintf("%s will upgrade %s by running: %s", m.Name, c.BinaryName, m.UpgradeCommand)
+	if opts.Confirm != nil {
+		proceed, err := opts.Confirm(transition)
+		if err != nil {
+			var f *Failure
+			if errors.As(err, &f) {
+				return Outcome{Detection: detection}, f
+			}
+			return Outcome{Detection: detection}, &Failure{Kind: KindUnexpected, Err: err}
+		}
+		if !proceed {
+			return Outcome{Action: ActionAborted, Detection: detection}, nil
+		}
+	}
+
+	args := append([]string(nil), m.UpgradeArgs...)
+	if err := opts.RunManaged(ctx, m.UpgradeExecutable, args); err != nil {
+		return Outcome{Detection: detection}, &Failure{
+			Kind: KindManagedCommand,
+			Err:  fmt.Errorf("run %s: %w", m.UpgradeCommand, err),
+		}
+	}
+
+	outcome := Outcome{Action: ActionManagerExecuted, Detection: detection}
+	probeArgs := append([]string(nil), c.VersionProbeArgs...)
+	if err := opts.VerifyManaged(ctx, c.BinaryName, probeArgs); err != nil {
 		outcome.PostSwapWarning = err
 	}
 	return outcome, nil

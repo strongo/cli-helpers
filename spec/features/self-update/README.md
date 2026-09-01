@@ -13,8 +13,9 @@ status: Stable
 
 `github.com/strongo/selfupdate` lets any Go CLI update its own binary in place.
 It decides how the running binary was installed: a package-manager-owned install
-is never overwritten — the caller is told the exact upgrade command instead —
-while a manual install (release archive, `go install`) is replaced by
+is never overwritten directly — the caller is told the exact upgrade command by
+default, or may explicitly opt in to run that manager command as structured argv
+— while a manual install (release archive, `go install`) is replaced by
 downloading the release asset for the host platform, verifying its sha256
 against the release checksums, and atomically swapping the executable. A
 check-only mode reports availability without touching anything, and an explicit
@@ -56,8 +57,8 @@ re-derives the same safety rules and only one of them gets reviewed.
 
 The package MUST classify a resolved executable path as package-managed when it
 lies inside a configured manager's layout, following symlinks first so a
-symlinked shim resolves to its real location. A managed classification MUST route
-to the redirect outcome and MUST NOT self-replace.
+symlinked shim resolves to its real location. A managed classification MUST
+route to that manager's configured policy and MUST NOT self-replace.
 
 #### REQ: detect-manual
 
@@ -75,15 +76,34 @@ guidance and fail. Ambiguity MUST NOT resolve to "manual".
 
 #### REQ: managed-no-overwrite
 
-For a managed classification the package MUST NOT download, write, or replace
-the executable under any option combination, including an explicit version pin
-and a skipped confirmation.
+For a managed classification the package MUST NOT download, write, or directly
+replace the executable under any option combination. It MAY invoke the owning
+package manager only when the consumer explicitly configured executable argv;
+otherwise it MUST redirect. A skipped confirmation MUST NOT turn a redirect-only
+manager into an executable one.
 
 #### REQ: managed-redirect-command
 
-For a managed classification the package MUST report the detected manager's
-display name and the exact upgrade command configured for it, and MUST treat the
-run as a success rather than a failure.
+For a managed classification without executable argv, the package MUST report
+the detected manager's display name and the exact upgrade command configured for
+it, and MUST treat the run as a success rather than a failure.
+
+#### REQ: managed-executable-command
+
+A consumer MAY opt a manager into execution by configuring an executable and an
+argument vector separately from its human-readable upgrade command. The package
+MUST pass those values directly to a consumer-supplied command runner and MUST
+NOT parse or invoke the display command through a shell. The normal path MUST
+confirm before execution unless confirmation was explicitly skipped, MUST stream
+the manager's output through the command adapter, and MUST fail with a typed
+manager-command failure when the process cannot start or exits unsuccessfully.
+
+A dry run MUST report the exact display command without invoking the runner. An
+explicit version pin MUST be refused with a typed failure because a generic
+package-manager upgrade cannot promise an arbitrary historical release. After a
+successful manager command, the adapter MUST probe the CLI found on `PATH` with
+the configured version arguments; a failed probe is a warning because the
+manager command already completed.
 
 #### REQ: latest-release-source
 
@@ -223,25 +243,27 @@ code.
 #### REQ: no-io-side-effects-in-core
 
 The core logic MUST NOT write to the terminal or read from it. Prompting,
-formatting, and output format selection belong to the consumer or to the
-optional command adapter, so the core can be used by a CLI with any output
-convention.
+formatting, output format selection, and process I/O for executable manager
+commands belong to the consumer or to the optional command adapter, so the core
+can be used by a CLI with any output convention.
 
 #### REQ: non-interactive-refusal
 
-When a self-replace would need confirmation, the consumer has not skipped it,
-and no interactive terminal is attached, the operation MUST refuse rather than
-block on input. A CLI driven by scripts and agents must never silently wait for
-a keystroke.
+When a self-replace or executable manager command would need confirmation, the
+consumer has not skipped it, and no interactive terminal is attached, the
+operation MUST refuse rather than block on input. A CLI driven by scripts and
+agents must never silently wait for a keystroke.
 
 #### REQ: check-states-the-next-step
 
 A check-only report MUST state what to do about an available update, not only
-that one exists: the manager's upgrade command for a managed install, the
-self-update command itself for a manual one, and the manual-update guidance for
-an ambiguous one. Machine-readable check output MUST carry the same facts —
-the install method, and the manager and its upgrade command when there is one —
-so a caller need not parse prose to reach the same conclusion. Classifying the
+that one exists: the self-update command for an executable managed install, the
+manager's upgrade command for a redirect-only managed install, the self-update
+command itself for a manual one, and the manual-update guidance for an ambiguous
+one. Machine-readable check output MUST carry the same facts — the install
+method, the manager and its upgrade command when there is one, and whether that
+manager is executable through self-update — so a caller need not parse prose to
+reach the same conclusion. Classifying the
 install reads no network and writes nothing, so this costs the read-only
 guarantee nothing; a classification failure MUST NOT fail the check, which
 still reports the version comparison. An up-to-date result MUST NOT print a
@@ -323,6 +345,7 @@ untested.
 
 | CLI | Feature |
 |---|---|
+| `ovdb` | `openvaultdb/ovdb` — Homebrew cask execution through structured argv |
 | `wb` | [sneat-dev/wb spec/features/self-update](https://specscore.studio/app/github.com/sneat-dev/wb/spec/features/self-update?op=explore) — three-code exit contract, Homebrew cask, `unknown` placeholder |
 | `specscore` | [specscore/specscore-cli spec/features/cli/self-update](https://specscore.studio/app/github.com/specscore/specscore-cli/spec/features/cli/self-update?op=explore) — dedicated exit code 10, Homebrew/Scoop/WinGet, `dev` placeholder |
 
@@ -331,13 +354,13 @@ behavior above is inherited, not restated.
 
 ## Acceptance Criteria
 
-### AC: managed-installs-are-redirected
+### AC: managed-installs-use-only-the-configured-manager-policy
 
-**Requirements:** self-update#req:detect-managed, self-update#req:managed-no-overwrite, self-update#req:managed-redirect-command
+**Requirements:** self-update#req:detect-managed, self-update#req:managed-no-overwrite, self-update#req:managed-redirect-command, self-update#req:managed-executable-command
 
 **Given** a binary whose resolved path lies inside a configured manager's layout, reached through a symlink
-**When** an update is requested, including with a version pin and with confirmation skipped
-**Then** the package reports the manager and its upgrade command as a successful outcome, and performs no download, no write, and no replacement.
+**When** an update is requested first with a redirect-only manager, then with executable argv, then as a dry run and with a version pin
+**Then** redirect-only reports the manager command without executing it; executable mode confirms and invokes exactly the configured program and argv without a shell, streams its output, and probes the installed CLI; dry-run reports but does not execute; the pin is refused; and no branch downloads, writes, or directly replaces the manager-owned executable.
 
 ### AC: ambiguity-never-becomes-manual
 
