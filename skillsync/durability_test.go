@@ -737,6 +737,81 @@ func TestTransactionMutationFaultSeams(t *testing.T) {
 	})
 }
 
+func TestReplaceAndRemoveRetainRecoveryEvidenceOnIOFaults(t *testing.T) {
+	source := fstest.MapFS{"alpha/SKILL.md": &fstest.MapFile{Data: []byte("new")}}
+	newDigest, err := subtreeDigest(source, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	setupUpdate := func(t *testing.T) (string, *transaction, string) {
+		t.Helper()
+		dir := t.TempDir()
+		oldDigest := writeRecoverySkill(t, dir, "alpha", "old")
+		tx := newTransaction(dir)
+		return dir, &tx, oldDigest
+	}
+	t.Run("replace proof copy failure", func(t *testing.T) {
+		dir, tx, oldDigest := setupUpdate(t)
+		copyErr := errors.New("proof copy")
+		withDurableFileOperations(t, func(ops *durableFileOperationSet) {
+			original, calls := ops.createFile, 0
+			ops.createFile = func(path string, mode fs.FileMode) (durableFile, error) {
+				calls++
+				if calls == 2 {
+					return nil, copyErr
+				}
+				return original(path, mode)
+			}
+		})
+		if err := tx.replace(source, nil, "alpha", oldDigest, newDigest); !errors.Is(err, copyErr) {
+			t.Fatalf("replace=%v", err)
+		}
+		if got, readErr := os.ReadFile(filepath.Join(dir, "alpha", "SKILL.md")); readErr != nil || string(got) != "old" {
+			t.Fatalf("target=%q err=%v", got, readErr)
+		}
+	})
+	t.Run("replace backup rename failure", func(t *testing.T) {
+		dir, tx, oldDigest := setupUpdate(t)
+		renameErr := errors.New("backup rename")
+		withTransactionOperations(t, func(ops *transactionOperationSet) {
+			original := ops.rename
+			ops.rename = func(root *os.Root, from, to string) error {
+				if from == "alpha" && strings.Contains(to, "/backup/alpha") {
+					return renameErr
+				}
+				return original(root, from, to)
+			}
+		})
+		if err := tx.replace(source, nil, "alpha", oldDigest, newDigest); !errors.Is(err, renameErr) {
+			t.Fatalf("replace=%v", err)
+		}
+		if got, readErr := os.ReadFile(filepath.Join(dir, "alpha", "SKILL.md")); readErr != nil || string(got) != "old" {
+			t.Fatalf("target=%q err=%v", got, readErr)
+		}
+	})
+	t.Run("remove backup rename failure", func(t *testing.T) {
+		dir := t.TempDir()
+		oldDigest := writeRecoverySkill(t, dir, "alpha", "old")
+		tx := newTransaction(dir)
+		renameErr := errors.New("remove rename")
+		withTransactionOperations(t, func(ops *transactionOperationSet) {
+			original := ops.rename
+			ops.rename = func(root *os.Root, from, to string) error {
+				if from == "alpha" && strings.Contains(to, "/backup/alpha") {
+					return renameErr
+				}
+				return original(root, from, to)
+			}
+		})
+		if err := tx.remove("alpha", oldDigest); !errors.Is(err, renameErr) {
+			t.Fatalf("remove=%v", err)
+		}
+		if got, readErr := os.ReadFile(filepath.Join(dir, "alpha", "SKILL.md")); readErr != nil || string(got) != "old" {
+			t.Fatalf("target=%q err=%v", got, readErr)
+		}
+	})
+}
+
 func TestRecoveryRetriesDirectorySyncBeforeDiscardingEvidence(t *testing.T) {
 	dir := t.TempDir()
 	old := bundle(t, "plugin", "retry-old", "old")
