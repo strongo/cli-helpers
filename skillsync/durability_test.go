@@ -812,6 +812,44 @@ func TestReplaceAndRemoveRetainRecoveryEvidenceOnIOFaults(t *testing.T) {
 	})
 }
 
+func TestRemoveFailureBoundariesPreserveTarget(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	t.Run("start and digest failures", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "target")
+		startErr := errors.New("start")
+		previous := transactionOperations
+		t.Cleanup(func() { transactionOperations = previous })
+		transactionOperations.mkdirAll = func(string, fs.FileMode) error { return startErr }
+		tx := newTransaction(dir)
+		if err := tx.remove("alpha", digest); !errors.Is(err, startErr) {
+			t.Fatalf("start=%v", err)
+		}
+		transactionOperations = previous
+		tx = newTransaction(t.TempDir())
+		if err := tx.remove(strings.Repeat("a", 300), digest); err == nil {
+			t.Fatal("digest lookup failure accepted")
+		}
+	})
+	t.Run("unsafe backup leaves old target", func(t *testing.T) {
+		dir := t.TempDir()
+		oldDigest := writeRecoverySkill(t, dir, "alpha", "old")
+		tx := newTransaction(dir)
+		tx.id = transactionPrefix + "unsafe-backup"
+		if err := os.Mkdir(filepath.Join(dir, tx.id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, tx.id, "backup"), []byte("unsafe"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.remove("alpha", oldDigest); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("remove=%v", err)
+		}
+		if got, readErr := os.ReadFile(filepath.Join(dir, "alpha", "SKILL.md")); readErr != nil || string(got) != "old" {
+			t.Fatalf("target=%q err=%v", got, readErr)
+		}
+	})
+}
+
 func TestRecoveryRetriesDirectorySyncBeforeDiscardingEvidence(t *testing.T) {
 	dir := t.TempDir()
 	old := bundle(t, "plugin", "retry-old", "old")
