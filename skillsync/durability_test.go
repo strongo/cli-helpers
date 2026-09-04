@@ -378,6 +378,93 @@ func TestSyncFinalizationNeverDiscardsBackupChangedAfterCapture(t *testing.T) {
 	}
 }
 
+func TestTransactionFilesystemHelpersConstrainPathsAndPropagateFaults(t *testing.T) {
+	dir := t.TempDir()
+	if rel, err := rootRelative(dir, filepath.Join(dir, "alpha")); err != nil || rel != "alpha" {
+		t.Fatalf("relative=%q err=%v", rel, err)
+	}
+	for _, path := range []string{dir, filepath.Join(dir, "..", "outside")} {
+		if _, err := rootRelative(dir, path); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("unsafe path %q err=%v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "from"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	renameErr := errors.New("rename")
+	withTransactionOperations(t, func(ops *transactionOperationSet) {
+		ops.rename = func(*os.Root, string, string) error { return renameErr }
+	})
+	if err := rootedRename(dir, filepath.Join(dir, "from"), filepath.Join(dir, "to")); !errors.Is(err, renameErr) {
+		t.Fatalf("rename=%v", err)
+	}
+	if err := rootedRename(dir, filepath.Join(dir, "..", "from"), filepath.Join(dir, "to")); !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("escaping rename=%v", err)
+	}
+	removeErr := errors.New("remove")
+	withTransactionOperations(t, func(ops *transactionOperationSet) { ops.removeAll = func(*os.Root, string) error { return removeErr } })
+	if err := rootedRemoveAll(dir, filepath.Join(dir, "from")); !errors.Is(err, removeErr) {
+		t.Fatalf("remove=%v", err)
+	}
+	if err := rootedRemoveAll(dir, filepath.Join(dir, "..", "from")); !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("escaping remove=%v", err)
+	}
+
+	syncErr := errors.New("sync")
+	previousOperations := transactionOperations
+	t.Cleanup(func() { transactionOperations = previousOperations })
+	transactionOperations.syncDirectory = func(string) error { return syncErr }
+	if err := syncTransactionDirectories("", dir, dir); !errors.Is(err, syncErr) {
+		t.Fatalf("transaction sync=%v", err)
+	}
+	transactionOperations = previousOperations
+	if err := syncDirectoryChain(dir, filepath.Join(dir, "child")); !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("escaping chain=%v", err)
+	}
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureDirectoryAncestry(filepath.Join(file, "child"), os.MkdirAll); err == nil {
+		t.Fatal("file ancestor accepted")
+	}
+	mkdirErr := errors.New("mkdir")
+	if _, err := ensureDirectoryAncestry(filepath.Join(dir, "new", "child"), func(string, fs.FileMode) error { return mkdirErr }); !errors.Is(err, mkdirErr) {
+		t.Fatalf("mkdir=%v", err)
+	}
+	if err := syncCreatedDirectoryAncestry([]string{filepath.Join(dir, "missing")}, func(string) error { return syncErr }); !errors.Is(err, syncErr) {
+		t.Fatalf("created sync=%v", err)
+	}
+}
+
+func TestTransactionStartAndRecordRejectUnsafeInput(t *testing.T) {
+	for _, digest := range []string{"", strings.Repeat("a", 63), strings.Repeat("A", 64)} {
+		if validDigest(digest) {
+			t.Fatalf("invalid digest accepted: %q", digest)
+		}
+	}
+	if !validDigest(strings.Repeat("a", 64)) {
+		t.Fatal("valid digest rejected")
+	}
+	dir := filepath.Join(t.TempDir(), "target")
+	tx := newTransaction(dir)
+	mkdirErr := errors.New("mkdir")
+	previousOperations := transactionOperations
+	t.Cleanup(func() { transactionOperations = previousOperations })
+	transactionOperations.mkdirAll = func(string, fs.FileMode) error { return mkdirErr }
+	if err := tx.start(); !errors.Is(err, mkdirErr) {
+		t.Fatalf("start=%v", err)
+	}
+	transactionOperations = previousOperations
+	tx = newTransaction(t.TempDir())
+	if err := tx.record(txChange{Name: "../unsafe"}); !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("unsafe record=%v", err)
+	}
+	if tx.id == "" || len(tx.changes) != 0 {
+		t.Fatalf("invalid record changed transaction: %#v", tx)
+	}
+}
+
 func TestRecoveryRetriesDirectorySyncBeforeDiscardingEvidence(t *testing.T) {
 	dir := t.TempDir()
 	old := bundle(t, "plugin", "retry-old", "old")
