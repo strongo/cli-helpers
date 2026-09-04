@@ -612,6 +612,74 @@ func TestCopySkillAndLockFailClosed(t *testing.T) {
 			t.Fatal("symlinked lock accepted")
 		}
 	})
+	t.Run("copy sync failure is retained", func(t *testing.T) {
+		syncErr := errors.New("copy sync")
+		previous := transactionOperations
+		t.Cleanup(func() { transactionOperations = previous })
+		transactionOperations.syncDirectory = func(string) error { return syncErr }
+		err := copySkill(fstest.MapFS{"alpha/SKILL.md": &fstest.MapFile{Data: []byte("body")}}, "alpha", filepath.Join(t.TempDir(), "stage"), nil)
+		if !errors.Is(err, syncErr) {
+			t.Fatalf("copy sync=%v", err)
+		}
+	})
+}
+
+func TestTransactionMutationPreconditionsFailClosed(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	t.Run("backup helper accepts additions and rejects captured change", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := verifyBackupChange(filepath.Join(dir, transactionPrefix+"missing"), recoveryChange{Name: "alpha"}); err != nil {
+			t.Fatalf("addition backup=%v", err)
+		}
+		tx := filepath.Join(dir, transactionPrefix+"changed")
+		writeRecoverySkill(t, filepath.Join(tx, "backup"), "alpha", "foreign")
+		if err := verifyBackupChange(tx, recoveryChange{Name: "alpha", Old: digest, Existed: true}); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("changed backup=%v", err)
+		}
+	})
+	t.Run("replace rejects invalid stage and source", func(t *testing.T) {
+		dir := t.TempDir()
+		tx := newTransaction(dir)
+		tx.id = transactionPrefix + "stage"
+		if err := os.MkdirAll(filepath.Join(dir, tx.id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, tx.id, "stage"), []byte("unsafe"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.replace(fstest.MapFS{}, nil, "alpha", "", digest); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("unsafe stage=%v", err)
+		}
+		tx = newTransaction(t.TempDir())
+		if err := tx.replace(failingFS{err: errors.New("source")}, nil, "alpha", "", digest); err == nil {
+			t.Fatal("failing source copied")
+		}
+	})
+	t.Run("replace refuses target changed after planning", func(t *testing.T) {
+		dir := t.TempDir()
+		writeRecoverySkill(t, dir, "alpha", "current")
+		tx := newTransaction(dir)
+		source := fstest.MapFS{"alpha/SKILL.md": &fstest.MapFile{Data: []byte("new")}}
+		newDigest, err := subtreeDigest(source, "alpha")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.replace(source, nil, "alpha", strings.Repeat("a", 64), newDigest); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("changed target=%v", err)
+		}
+	})
+	t.Run("remove is idempotent and rejects changed target", func(t *testing.T) {
+		tx := newTransaction(t.TempDir())
+		if err := tx.remove("alpha", digest); err != nil {
+			t.Fatalf("missing remove=%v", err)
+		}
+		dir := t.TempDir()
+		writeRecoverySkill(t, dir, "alpha", "current")
+		tx = newTransaction(dir)
+		if err := tx.remove("alpha", digest); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("changed remove=%v", err)
+		}
+	})
 }
 
 func TestRecoveryRetriesDirectorySyncBeforeDiscardingEvidence(t *testing.T) {
