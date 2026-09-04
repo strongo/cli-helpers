@@ -14,7 +14,14 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 // updateHarness wires a Config against an httptest.Server for both the
 // releases API and per-tag downloads, and against a real (but throwaway,
@@ -135,26 +142,19 @@ func stableReleaseJSON(tags ...string) string {
 
 // --- Managed: never touches anything, no option combination reaches it ---
 
-// AC: managed-installs-are-redirected — a version pin and a Confirm that
-// would say yes must both be ignored: the managed branch returns before
-// either is ever inspected.
-func TestUpdate_ManagedRedirect_IgnoresPinAndConfirm(t *testing.T) {
+// A package-manager update cannot promise an arbitrary historical version,
+// so its pin is refused before either availability lookup or confirmation.
+func TestUpdate_ManagedRedirect_RefusesPinBeforeLookupAndConfirm(t *testing.T) {
 	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
 	h.cfg.Managers = []Manager{Homebrew("brew upgrade --cask wb")}
 
 	confirmCalled := false
-	outcome, err := h.cfg.Update(context.Background(), Options{
+	_, err := h.cfg.Update(context.Background(), Options{
 		PinnedVersion: "9.9.9",
 		Confirm:       func(string) (bool, error) { confirmCalled = true; return true, nil },
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if outcome.Action != ActionRedirected {
-		t.Fatalf("Action = %v, want ActionRedirected", outcome.Action)
-	}
-	if outcome.Detection.Manager == nil || outcome.Detection.Manager.Name != "Homebrew" {
-		t.Fatalf("Detection.Manager = %v, want Homebrew", outcome.Detection.Manager)
+	if KindOf(err) != KindManagedVersion {
+		t.Fatalf("KindOf(err) = %v, want KindManagedVersion", KindOf(err))
 	}
 	if confirmCalled {
 		t.Error("Confirm was called for a managed install; it must never be reached")
@@ -167,11 +167,112 @@ func TestUpdate_ManagedRedirect_IgnoresPinAndConfirm(t *testing.T) {
 	}
 }
 
+// A package manager remains the installation authority, but managed users
+// still need the running and latest published versions before the redirect.
+func TestUpdate_ManagedRedirectReportsAvailability(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.Managers = []Manager{Homebrew("brew upgrade --cask wb")}
+	h.setReleases(stableReleaseJSON("v1.1.0"))
+
+	outcome, err := h.cfg.Update(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	if outcome.Action != ActionRedirected {
+		t.Fatalf("Action = %v, want ActionRedirected", outcome.Action)
+	}
+	if outcome.Result.Current != "1.0.0" || outcome.Result.Latest != "1.1.0" {
+		t.Errorf("Result = %+v, want current 1.0.0 and latest 1.1.0", outcome.Result)
+	}
+}
+
+func TestUpdate_ManagedAvailabilityReportsNewerEqualAndUnknownCurrent(t *testing.T) {
+	for _, tc := range []struct {
+		name, current, latest string
+		wantVerdict           Verdict
+	}{
+		{name: "newer", current: "1.0.0", latest: "1.1.0", wantVerdict: UpdateAvailable},
+		{name: "equal", current: "1.1.0", latest: "1.1.0", wantVerdict: UpToDate},
+		{name: "unknown", current: "dev", latest: "1.1.0", wantVerdict: Undetermined},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+			h.cfg.CurrentVersion = tc.current
+			h.cfg.Managers = []Manager{Homebrew("brew upgrade --cask wb")}
+			h.setReleases(stableReleaseJSON("v" + tc.latest))
+			var report Availability
+			outcome, err := h.cfg.Update(context.Background(), Options{ReportAvailability: func(got Availability) { report = got }})
+			if err != nil {
+				t.Fatalf("Update() error = %v", err)
+			}
+			if outcome.Result.Current != tc.current || outcome.Result.Latest != tc.latest || outcome.Result.Verdict != tc.wantVerdict {
+				t.Errorf("Outcome.Result = %+v, want current=%q latest=%q verdict=%v", outcome.Result, tc.current, tc.latest, tc.wantVerdict)
+			}
+			if report.Result != outcome.Result || report.Warning != nil || report.Detection.Manager == nil {
+				t.Errorf("availability report = %+v, want successful managed report", report)
+			}
+		})
+	}
+}
+
+func TestUpdate_ManagedAvailabilityLookupFailureIsAdvisory(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.Managers = []Manager{Homebrew("brew upgrade --cask wb")}
+	var report Availability
+	outcome, err := h.cfg.Update(context.Background(), Options{ReportAvailability: func(got Availability) { report = got }})
+	if err != nil {
+		t.Fatalf("Update() error = %v, want redirect despite lookup failure", err)
+	}
+	if outcome.Action != ActionRedirected || outcome.ReleaseCheckWarning == nil {
+		t.Fatalf("Outcome = %+v, want redirected advisory warning", outcome)
+	}
+	if outcome.Result.Current != "1.0.0" || outcome.Result.Latest != "" || report.Warning == nil {
+		t.Errorf("availability = %+v, want current with unavailable latest", report)
+	}
+}
+
+func TestUpdate_ManagedAvailabilityLookupHasBoundedDeadline(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.Managers = []Manager{Homebrew("brew upgrade --cask wb")}
+	h.cfg.HTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})}
+	previous := managedAvailabilityTimeout
+	managedAvailabilityTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { managedAvailabilityTimeout = previous })
+
+	outcome, err := h.cfg.Update(context.Background(), Options{})
+	if err != nil || outcome.Action != ActionRedirected || outcome.ReleaseCheckWarning == nil {
+		t.Fatalf("Outcome/error = %+v/%v, want redirected advisory timeout", outcome, err)
+	}
+}
+
+func TestUpdate_ManagedAvailabilityReportPrecedesConfirmationAndRunner(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.Managers = []Manager{Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb")}
+	h.setReleases(stableReleaseJSON("v1.1.0"))
+	var events []string
+	_, err := h.cfg.Update(context.Background(), Options{
+		ReportAvailability: func(Availability) { events = append(events, "report") },
+		Confirm:            func(string) (bool, error) { events = append(events, "confirm"); return true, nil },
+		RunManaged:         func(context.Context, string, []string) error { events = append(events, "run"); return nil },
+		VerifyManaged:      func(context.Context, string, []string) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	if !reflect.DeepEqual(events, []string{"report", "confirm", "run"}) {
+		t.Errorf("event order = %v, want report before confirmation and runner", events)
+	}
+}
+
 func TestUpdate_ManagedExecutable_ConfirmsRunsArgvAndVerifies(t *testing.T) {
 	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
 	h.cfg.Managers = []Manager{
 		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
 	}
+	h.setReleases(stableReleaseJSON("v1.1.0"))
 
 	var transition, executable string
 	var args []string
@@ -209,8 +310,8 @@ func TestUpdate_ManagedExecutable_ConfirmsRunsArgvAndVerifies(t *testing.T) {
 	if outcome.PostSwapWarning != nil {
 		t.Errorf("PostSwapWarning = %v, want nil", outcome.PostSwapWarning)
 	}
-	if atomic.LoadInt32(&h.hits) != 0 {
-		t.Errorf("HTTP requests were made (%d); the package manager must remain the update authority", h.hits)
+	if atomic.LoadInt32(&h.hits) != 1 {
+		t.Errorf("release requests = %d, want one advisory availability lookup", h.hits)
 	}
 	if h.targetBytes() != "old binary" {
 		t.Error("core replaced a package-manager-owned binary")
@@ -222,6 +323,7 @@ func TestUpdate_ManagedExecutable_DryRunReportsCommandWithoutExecuting(t *testin
 	h.cfg.Managers = []Manager{
 		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
 	}
+	h.setReleases(stableReleaseJSON("v1.1.0"))
 	run := false
 	outcome, err := h.cfg.Update(context.Background(), Options{
 		DryRun: true,
@@ -235,6 +337,9 @@ func TestUpdate_ManagedExecutable_DryRunReportsCommandWithoutExecuting(t *testin
 	}
 	if outcome.Action != ActionPlanned || outcome.PlannedCommand != "brew upgrade --cask wb" {
 		t.Errorf("outcome = %+v, want planned Homebrew command", outcome)
+	}
+	if outcome.Result.Current != "1.0.0" || outcome.Result.Latest != "1.1.0" {
+		t.Errorf("planned Result = %+v, want current/latest availability", outcome.Result)
 	}
 	if run {
 		t.Error("managed command ran during --dry-run")
@@ -270,7 +375,8 @@ func TestUpdate_ManagedExecutable_CommandFailureIsTyped(t *testing.T) {
 	h.cfg.Managers = []Manager{
 		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
 	}
-	_, err := h.cfg.Update(context.Background(), Options{
+	h.setReleases(stableReleaseJSON("v1.1.0"))
+	outcome, err := h.cfg.Update(context.Background(), Options{
 		Confirm: func(string) (bool, error) { return true, nil },
 		RunManaged: func(context.Context, string, []string) error {
 			return errors.New("brew failed")
@@ -282,6 +388,9 @@ func TestUpdate_ManagedExecutable_CommandFailureIsTyped(t *testing.T) {
 	}
 	if KindOf(err) != KindManagedCommand {
 		t.Errorf("KindOf(err) = %v, want KindManagedCommand", KindOf(err))
+	}
+	if outcome.Result.Current != "1.0.0" || outcome.Result.Latest != "1.1.0" {
+		t.Errorf("error Result = %+v, want current/latest availability", outcome.Result)
 	}
 }
 
@@ -310,6 +419,7 @@ func TestUpdate_ManagedExecutable_ConfirmationOutcomes(t *testing.T) {
 		h.cfg.Managers = []Manager{
 			Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
 		}
+		h.setReleases(stableReleaseJSON("v1.1.0"))
 		return h
 	}
 	baseOptions := func() Options {
@@ -353,6 +463,9 @@ func TestUpdate_ManagedExecutable_ConfirmationOutcomes(t *testing.T) {
 		}
 		if outcome.Action != ActionAborted || run {
 			t.Errorf("outcome = %+v, run = %v; want aborted without execution", outcome, run)
+		}
+		if outcome.Result.Current != "1.0.0" || outcome.Result.Latest != "1.1.0" {
+			t.Errorf("aborted Result = %+v, want current/latest availability", outcome.Result)
 		}
 	})
 }

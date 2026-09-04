@@ -48,9 +48,13 @@ var terminalCheck = term.IsTerminal
 type ConfirmOptions struct {
 	// In is read for the user's y/N answer once a prompt is actually shown.
 	In io.Reader
-	// Out receives the transition line always, and the "Proceed? [y/N] "
-	// prompt text when one is shown.
+	// Out receives the transition line unless HideTransition is set, and the
+	// "Proceed? [y/N] " prompt text when one is shown.
 	Out io.Writer
+	// HideTransition keeps a caller-provided structured preview from being
+	// repeated immediately before the prompt. The default preserves the
+	// original standalone confirmation behavior.
+	HideTransition bool
 	// Yes skips the prompt and proceeds immediately without consulting
 	// Interactive at all — wire this from a --yes/-y style flag.
 	Yes bool
@@ -79,7 +83,9 @@ func Confirm(opts ConfirmOptions) func(transition string) (bool, error) {
 		interactive = IsTerminal
 	}
 	return func(transition string) (bool, error) {
-		_, _ = fmt.Fprintln(opts.Out, transition)
+		if !opts.HideTransition {
+			_, _ = fmt.Fprintln(opts.Out, transition)
+		}
 		if opts.Yes {
 			return true, nil
 		}

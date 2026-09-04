@@ -33,6 +33,23 @@ func TestConfirm_YesSkipsPromptAndInteractiveCheck(t *testing.T) {
 	}
 }
 
+func TestConfirm_HideTransitionKeepsPrompt(t *testing.T) {
+	var out bytes.Buffer
+	confirm := Confirm(ConfirmOptions{
+		In:             strings.NewReader("y\n"),
+		Out:            &out,
+		HideTransition: true,
+		Interactive:    func() bool { return true },
+	})
+	proceed, err := confirm("1.0.0 → 1.1.0")
+	if err != nil || !proceed {
+		t.Fatalf("Confirm = (%v, %v), want (true, nil)", proceed, err)
+	}
+	if strings.Contains(out.String(), "1.0.0 → 1.1.0") || !strings.Contains(out.String(), "Proceed?") {
+		t.Errorf("output = %q, want prompt without transition", out.String())
+	}
+}
+
 // REQ: non-interactive-refusal.
 func TestConfirm_NonInteractiveRefusal(t *testing.T) {
 	confirm := Confirm(ConfirmOptions{
