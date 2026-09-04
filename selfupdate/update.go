@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 )
 
 // Action is what Update actually did (or, for a dry run, would do).
@@ -71,6 +72,11 @@ type Outcome struct {
 	// Result is the version comparison that led to Action, when one was
 	// performed.
 	Result CheckResult
+	// ReleaseCheckWarning records an advisory failure while looking up the
+	// latest published release for a managed install. The package manager
+	// remains the update authority, so this warning never prevents a redirect
+	// or configured manager command from proceeding.
+	ReleaseCheckWarning error
 	// Target is the normalized version that was (or would be, or was
 	// declined to be) installed.
 	Target string
@@ -130,6 +136,23 @@ type ManagedCommandRunner func(ctx context.Context, executable string, args []st
 // command has already completed.
 type ManagedBinaryVerifier func(ctx context.Context, binary string, args []string) error
 
+// Availability is the structured version information reported before an
+// update confirmation or package-manager command. Pinned is true when Target
+// names the requested release rather than the latest stable release. Warning
+// means the managed-release lookup was unavailable; Result.Current remains
+// useful, but Result.Latest is empty and must not be presented as a version.
+type Availability struct {
+	Result    CheckResult
+	Target    string
+	Pinned    bool
+	Detection Detection
+	Warning   error
+}
+
+// AvailabilityReporter receives version information before any confirmation
+// or mutation. It is a callback so the core remains framework- and I/O-free.
+type AvailabilityReporter func(Availability)
+
 // Options controls one Update call. For a manual install, the zero value (no
 // pin, no downgrade allowance, DryRun false, Confirm nil) updates
 // unconditionally to the latest stable release with no confirmation gate.
@@ -169,6 +192,10 @@ type Options struct {
 	// VerifyManaged is required alongside RunManaged and probes the CLI found
 	// after the manager command using Config.VersionProbeArgs.
 	VerifyManaged ManagedBinaryVerifier
+	// ReportAvailability is called once after version information is resolved
+	// and before confirmation or mutation. Its callback is advisory output only;
+	// it cannot alter update control flow.
+	ReportAvailability AvailabilityReporter
 	// AfterUpdate runs only after an actual successful update, an already-current
 	// result, or a successful executable package-manager update. It receives the
 	// resolved installed executable identity so integrations can reexec the new
@@ -178,8 +205,9 @@ type Options struct {
 }
 
 var (
-	execLookPath = exec.LookPath
-	absPath      = filepath.Abs
+	execLookPath               = exec.LookPath
+	absPath                    = filepath.Abs
+	managedAvailabilityTimeout = 5 * time.Second
 )
 
 // Update resolves the target release (the latest stable release, or an
@@ -199,14 +227,26 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 	}
 
 	if detection.Method == Managed {
+		if opts.PinnedVersion != "" {
+			managerName := "the package manager"
+			if detection.Manager != nil {
+				managerName = detection.Manager.Name
+			}
+			return Outcome{Detection: detection}, &Failure{
+				Kind: KindManagedVersion,
+				Err:  fmt.Errorf("%s cannot install the requested version %q; package-manager updates do not support release pins", managerName, opts.PinnedVersion),
+			}
+		}
+		availability := cfg.managedAvailability(ctx, detection)
+		cfg.reportAvailability(opts, availability)
 		// REQ: managed-no-overwrite — this branch never reaches the
 		// download/write path below. Redirect-only managers preserve the
 		// original behavior exactly; executable managers remain under the
 		// package manager's authority through the structured runner.
 		if detection.Manager == nil || !detection.Manager.CanExecuteUpgrade() {
-			return Outcome{Action: ActionRedirected, Detection: detection}, nil
+			return Outcome{Action: ActionRedirected, Detection: detection, Result: availability.Result, ReleaseCheckWarning: availability.Warning}, nil
 		}
-		return cfg.updateManaged(ctx, opts, detection)
+		return cfg.updateManaged(ctx, opts, detection, availability)
 	}
 	if detection.Method != Manual {
 		// Ambiguous, or any value that is not a recognized Manual
@@ -253,6 +293,7 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 				}
 			}
 		}
+		cfg.reportAvailability(opts, Availability{Result: result, Target: target, Pinned: true, Detection: detection})
 	} else {
 		latestTag, err := cfg.latestStableTag(ctx)
 		if err != nil {
@@ -274,11 +315,13 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 		}
 
 		if result.Verdict == UpToDate {
+			cfg.reportAvailability(opts, Availability{Result: result, Target: target, Detection: detection})
 			// REQ: no-op-when-current.
 			outcome := Outcome{Action: ActionAlreadyCurrent, Detection: detection, Result: result}
 			cfg.runAfterUpdate(ctx, opts, &outcome)
 			return outcome, nil
 		}
+		cfg.reportAvailability(opts, Availability{Result: result, Target: target, Detection: detection})
 	}
 
 	transition := buildTransition(result.Current, target, downgrade)
@@ -336,31 +379,28 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 	return outcome, nil
 }
 
-func (c Config) updateManaged(ctx context.Context, opts Options, detection Detection) (Outcome, error) {
+func (c Config) updateManaged(ctx context.Context, opts Options, detection Detection, availability Availability) (Outcome, error) {
 	m := detection.Manager
-	if opts.PinnedVersion != "" {
-		return Outcome{Detection: detection}, &Failure{
-			Kind: KindManagedVersion,
-			Err:  fmt.Errorf("%s cannot install the requested version %q; package-manager updates do not support release pins", m.Name, opts.PinnedVersion),
-		}
-	}
+	base := Outcome{Detection: detection, Result: availability.Result, ReleaseCheckWarning: availability.Warning}
 
 	if opts.DryRun {
 		return Outcome{
-			Action:         ActionPlanned,
-			Detection:      detection,
-			PlannedCommand: m.UpgradeCommand,
+			Action:              ActionPlanned,
+			Detection:           base.Detection,
+			Result:              base.Result,
+			ReleaseCheckWarning: base.ReleaseCheckWarning,
+			PlannedCommand:      m.UpgradeCommand,
 		}, nil
 	}
 
 	if opts.RunManaged == nil {
-		return Outcome{Detection: detection}, &Failure{
+		return base, &Failure{
 			Kind: KindManagedCommand,
 			Err:  errors.New("managed update runner is not configured"),
 		}
 	}
 	if opts.VerifyManaged == nil {
-		return Outcome{Detection: detection}, &Failure{
+		return base, &Failure{
 			Kind: KindManagedCommand,
 			Err:  errors.New("managed post-update version probe is not configured"),
 		}
@@ -372,30 +412,50 @@ func (c Config) updateManaged(ctx context.Context, opts Options, detection Detec
 		if err != nil {
 			var f *Failure
 			if errors.As(err, &f) {
-				return Outcome{Detection: detection}, f
+				return base, f
 			}
-			return Outcome{Detection: detection}, &Failure{Kind: KindUnexpected, Err: err}
+			return base, &Failure{Kind: KindUnexpected, Err: err}
 		}
 		if !proceed {
-			return Outcome{Action: ActionAborted, Detection: detection}, nil
+			return Outcome{Action: ActionAborted, Detection: detection, Result: base.Result, ReleaseCheckWarning: base.ReleaseCheckWarning}, nil
 		}
 	}
 
 	args := append([]string(nil), m.UpgradeArgs...)
 	if err := opts.RunManaged(ctx, m.UpgradeExecutable, args); err != nil {
-		return Outcome{Detection: detection}, &Failure{
+		return base, &Failure{
 			Kind: KindManagedCommand,
 			Err:  fmt.Errorf("run %s: %w", m.UpgradeCommand, err),
 		}
 	}
 
-	outcome := Outcome{Action: ActionManagerExecuted, Detection: detection}
+	outcome := Outcome{Action: ActionManagerExecuted, Detection: detection, Result: base.Result, ReleaseCheckWarning: base.ReleaseCheckWarning}
 	probeArgs := append([]string(nil), c.VersionProbeArgs...)
 	if err := opts.VerifyManaged(ctx, c.BinaryName, probeArgs); err != nil {
 		outcome.PostSwapWarning = err
 	}
 	c.runAfterUpdate(ctx, opts, &outcome)
 	return outcome, nil
+}
+
+func (c Config) managedAvailability(ctx context.Context, detection Detection) Availability {
+	lookupCtx, cancel := context.WithTimeout(ctx, managedAvailabilityTimeout)
+	defer cancel()
+	result, err := c.Check(lookupCtx)
+	if err != nil {
+		current := c.CurrentVersion
+		if !c.isUndetermined(current) {
+			current = normalize(current)
+		}
+		return Availability{Result: CheckResult{Current: current}, Detection: detection, Warning: err}
+	}
+	return Availability{Result: result, Target: result.Latest, Detection: detection}
+}
+
+func (c Config) reportAvailability(opts Options, availability Availability) {
+	if opts.ReportAvailability != nil {
+		opts.ReportAvailability(availability)
+	}
 }
 
 func (c Config) runAfterUpdate(ctx context.Context, opts Options, outcome *Outcome) {

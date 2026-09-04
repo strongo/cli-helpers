@@ -181,10 +181,11 @@ func runUpdate(cmd *cobra.Command, cfg selfupdate.Config, opts CommandOptions, f
 		interactionOut = cmd.ErrOrStderr()
 	}
 	confirm := cliui.Confirm(cliui.ConfirmOptions{
-		In:          cmd.InOrStdin(),
-		Out:         interactionOut,
-		Yes:         yes,
-		Interactive: opts.Interactive,
+		In:             cmd.InOrStdin(),
+		Out:            interactionOut,
+		Yes:            yes,
+		HideTransition: true,
+		Interactive:    opts.Interactive,
 	})
 
 	outcome, err := updateFunc(cfg, cmd.Context(), selfupdate.Options{
@@ -194,7 +195,10 @@ func runUpdate(cmd *cobra.Command, cfg selfupdate.Config, opts CommandOptions, f
 		Confirm:        confirm,
 		RunManaged:     cliui.ManagedCommandRunner(cmd.InOrStdin(), interactionOut, cmd.ErrOrStderr()),
 		VerifyManaged:  cliui.VerifyManagedBinary,
-		AfterUpdate:    opts.AfterUpdate,
+		ReportAvailability: func(availability selfupdate.Availability) {
+			cliui.WriteAvailabilityPreview(interactionOut, cfg, availability)
+		},
+		AfterUpdate: opts.AfterUpdate,
 	})
 	if err != nil {
 		if selfupdate.KindOf(err) == selfupdate.KindAmbiguous {
@@ -204,6 +208,7 @@ func runUpdate(cmd *cobra.Command, cfg selfupdate.Config, opts CommandOptions, f
 	}
 
 	if format == "json" {
+		cliui.WriteAvailabilityWarning(cmd.ErrOrStderr(), outcome)
 		if err := cliui.WriteOutcomeJSON(out, outcome); err != nil {
 			return mapFailure(opts, err)
 		}

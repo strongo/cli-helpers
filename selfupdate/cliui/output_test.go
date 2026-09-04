@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/colorprofile"
 	"github.com/strongo/cli-helpers/selfupdate"
 )
 
@@ -31,6 +32,140 @@ func TestWriteOutcome_ManagedRedirect(t *testing.T) {
 	})
 	if !strings.Contains(out.String(), "Homebrew") || !strings.Contains(out.String(), "brew upgrade tool") {
 		t.Errorf("stdout %q does not name the manager and its upgrade command", out.String())
+	}
+}
+
+func TestWriteAvailabilityPreview_PlainAsciiContainsManagedVersionsAndCommand(t *testing.T) {
+	mgr := selfupdate.Homebrew("brew upgrade --cask tool")
+	availability := selfupdate.Availability{
+		Result:    selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0"},
+		Detection: selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr},
+	}
+	var out bytes.Buffer
+	WriteAvailabilityPreview(&out, testConfig(), availability)
+	if strings.Contains(out.String(), "\x1b[") {
+		t.Fatalf("piped preview contains ANSI: %q", out.String())
+	}
+	for _, want := range []string{"tool self-update", "Current", "1.0.0", "Latest", "1.1.0", "Install", "Homebrew", "Command", "brew upgrade --cask tool"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("preview %q missing %q", out.String(), want)
+		}
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		if len(line) > 80 {
+			t.Errorf("preview line width = %d, want <= 80: %q", len(line), line)
+		}
+	}
+}
+
+func TestRenderAvailabilityPreview_ColorsWhenWriterSupportsANSI(t *testing.T) {
+	availability := selfupdate.Availability{Result: selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0"}}
+	var out bytes.Buffer
+	writer := colorprofile.NewWriter(&out, []string{"TERM=xterm-256color"})
+	writer.Profile = colorprofile.ANSI
+	_, err := writer.WriteString(renderAvailabilityPreview(testConfig(), availability))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "\x1b[") {
+		t.Errorf("ANSI writer output = %q, want color sequences", out.String())
+	}
+}
+
+func TestAvailabilityPreviewNoColorOverridesCLICOLORForce(t *testing.T) {
+	profile := colorprofile.Env([]string{"TERM=xterm-256color", "NO_COLOR=1", "CLICOLOR_FORCE=1"})
+	if profile != colorprofile.ASCII {
+		t.Errorf("color profile = %v, want ASCII when NO_COLOR overrides CLICOLOR_FORCE", profile)
+	}
+	t.Setenv("TERM", "dumb")
+	t.Setenv("NO_COLOR", "1")
+	t.Setenv("CLICOLOR_FORCE", "1")
+	var out bytes.Buffer
+	WriteAvailabilityPreview(&out, testConfig(), selfupdate.Availability{Result: selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0"}})
+	if strings.Contains(out.String(), "\x1b[") {
+		t.Errorf("NO_COLOR preview contains ANSI: %q", out.String())
+	}
+}
+
+func TestTerminalWriterHandlesColorProfiles(t *testing.T) {
+	var out bytes.Buffer
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("CLICOLOR_FORCE", "1")
+	writeTerminal(&out, titleStyle.Render("terminal"))
+	if _, err := terminalWriter(&out).WriteString(titleStyle.Render("title")); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("NO_COLOR", "1")
+	if _, err := terminalWriter(&out).WriteString(titleStyle.Render("plain")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWriteAvailabilityPreview_PinnedUsesTargetNotLatest(t *testing.T) {
+	availability := selfupdate.Availability{
+		Result: selfupdate.CheckResult{Current: "1.1.0", Latest: "0.9.0"},
+		Target: "0.9.0", Pinned: true,
+	}
+	var out bytes.Buffer
+	WriteAvailabilityPreview(&out, testConfig(), availability)
+	if strings.Contains(out.String(), "Latest") || !strings.Contains(out.String(), "Target") {
+		t.Errorf("pinned preview = %q, want Target without Latest", out.String())
+	}
+}
+
+func TestWriteAvailabilityPreview_UnavailableLatestWrapsWithin80Columns(t *testing.T) {
+	availability := selfupdate.Availability{
+		Result:  selfupdate.CheckResult{Current: "1.0.0"},
+		Warning: errors.New(strings.Repeat("release lookup unavailable ", 10)),
+	}
+	var out bytes.Buffer
+	WriteAvailabilityPreview(&out, testConfig(), availability)
+	if !strings.Contains(out.String(), "Latest : unavailable") {
+		t.Errorf("preview = %q, want unavailable latest", out.String())
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		if len(line) > 80 {
+			t.Errorf("preview line width = %d, want <= 80: %q", len(line), line)
+		}
+	}
+}
+
+func TestPreviewValueWrappingAndTruncation(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string
+		width       int
+		wantLines   int
+	}{
+		{name: "short", value: "short", width: 10, wantLines: 1},
+		{name: "space boundary", value: "one two three", width: 7, wantLines: 2},
+		{name: "no spaces", value: "abcdefgh", width: 3, wantLines: 3},
+		{name: "zero width", value: "value", width: 0, wantLines: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := wrapPreviewValue(tc.value, tc.width); len(got) != tc.wantLines {
+				t.Errorf("wrapPreviewValue(%q, %d) = %q, want %d lines", tc.value, tc.width, got, tc.wantLines)
+			}
+		})
+	}
+	if got := truncatePreviewValue("short", 10); got != "short" {
+		t.Errorf("truncate short = %q", got)
+	}
+	if got := truncatePreviewValue("very long value", 8); !strings.HasSuffix(got, "...") {
+		t.Errorf("truncate long = %q, want ellipsis", got)
+	}
+}
+
+func TestWriteAvailabilityWarningOnlyWritesWhenPresent(t *testing.T) {
+	var out bytes.Buffer
+	WriteAvailabilityWarning(&out, selfupdate.Outcome{})
+	if out.Len() != 0 {
+		t.Errorf("nil warning output = %q, want empty", out.String())
+	}
+	WriteAvailabilityWarning(&out, selfupdate.Outcome{ReleaseCheckWarning: errors.New("github unavailable")})
+	if !strings.Contains(out.String(), "github unavailable") {
+		t.Errorf("warning output = %q", out.String())
 	}
 }
 
@@ -201,6 +336,27 @@ func TestWriteOutcomeJSON_AllActions(t *testing.T) {
 				t.Errorf("action = %v, want %q", got["action"], c.wantAct)
 			}
 		})
+	}
+}
+
+func TestWriteOutcomeJSON_ManagedAvailabilityAndWarningStayStructured(t *testing.T) {
+	mgr := selfupdate.Homebrew("brew upgrade --cask tool")
+	var out bytes.Buffer
+	err := WriteOutcomeJSON(&out, selfupdate.Outcome{
+		Action:              selfupdate.ActionRedirected,
+		Detection:           selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr},
+		Result:              selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0"},
+		ReleaseCheckWarning: errors.New("github unavailable"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("JSON does not parse: %v", err)
+	}
+	if got["current"] != "1.0.0" || got["latest"] != "1.1.0" || got["release_check_warning"] != "github unavailable" {
+		t.Errorf("JSON = %#v, want current/latest/warning", got)
 	}
 }
 
