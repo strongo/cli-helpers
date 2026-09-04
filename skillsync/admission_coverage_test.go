@@ -166,6 +166,13 @@ func TestAdmissionClassificationRejectsUnsafeFilesystemShapes(t *testing.T) {
 	owners := map[string]string{"alpha": "strongo/plugin"}
 
 	t.Run("classify file and unsafe tree", func(t *testing.T) {
+		fileParent := filepath.Join(t.TempDir(), "file-parent")
+		if err := os.WriteFile(fileParent, []byte("file"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := classify(fileParent, item, prior, owners, "strongo/plugin"); err == nil {
+			t.Fatal("classification accepted file parent")
+		}
 		dir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(dir, "alpha"), []byte("file"), 0o600); err != nil {
 			t.Fatal(err)
@@ -223,6 +230,9 @@ func TestAdmissionClassificationRejectsUnsafeFilesystemShapes(t *testing.T) {
 		if err := rejectSymlink(filepath.Join(t.TempDir(), "missing")); err != nil {
 			t.Fatalf("missing target err=%v", err)
 		}
+		if err := rejectSymlink(filepath.Join(t.TempDir(), "missing-parent", "target")); err != nil {
+			t.Fatalf("nested missing target err=%v", err)
+		}
 		file := filepath.Join(t.TempDir(), "file")
 		if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
@@ -239,6 +249,47 @@ func TestAdmissionClassificationRejectsUnsafeFilesystemShapes(t *testing.T) {
 		}
 		if err := rejectSymlink(link); err == nil {
 			t.Fatal("symlink target accepted")
+		}
+		if err := rejectSymlink(filepath.Join(link, "missing")); err == nil {
+			t.Fatal("symlink ancestor target accepted")
+		}
+	})
+
+	t.Run("missing ancestry lookup failures are preserved", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "missing")
+		if err := validTransactionDir(missing); err != nil {
+			t.Fatalf("missing transaction dir=%v", err)
+		}
+		if err := checkTransactionSubdir(missing, "backup"); err != nil {
+			t.Fatalf("missing transaction subdir=%v", err)
+		}
+		lookupErr := errors.New("ancestor lookup")
+		previous := filesystemOperations
+		t.Cleanup(func() { filesystemOperations = previous })
+		filesystemOperations.lstat = func(string) (fs.FileInfo, error) { return nil, lookupErr }
+		if err := rejectSymlink(missing); !errors.Is(err, lookupErr) {
+			t.Fatalf("target ancestry error=%v", err)
+		}
+		if _, _, _, err := readRecoveryJournal(missing); !errors.Is(err, ErrStateCorrupt) || !errors.Is(err, lookupErr) {
+			t.Fatalf("journal ancestry error=%v", err)
+		}
+		if err := validTransactionDir(missing); !errors.Is(err, ErrStateCorrupt) || !errors.Is(err, lookupErr) {
+			t.Fatalf("transaction ancestry error=%v", err)
+		}
+		if err := checkTransactionSubdir(missing, "backup"); !errors.Is(err, ErrStateCorrupt) || !errors.Is(err, lookupErr) {
+			t.Fatalf("subdir ancestry error=%v", err)
+		}
+		fileParent := filepath.Join(t.TempDir(), "file-parent")
+		if err := os.WriteFile(fileParent, []byte("file"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Lstat(fileParent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		filesystemOperations.lstat = func(string) (fs.FileInfo, error) { return info, nil }
+		if err := rejectSymlink(missing); err == nil {
+			t.Fatal("non-directory ancestor accepted")
 		}
 	})
 }

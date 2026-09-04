@@ -60,8 +60,12 @@ func TestWindowsDirectoryHandleReportsInvalidHandleFailures(t *testing.T) {
 	if err := handle.Sync(); err == nil {
 		t.Fatal("invalid handle flushed successfully")
 	}
-	if err := handle.Close(); err == nil {
-		t.Fatal("invalid handle closed successfully")
+	closeErr := errors.New("close")
+	previous := closeDirectoryHandle
+	closeDirectoryHandle = func(syscall.Handle) error { return closeErr }
+	t.Cleanup(func() { closeDirectoryHandle = previous })
+	if err := handle.Close(); !errors.Is(err, closeErr) {
+		t.Fatalf("close error=%v", err)
 	}
 }
 

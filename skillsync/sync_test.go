@@ -431,7 +431,8 @@ func TestDigestRetainsLeadingDotRootFilesAndExecutableModes(t *testing.T) {
 
 func TestEmbeddedRealExecutableFixtureUsesDescriptorModeMetadata(t *testing.T) {
 	local := os.DirFS("testdata")
-	localDigest, err := Digest(local)
+	declaredExecutables := []string{"executable-script"}
+	localDigest, err := DigestWithExecutables(local, declaredExecutables)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +447,7 @@ func TestEmbeddedRealExecutableFixtureUsesDescriptorModeMetadata(t *testing.T) {
 	if info.Mode().Perm()&0o111 != 0 {
 		t.Fatalf("embed unexpectedly retained source execute bit: %v", info.Mode())
 	}
-	embeddedDigest, err := DigestWithExecutables(embedded, []string{"executable-script"})
+	embeddedDigest, err := DigestWithExecutables(embedded, declaredExecutables)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -835,7 +836,16 @@ func TestConcurrentSyncSerializesOneTarget(t *testing.T) {
 }
 
 func TestLockSharesRelativeAndAbsoluteTargetIdentity(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "skills")
+	root, err := os.MkdirTemp(".", "skillsync-lock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	dir := filepath.Join(root, "skills")
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
