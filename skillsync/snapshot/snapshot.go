@@ -220,8 +220,22 @@ func Unpack(artifact []byte, limits Limits) (skillsync.BundleDescriptor, fs.FS, 
 }
 
 // WriteEmbedDirectory materializes the exact descriptor/content pair for a
-// caller's go:embed directory. It is intentionally separate from archive IO.
+// caller's go:embed directory. The destination must not already exist. A write
+// failure may leave partial output in this newly created directory; callers
+// must discard that output before retrying or embedding it.
 func WriteEmbedDirectory(dir string, descriptor skillsync.BundleDescriptor, content fs.FS) error {
+	return writeEmbedDirectory(dir, descriptor, content, embedOutput{os.Mkdir, os.MkdirAll, os.WriteFile})
+}
+
+// Keep filesystem fault injection at the output boundary, so tests can prove
+// that failures after directory creation cannot be reported as publication.
+type embedOutput struct {
+	mkdir     func(string, fs.FileMode) error
+	mkdirAll  func(string, fs.FileMode) error
+	writeFile func(string, []byte, fs.FileMode) error
+}
+
+func writeEmbedDirectory(dir string, descriptor skillsync.BundleDescriptor, content fs.FS, output embedOutput) error {
 	var err error
 	descriptor, err = normalizedDescriptor(descriptor, content)
 	if err != nil {
@@ -233,23 +247,23 @@ func WriteEmbedDirectory(dir string, descriptor skillsync.BundleDescriptor, cont
 	}
 	// A producer owns a freshly-created output only. Reusing an existing tree
 	// could retain stale content, follow a symlink, or preserve the wrong mode.
-	if err := os.Mkdir(dir, 0o755); err != nil {
+	if err := output.mkdir(dir, 0o755); err != nil {
 		return err
 	}
 	raw, _ := json.MarshalIndent(descriptor, "", "  ") // BundleDescriptor contains only marshalable value fields.
-	if err := os.WriteFile(filepath.Join(dir, descriptorName), append(raw, '\n'), 0o644); err != nil {
+	if err := output.writeFile(filepath.Join(dir, descriptorName), append(raw, '\n'), 0o644); err != nil {
 		return err
 	}
 	for _, file := range files {
 		path := filepath.Join(dir, filepath.FromSlash(contentPrefix), filepath.FromSlash(file.name))
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		if err := output.mkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
 		}
 		mode := fs.FileMode(0o644)
 		if executable(descriptor.ExecutablePaths, file.name) {
 			mode = 0o755
 		}
-		if err := os.WriteFile(path, file.data, mode); err != nil {
+		if err := output.writeFile(path, file.data, mode); err != nil {
 			return err
 		}
 	}

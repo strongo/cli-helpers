@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -105,7 +106,7 @@ func TestIntrinsicExecutableModeIsPublishedInArchiveAndEmbedMetadata(t *testing.
 	if err := os.WriteFile(filepath.Join(root, "alpha", "SKILL.md"), []byte("skill"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "alpha", "run"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "alpha", "run"), []byte("#!/bin/sh\nprintf snapshot-ok\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	content := os.DirFS(root)
@@ -131,6 +132,65 @@ func TestIntrinsicExecutableModeIsPublishedInArchiveAndEmbedMetadata(t *testing.
 	}
 	if info, err := os.Stat(filepath.Join(embed, contentPrefix, "alpha", "run")); err != nil || info.Mode().Perm() != 0o755 {
 		t.Fatalf("mode=%v err=%v", info.Mode(), err)
+	}
+	metadata, err := os.ReadFile(filepath.Join(embed, descriptorName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var embeddedDescriptor skillsync.BundleDescriptor
+	if err := json.Unmarshal(metadata, &embeddedDescriptor); err != nil {
+		t.Fatal(err)
+	}
+	// embed.FS drops executable bits; exercise the published metadata with
+	// read-only content, then execute the installed script itself.
+	embedded := fstest.MapFS{}
+	if err := fs.WalkDir(os.DirFS(filepath.Join(embed, "content")), ".", func(name string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+		data, err := os.ReadFile(filepath.Join(embed, "content", filepath.FromSlash(name)))
+		if err != nil {
+			return err
+		}
+		embedded[name] = &fstest.MapFile{Data: data, Mode: 0o444}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := skillsync.EmbeddedBundle(embeddedDescriptor, embedded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	if _, err := skillsync.Sync(context.Background(), skillsync.Config{CLI: skillsync.Identity{Publisher: "strongo", Name: "tool"}, CurrentVersion: "1.2.3", Bundles: []skillsync.Bundle{bundle}}, skillsync.Options{Dir: target}); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(filepath.Join(target, "alpha", "run")).Output(); err != nil || string(output) != "snapshot-ok" {
+		t.Fatalf("installed executable output=%q err=%v", output, err)
+	}
+}
+
+func TestDescriptorJSONBindsTheSameNormalizedContentAsArchive(t *testing.T) {
+	descriptor, content := fixture(t)
+	raw, err := DescriptorJSON(descriptor, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published skillsync.BundleDescriptor
+	if err := json.Unmarshal(raw, &published); err != nil {
+		t.Fatal(err)
+	}
+	archive, err := Pack(descriptor, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, _, err := Unpack(archive, Limits{})
+	if err != nil || !bytes.Equal(mustJSON(t, decoded), mustJSON(t, published)) {
+		t.Fatalf("companion descriptor differs from archive: %v", err)
+	}
+	descriptor.ExecutablePaths = []string{"missing"}
+	if _, err := DescriptorJSON(descriptor, content); !errors.Is(err, skillsync.ErrInvalidConfig) {
+		t.Fatalf("missing executable error=%v", err)
 	}
 }
 
@@ -213,6 +273,8 @@ func TestArchiveBoundaryFailuresAreRejected(t *testing.T) {
 	}{
 		{"missing descriptor", []tarEntry{{name: "content/alpha/SKILL.md", data: []byte("x")}}, Limits{}},
 		{"duplicate entry", []tarEntry{{name: descriptorName, data: mustJSON(t, descriptor)}, {name: descriptorName, data: mustJSON(t, descriptor)}}, Limits{}},
+		{"file before child", []tarEntry{{name: "content/alpha", data: []byte("hidden")}, {name: "content/alpha/SKILL.md", data: []byte("skill")}}, Limits{}},
+		{"child before file", []tarEntry{{name: "content/alpha/SKILL.md", data: []byte("skill")}, {name: "content/alpha", data: []byte("hidden")}}, Limits{}},
 		{"unknown entry", []tarEntry{{name: descriptorName, data: mustJSON(t, descriptor)}, {name: "other", data: []byte("x")}}, Limits{}},
 		{"symlink", []tarEntry{{name: descriptorName, data: mustJSON(t, descriptor)}, {name: "content/alpha/SKILL.md", typeflag: tar.TypeSymlink, linkname: "outside"}}, Limits{}},
 		{"link name", []tarEntry{{name: descriptorName, data: mustJSON(t, descriptor)}, {name: "content/alpha/SKILL.md", data: []byte("x"), linkname: "outside"}}, Limits{}},
@@ -266,38 +328,8 @@ func TestSourceAndEmbedDirectoryFailures(t *testing.T) {
 	if err := WriteEmbedDirectory(file, descriptor, content); err == nil {
 		t.Fatal("expected directory creation failure")
 	}
-	dir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(dir, descriptorName), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := WriteEmbedDirectory(dir, descriptor, content); err == nil {
-		t.Fatal("expected descriptor write failure")
-	}
-	dir = t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, contentPrefix, "alpha"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, contentPrefix, "alpha"), []byte("x"), 0o644); err == nil {
-		t.Fatal("expected fixture setup to fail because alpha is a directory")
-	}
-	if err := os.RemoveAll(filepath.Join(dir, contentPrefix, "alpha")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, contentPrefix, "alpha"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := WriteEmbedDirectory(dir, descriptor, content); err == nil {
-		t.Fatal("expected content parent failure")
-	}
-	dir = t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, contentPrefix, "alpha", "run"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := WriteEmbedDirectory(dir, descriptor, content); err == nil {
-		t.Fatal("expected content write failure")
-	}
 	stable := &failAfterFS{FS: content, failAfter: 100}
-	if _, err := skillsync.EmbeddedBundle(descriptor, stable); err != nil {
+	if _, err := normalizedDescriptor(descriptor, stable); err != nil {
 		t.Fatal(err)
 	}
 	changed := &failAfterFS{FS: content, failAfter: stable.opens}
@@ -305,8 +337,44 @@ func TestSourceAndEmbedDirectoryFailures(t *testing.T) {
 		t.Fatal("expected source mutation failure after validation")
 	}
 	changed = &failAfterFS{FS: content, failAfter: stable.opens}
-	if err := WriteEmbedDirectory(t.TempDir(), descriptor, changed); err == nil {
+	dir := filepath.Join(t.TempDir(), "embed")
+	if err := WriteEmbedDirectory(dir, descriptor, changed); err == nil {
 		t.Fatal("expected source mutation failure before embed output")
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("source failure created output: %v", err)
+	}
+}
+
+func TestEmbedOutputFailuresAfterFreshDirectoryCreation(t *testing.T) {
+	descriptor, content := fixture(t)
+	for _, phase := range []string{"descriptor", "content-parent", "content-file"} {
+		t.Run(phase, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "embed")
+			failure := errors.New("injected " + phase + " write failure")
+			reached := false
+			output := embedOutput{mkdir: os.Mkdir, mkdirAll: os.MkdirAll, writeFile: os.WriteFile}
+			if phase == "content-parent" {
+				output.mkdirAll = func(string, fs.FileMode) error { reached = true; return failure }
+			} else {
+				output.writeFile = func(name string, data []byte, mode fs.FileMode) error {
+					if (name == filepath.Join(dir, descriptorName)) == (phase == "descriptor") {
+						reached = true
+						return failure
+					}
+					return os.WriteFile(name, data, mode)
+				}
+			}
+			if err := writeEmbedDirectory(dir, descriptor, content, output); !errors.Is(err, failure) || !reached {
+				t.Fatalf("failure phase reached=%v, error=%v", reached, err)
+			}
+			if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+				t.Fatalf("failure occurred before fresh directory creation: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "content", "alpha", "SKILL.md")); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("unexpected publication after output failure: %v", err)
+			}
+		})
 	}
 }
 
