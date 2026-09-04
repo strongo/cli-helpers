@@ -4,7 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"strings"
 
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/strongo/cli-helpers/selfupdate"
 )
 
@@ -28,16 +33,17 @@ type checkJSON struct {
 // "only meaningful for some actions" contract documented on
 // selfupdate.Outcome.
 type outcomeJSON struct {
-	Action             string `json:"action"`
-	Manager            string `json:"manager,omitempty"`
-	Command            string `json:"command,omitempty"`
-	Current            string `json:"current,omitempty"`
-	Latest             string `json:"latest,omitempty"`
-	Target             string `json:"target,omitempty"`
-	Downgrade          bool   `json:"downgrade,omitempty"`
-	PlannedURL         string `json:"planned_url,omitempty"`
-	Warning            string `json:"warning,omitempty"`
-	AfterUpdateWarning string `json:"after_update_warning,omitempty"`
+	Action              string `json:"action"`
+	Manager             string `json:"manager,omitempty"`
+	Command             string `json:"command,omitempty"`
+	Current             string `json:"current,omitempty"`
+	Latest              string `json:"latest,omitempty"`
+	Target              string `json:"target,omitempty"`
+	Downgrade           bool   `json:"downgrade,omitempty"`
+	PlannedURL          string `json:"planned_url,omitempty"`
+	ReleaseCheckWarning string `json:"release_check_warning,omitempty"`
+	Warning             string `json:"warning,omitempty"`
+	AfterUpdateWarning  string `json:"after_update_warning,omitempty"`
 }
 
 // WriteOutcomeJSON writes outcome's --format json shape to out.
@@ -47,21 +53,18 @@ func WriteOutcomeJSON(out io.Writer, outcome selfupdate.Outcome) error {
 		oj.Manager = m.Name
 		oj.Command = m.UpgradeCommand
 	}
-	switch outcome.Action {
-	case selfupdate.ActionRedirected:
-	case selfupdate.ActionAlreadyCurrent:
-		oj.Current = outcome.Result.Current
-	case selfupdate.ActionUpdated, selfupdate.ActionAborted, selfupdate.ActionPlanned, selfupdate.ActionManagerExecuted:
-		oj.Current = outcome.Result.Current
-		oj.Latest = outcome.Result.Latest
-		oj.Target = outcome.Target
-		oj.Downgrade = outcome.Downgrade
-		if outcome.Action == selfupdate.ActionPlanned {
-			oj.PlannedURL = outcome.PlannedURL
-			if outcome.PlannedCommand != "" {
-				oj.Command = outcome.PlannedCommand
-			}
+	oj.Current = outcome.Result.Current
+	oj.Latest = outcome.Result.Latest
+	oj.Target = outcome.Target
+	oj.Downgrade = outcome.Downgrade
+	if outcome.Action == selfupdate.ActionPlanned {
+		oj.PlannedURL = outcome.PlannedURL
+		if outcome.PlannedCommand != "" {
+			oj.Command = outcome.PlannedCommand
 		}
+	}
+	if outcome.ReleaseCheckWarning != nil {
+		oj.ReleaseCheckWarning = outcome.ReleaseCheckWarning.Error()
 	}
 	if outcome.PostSwapWarning != nil {
 		oj.Warning = outcome.PostSwapWarning.Error()
@@ -79,11 +82,10 @@ func WriteOutcome(out, errOut io.Writer, cfg selfupdate.Config, outcome selfupda
 	switch outcome.Action {
 	case selfupdate.ActionRedirected:
 		if m := outcome.Detection.Manager; m != nil {
-			fmt.Fprintf(out, "%s was installed via %s. Run the following to upgrade:\n\n    %s\n", //nolint:errcheck
-				cfg.BinaryName, m.Name, m.UpgradeCommand)
+			fmt.Fprintf(out, "%s is managed by %s. Run: %s\n", cfg.BinaryName, m.Name, m.UpgradeCommand) //nolint:errcheck
 		}
 	case selfupdate.ActionAlreadyCurrent:
-		fmt.Fprintf(out, "%s is already up to date (%s).\n", cfg.BinaryName, outcome.Result.Current) //nolint:errcheck
+		writeStyled(out, successStyle, fmt.Sprintf("[OK] %s is already up to date (%s).\n", cfg.BinaryName, outcome.Result.Current))
 	case selfupdate.ActionAborted:
 		fmt.Fprintln(out, "self-update: aborted; binary left unchanged.") //nolint:errcheck
 	case selfupdate.ActionPlanned:
@@ -102,18 +104,160 @@ func WriteOutcome(out, errOut io.Writer, cfg selfupdate.Config, outcome selfupda
 		fmt.Fprintf(out, "dry run: would %s %s from %s to %s\n  asset: %s\n", //nolint:errcheck
 			verb, cfg.BinaryName, outcome.Result.Current, outcome.Target, outcome.PlannedURL)
 	case selfupdate.ActionUpdated:
-		fmt.Fprintf(out, "%s updated to %s.\n", cfg.BinaryName, outcome.Target) //nolint:errcheck
+		writeStyled(out, successStyle, fmt.Sprintf("[OK] %s updated to %s.\n", cfg.BinaryName, outcome.Target))
 	case selfupdate.ActionManagerExecuted:
 		if m := outcome.Detection.Manager; m != nil {
-			fmt.Fprintf(out, "%s upgrade completed for %s.\n", m.Name, cfg.BinaryName) //nolint:errcheck
+			writeStyled(out, successStyle, fmt.Sprintf("[OK] %s upgrade command completed for %s.\n", m.Name, cfg.BinaryName))
 		}
 	}
+	WriteAvailabilityWarning(errOut, outcome)
 	if outcome.PostSwapWarning != nil {
 		fmt.Fprintf(errOut, "self-update: warning: %v\n", outcome.PostSwapWarning) //nolint:errcheck
 	}
 	if outcome.AfterUpdateWarning != nil {
 		fmt.Fprintf(errOut, "self-update: post-update warning: %v\n", outcome.AfterUpdateWarning) //nolint:errcheck
 	}
+}
+
+// WriteAvailabilityWarning writes an advisory managed-release lookup warning
+// once, separately from the preview and any machine-readable outcome.
+func WriteAvailabilityWarning(errOut io.Writer, outcome selfupdate.Outcome) {
+	if outcome.ReleaseCheckWarning != nil {
+		writeStyled(errOut, warningStyle, fmt.Sprintf("self-update: warning: latest release unavailable: %v\n", outcome.ReleaseCheckWarning))
+	}
+}
+
+// WriteAvailabilityPreview writes one compact, terminal-aware summary before
+// confirmation or a package-manager command. It deliberately uses only ASCII
+// border characters so redirected output remains readable in logs and pipes.
+func WriteAvailabilityPreview(out io.Writer, cfg selfupdate.Config, availability selfupdate.Availability) {
+	writeTerminal(out, renderAvailabilityPreview(cfg, availability))
+}
+
+func renderAvailabilityPreview(cfg selfupdate.Config, availability selfupdate.Availability) string {
+	title := cfg.BinaryName + " self-update"
+	install := "Direct"
+	command := ""
+	if m := availability.Detection.Manager; m != nil {
+		install = m.Name
+		command = m.UpgradeCommand
+	}
+
+	rows := []previewRow{{label: "Current", value: availability.Result.Current}}
+	if availability.Pinned {
+		rows = append(rows, previewRow{label: "Target", value: availability.Target, style: previewSuccess})
+	} else if availability.Warning != nil {
+		rows = append(rows, previewRow{label: "Latest", value: "unavailable", style: previewWarning})
+	} else {
+		rows = append(rows, previewRow{label: "Latest", value: availability.Result.Latest, style: previewSuccess})
+	}
+	rows = append(rows, previewRow{label: "Install", value: install})
+	if command != "" {
+		rows = append(rows, previewRow{label: "Command", value: command})
+	}
+	width := lipgloss.Width(title)
+	for _, row := range rows {
+		width = max(width, previewLabelWidth+2+min(lipgloss.Width(row.value), 76-previewLabelWidth-2))
+	}
+	width = min(max(width, 28), 76)
+	border := borderStyle.Render("+" + strings.Repeat("-", width+2) + "+")
+	var b strings.Builder
+	b.WriteString(border)
+	b.WriteByte('\n')
+	b.WriteString(renderPreviewLine(titleStyle.Render(title), width))
+	b.WriteByte('\n')
+	b.WriteString(border)
+	b.WriteByte('\n')
+	for _, row := range rows {
+		b.WriteString(renderPreviewRow(row, width))
+		b.WriteByte('\n')
+	}
+	b.WriteString(border)
+	b.WriteByte('\n')
+	return b.String()
+}
+
+type previewRow struct {
+	label string
+	value string
+	style previewStyle
+}
+
+type previewStyle int
+
+const (
+	previewPlain previewStyle = iota
+	previewSuccess
+	previewWarning
+)
+
+var (
+	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	borderStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+)
+
+func renderPreviewLine(content string, width int) string {
+	content = truncatePreviewValue(content, width)
+	return borderStyle.Render("| ") + content + strings.Repeat(" ", max(0, width-lipgloss.Width(content))) + borderStyle.Render(" |")
+}
+
+func renderPreviewRow(row previewRow, width int) string {
+	values := wrapPreviewValue(row.value, width-previewLabelWidth-2)
+	var lines []string
+	for i, rawValue := range values {
+		label := ""
+		if i == 0 {
+			label = row.label
+		}
+		prefix := fmt.Sprintf("%-*s: ", previewLabelWidth, label)
+		value := rawValue
+		switch row.style {
+		case previewSuccess:
+			value = successStyle.Render(value)
+		case previewWarning:
+			value = warningStyle.Render(value)
+		}
+		contentWidth := lipgloss.Width(prefix) + lipgloss.Width(value)
+		lines = append(lines, borderStyle.Render("| ")+prefix+value+strings.Repeat(" ", max(0, width-contentWidth))+borderStyle.Render(" |"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+const previewLabelWidth = 7
+
+func wrapPreviewValue(value string, width int) []string {
+	return strings.Split(ansi.Wrap(value, width, " "), "\n")
+}
+
+func truncatePreviewValue(value string, width int) string {
+	return ansi.Truncate(value, width, "...")
+}
+
+func writeStyled(out io.Writer, style lipgloss.Style, value string) {
+	writeTerminal(out, style.Render(value))
+}
+
+func writeTerminal(out io.Writer, value string) {
+	if strings.TrimSpace(os.Getenv("NO_COLOR")) != "" || os.Getenv("TERM") == "dumb" {
+		_, _ = fmt.Fprint(out, ansi.Strip(value))
+		return
+	}
+	writer := terminalWriter(out)
+	_, _ = fmt.Fprint(writer, value)
+}
+
+func terminalWriter(out io.Writer) *colorprofile.Writer {
+	env := os.Environ()
+	writer := colorprofile.NewWriter(out, env)
+	// colorprofile's ASCII profile retains text decoration. The preview emits
+	// ANSI-styled strings, so use NoTTY for NO_COLOR to guarantee its colors
+	// are stripped even when CLICOLOR_FORCE is also present.
+	if colorprofile.Env(env) == colorprofile.ASCII {
+		writer.Profile = colorprofile.NoTTY
+	}
+	return writer
 }
 
 // WriteCheck writes result's human-readable text form to out.

@@ -105,6 +105,26 @@ successful manager command, the adapter MUST probe the CLI found on `PATH` with
 the configured version arguments; a failed probe is a warning because the
 manager command already completed.
 
+#### REQ: managed-availability-report
+
+For an unpinned managed update, the package MUST make one bounded, advisory
+lookup of the latest stable release and retain the normalized current/latest
+comparison in every redirect, dry-run, declined, and completed manager outcome.
+The adapter MUST report those values before confirmation or manager execution.
+If that lookup fails, it MUST report the normalized current version and that the
+latest release is unavailable, retain a distinct warning in the outcome, and
+still redirect or execute the configured manager command. The lookup MUST NOT
+make the manager-owned install eligible for direct replacement, infer that the
+manager installed the GitHub release, or skip a manager upgrade merely because
+the GitHub version equals the running version.
+
+The framework-neutral adapter MUST render the same compact ASCII preview for
+manual and managed updates, including Current/Latest (or pinned Target), install
+method, and a manager command when applicable. Colors are terminal-aware and
+MUST be absent for non-terminal, `TERM=dumb`, or `NO_COLOR` output; JSON stdout
+remains exactly one unstyled document, with preview and warning progress on
+stderr.
+
 #### REQ: latest-release-source
 
 The package MUST determine the latest version from the configured GitHub

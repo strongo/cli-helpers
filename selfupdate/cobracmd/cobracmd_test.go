@@ -219,6 +219,56 @@ func withStubUpdate(t *testing.T, capture *selfupdate.Options, outcome selfupdat
 	t.Cleanup(func() { updateFunc = prev })
 }
 
+func TestRunUpdate_RendersAvailabilityBeforeOutcomeAndKeepsJSONStdoutSingleDocument(t *testing.T) {
+	previous := updateFunc
+	t.Cleanup(func() { updateFunc = previous })
+	mgr := selfupdate.Homebrew("brew upgrade --cask tool")
+	availability := selfupdate.Availability{
+		Result:    selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0"},
+		Detection: selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr},
+	}
+	outcome := selfupdate.Outcome{
+		Action:    selfupdate.ActionRedirected,
+		Detection: availability.Detection,
+		Result:    availability.Result,
+	}
+	updateFunc = func(_ selfupdate.Config, _ context.Context, opts selfupdate.Options) (selfupdate.Outcome, error) {
+		if opts.ReportAvailability == nil {
+			t.Fatal("runUpdate did not wire ReportAvailability")
+		}
+		opts.ReportAvailability(availability)
+		return outcome, nil
+	}
+
+	for _, format := range []string{"text", "json"} {
+		t.Run(format, func(t *testing.T) {
+			cmd := New(testConfig(), CommandOptions{JSONFormat: true})
+			out, errOut, err := runCmd(t, cmd, "--yes", "--format="+format)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if format == "text" {
+				for _, want := range []string{"Current", "Latest", "Homebrew", "brew upgrade --cask tool"} {
+					if !strings.Contains(out, want) {
+						t.Errorf("text output %q missing %q", out, want)
+					}
+				}
+				return
+			}
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(out), &payload); err != nil {
+				t.Fatalf("stdout must be one JSON document: %v\n%s", err, out)
+			}
+			if payload["current"] != "1.0.0" || payload["latest"] != "1.1.0" {
+				t.Errorf("JSON payload = %#v, want current/latest", payload)
+			}
+			if !strings.Contains(errOut, "Current") || !strings.Contains(errOut, "Latest") {
+				t.Errorf("JSON stderr = %q, want preview", errOut)
+			}
+		})
+	}
+}
+
 // checkFunc and updateFunc default to calling cfg.Check/cfg.Update directly;
 // every other test in this file stubs them via withStubCheck/withStubUpdate,
 // which never exercises those default closures themselves. These two tests
