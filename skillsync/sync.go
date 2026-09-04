@@ -491,6 +491,9 @@ func statesEqual(a, b state) bool {
 }
 
 func classify(dir string, item skill, prior pluginState, owners map[string]string, plugin string) (Action, string, error) {
+	if err := rejectSymlink(dir); err != nil {
+		return "", "", err
+	}
 	path := filepath.Join(dir, item.Name)
 	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -525,6 +528,9 @@ func classify(dir string, item skill, prior pluginState, owners map[string]strin
 	return Updated, "", nil
 }
 func classifyRemoval(dir, name, old string, owners map[string]string, plugin string) (Action, string, error) {
+	if err := rejectSymlink(dir); err != nil {
+		return "", "", err
+	}
 	if owners[name] != plugin {
 		return Conflict, "owned by another plugin", nil
 	}
@@ -555,7 +561,7 @@ func classifyRemoval(dir, name, old string, owners map[string]string, plugin str
 func rejectSymlink(path string) error {
 	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return rejectUnsafeDirectoryAncestor(path)
 	}
 	if err != nil {
 		return err
@@ -567,6 +573,29 @@ func rejectSymlink(path string) error {
 		return fmt.Errorf("skills directory %s is not a directory", path)
 	}
 	return nil
+}
+
+// rejectUnsafeDirectoryAncestor proves that a missing leaf is below a real
+// directory. Windows reports a missing child below a regular-file parent as
+// not-exist, while POSIX commonly returns ENOTDIR; accepting either result
+// would let a malformed target bypass admission.
+func rejectUnsafeDirectoryAncestor(path string) error {
+	for parent := filepath.Dir(path); ; parent = filepath.Dir(parent) {
+		info, err := filesystemOperations.lstat(parent)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refuse symlinked skills directory ancestor %s", parent)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("skills directory ancestor %s is not a directory", parent)
+		}
+		return nil
+	}
 }
 func installedDigest(dir, name string) (string, error) {
 	hfs := os.DirFS(dir)
@@ -893,6 +922,9 @@ func readRecoveryJournal(dir string) (recoveryJournal, string, string, error) {
 	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return recoveryJournal{}, "", "", err
 	} else if errors.Is(err, fs.ErrNotExist) {
+		if err := rejectUnsafeDirectoryAncestor(path); err != nil {
+			return recoveryJournal{}, "", "", fmt.Errorf("%w: recovery journal ancestry: %w", ErrStateCorrupt, err)
+		}
 		return recoveryJournal{}, "", "", err
 	}
 	raw, err := os.ReadFile(path)
@@ -936,6 +968,9 @@ func validJournal(j recoveryJournal) bool {
 func validTransactionDir(path string) error {
 	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
+		if err := rejectUnsafeDirectoryAncestor(path); err != nil {
+			return fmt.Errorf("%w: transaction directory ancestry: %w", ErrStateCorrupt, err)
+		}
 		return nil // A completed cleanup can leave a journal whose target proves recovery safe.
 	}
 	if err != nil {
@@ -951,6 +986,9 @@ func checkTransactionSubdir(root, name string) error {
 	path := filepath.Join(root, name)
 	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
+		if err := rejectUnsafeDirectoryAncestor(path); err != nil {
+			return fmt.Errorf("%w: transaction %s directory ancestry: %w", ErrStateCorrupt, name, err)
+		}
 		return nil
 	}
 	if err != nil {

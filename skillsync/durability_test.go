@@ -45,6 +45,10 @@ func (f replacementContentFile) Write(data []byte) (int, error) {
 	return f.durableFile.Write([]byte(strings.Repeat("x", len(data))))
 }
 
+func isBackupRename(to, name string) bool {
+	return filepath.Base(filepath.Clean(to)) == name && filepath.Base(filepath.Dir(filepath.Clean(to))) == "backup"
+}
+
 func withDurableFileOperations(t *testing.T, mutate func(*durableFileOperationSet)) {
 	t.Helper()
 	previous := durableFileOperations
@@ -279,7 +283,7 @@ func TestSyncPreservesEditsCapturedBetweenDigestAndBackupRename(t *testing.T) {
 			withTransactionOperations(t, func(ops *transactionOperationSet) {
 				original := ops.rename
 				ops.rename = func(root *os.Root, from, to string) error {
-					if from == tc.skill && strings.Contains(to, "/backup/"+tc.skill) {
+					if from == tc.skill && isBackupRename(to, tc.skill) {
 						if err := os.WriteFile(filepath.Join(dir, tc.skill, "SKILL.md"), []byte("user edit made after digest check"), 0o644); err != nil {
 							return err
 						}
@@ -786,7 +790,7 @@ func TestReplaceAndRemoveRetainRecoveryEvidenceOnIOFaults(t *testing.T) {
 		withTransactionOperations(t, func(ops *transactionOperationSet) {
 			original := ops.rename
 			ops.rename = func(root *os.Root, from, to string) error {
-				if from == "alpha" && strings.Contains(to, "/backup/alpha") {
+				if from == "alpha" && isBackupRename(to, "alpha") {
 					return renameErr
 				}
 				return original(root, from, to)
@@ -807,7 +811,7 @@ func TestReplaceAndRemoveRetainRecoveryEvidenceOnIOFaults(t *testing.T) {
 		withTransactionOperations(t, func(ops *transactionOperationSet) {
 			original := ops.rename
 			ops.rename = func(root *os.Root, from, to string) error {
-				if from == "alpha" && strings.Contains(to, "/backup/alpha") {
+				if from == "alpha" && isBackupRename(to, "alpha") {
 					return renameErr
 				}
 				return original(root, from, to)

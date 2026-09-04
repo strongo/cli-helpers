@@ -16,7 +16,11 @@ type directorySyncHandle interface {
 	Close() error
 }
 
-var openDirectoryForSync = openWindowsDirectoryForSync
+var (
+	openDirectoryForSync = openWindowsDirectoryForSync
+	flushDirectoryHandle = syscall.FlushFileBuffers
+	closeDirectoryHandle = syscall.CloseHandle
+)
 
 // syncDirectory flushes the directory entry mutations that follow an atomic
 // file rename. os.Open supplies GENERIC_READ on Windows, but
@@ -55,14 +59,14 @@ type windowsDirectorySyncHandle struct {
 }
 
 func (h windowsDirectorySyncHandle) Sync() error {
-	if err := syscall.FlushFileBuffers(h.handle); err != nil {
+	if err := flushDirectoryHandle(h.handle); err != nil {
 		return fmt.Errorf("flush directory buffers: %w", err)
 	}
 	return nil
 }
 
 func (h windowsDirectorySyncHandle) Close() error {
-	if err := syscall.CloseHandle(h.handle); err != nil {
+	if err := closeDirectoryHandle(h.handle); err != nil {
 		return fmt.Errorf("close directory sync handle: %w", err)
 	}
 	return nil
