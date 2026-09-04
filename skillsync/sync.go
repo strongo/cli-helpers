@@ -39,7 +39,7 @@ type Prepared struct {
 // Prepare validates the host configuration and resolves any explicitly
 // requested newer-compatible bundles once. It performs no target I/O.
 func Prepare(ctx context.Context, cfg Config, opts Options) (Prepared, error) {
-	if !validIdentity(cfg.CLI) || cfg.CurrentVersion == "" || len(cfg.Bundles) == 0 {
+	if !validIdentity(cfg.CLI) || !validCurrentCLIVersion(cfg.CurrentVersion) || len(cfg.Bundles) == 0 {
 		return Prepared{}, fmt.Errorf("%w: CLI, current version, and bundles are required", ErrInvalidConfig)
 	}
 	bundles, err := resolvedBundles(ctx, cfg, opts)
@@ -1212,15 +1212,27 @@ func canonicalSystemAlias(path string) (string, error) {
 }
 
 func validateTargetAncestry(dir string) error {
+	_, err := ValidateTarget(dir)
+	return err
+}
+
+// ValidateTarget normalizes a target path and rejects symlinked or non-
+// directory existing ancestors. It permits only the verified macOS /tmp and
+// /var system aliases, returning their canonical path for callers that must
+// deduplicate targets before writing them.
+func ValidateTarget(dir string) (string, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
-		return err
+		return "", err
 	}
 	abs, err = canonicalSystemAlias(abs)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return validateExistingAncestry(abs)
+	if err := validateExistingAncestry(abs); err != nil {
+		return "", err
+	}
+	return abs, nil
 }
 
 func validateExistingAncestry(path string) error {
@@ -1241,7 +1253,10 @@ func validateExistingAncestry(path string) error {
 		if info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("refuse symlinked skills target ancestor %s", current)
 		}
-		if current != path && !info.IsDir() {
+		if !info.IsDir() {
+			if current == path {
+				return fmt.Errorf("skills target %s is not a directory", current)
+			}
 			return fmt.Errorf("skills target ancestor %s is not a directory", current)
 		}
 	}

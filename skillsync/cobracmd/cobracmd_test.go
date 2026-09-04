@@ -3,8 +3,10 @@ package cobracmd
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -91,8 +93,9 @@ func TestNewJSONUsesOnlyJSONOnStdout(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &report); err != nil {
 		t.Fatalf("stdout is not JSON: %q: %v", out, err)
 	}
-	if report.Dir != dir {
-		t.Fatalf("dir = %q", report.Dir)
+	canonical, err := skillsync.ValidateTarget(dir)
+	if err != nil || report.Dir != canonical {
+		t.Fatalf("dir = %q, canonical = %q, err = %v", report.Dir, canonical, err)
 	}
 }
 func TestNewRejectsDirWithHarnessBeforeInstalling(t *testing.T) {
@@ -356,7 +359,7 @@ func TestPreparedSyncTargetsStopsOnCanceledContext(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	results, err := syncTargets(ctx, prepared, []target{{Dir: t.TempDir()}}, false)
+	results, err := syncTargets(ctx, prepared, []target{{Dir: t.TempDir()}}, false, skillsync.LegacyImport{}, 0)
 	if len(results) != 0 || !errors.Is(err, context.Canceled) {
 		t.Fatalf("results=%#v err=%v", results, err)
 	}
@@ -398,11 +401,42 @@ func TestPreparationErrorsAreMappedBeforeWritesAndNameConfiguredPlugin(t *testin
 	if _, err := resolveTargets("", []string{"bad"}, []Harness{{ID: "bad", ConfigRel: "bad", ConfigEnv: "BAD_ROOT"}}, func() (string, error) { return t.TempDir(), nil }, func(string) string { return badRoot }); err == nil {
 		t.Fatal("unsafe selected harness target accepted")
 	}
-	previousAbs := absolutePath
-	absolutePath = func(string) (string, error) { return "", errors.New("abs failed") }
-	t.Cleanup(func() { absolutePath = previousAbs })
-	if _, err := normalizedTarget("relative"); err == nil {
-		t.Fatal("absolute path failure accepted")
+}
+
+func TestCobraCommandMigratesWBMarkerAndLetsHostRenderLegacyJSON(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "tool-install"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tool-install", "SKILL.md"), []byte("skill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte("SKILL.md\x00skill\x00"))
+	marker, err := json.Marshal(map[string]any{"schema_version": 1, "wb_version": "0.91.0", "skills": map[string]string{"tool-install": fmt.Sprintf("%x", digest)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".wb-skills-sync.json"), marker, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var gotPrior string
+	renderer := func(out io.Writer, results []TargetResult, format string) error {
+		if len(results) != 1 || results[0].Err != nil {
+			t.Fatalf("results=%#v", results)
+		}
+		gotPrior = results[0].Report.Bundles[0].PriorCLIVersion
+		return json.NewEncoder(out).Encode(struct {
+			PriorWBVersion string `json:"prior_wb_version,omitempty"`
+		}{gotPrior})
+	}
+	cfg := commandConfig(t)
+	out, _, err := executeWith(t, cfg, CommandOptions{Legacy: skillsync.LegacyImport{MarkerFile: ".wb-skills-sync.json", Plugin: cfg.Bundles[0].Plugin}, Renderer: renderer}, context.Background(), "sync", "--dir", dir, "--format=json")
+	if err != nil || gotPrior != "0.91.0" || !strings.Contains(out, `"prior_wb_version":"0.91.0"`) {
+		t.Fatalf("prior=%q out=%q err=%v", gotPrior, out, err)
+	}
+	status, err := skillsync.ReadStatus(dir)
+	if err != nil || status.SupplierCLIVersions[cfg.Bundles[0].Plugin.String()][cfg.CLI.String()] != cfg.CurrentVersion {
+		t.Fatalf("status=%#v err=%v", status, err)
 	}
 }
 

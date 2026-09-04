@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -82,6 +83,10 @@ type CommandOptions struct {
 	Errors     ErrorMapper
 	Resolver   skillsync.Resolver
 	Renderer   Renderer
+	// Legacy enables a host's one-time verified marker import for every
+	// selected target (for example WB's .wb-skills-sync.json marker).
+	Legacy      skillsync.LegacyImport
+	LockTimeout time.Duration
 }
 
 // New builds a convenience `skills` parent containing NewSync.
@@ -119,7 +124,7 @@ func NewSync(cfg skillsync.Config, opts CommandOptions) *cobra.Command {
 			if err != nil {
 				return mapFailure(opts, err)
 			}
-			results, canceled := syncTargets(cmd.Context(), prepared, targets, dryRun)
+			results, canceled := syncTargets(cmd.Context(), prepared, targets, dryRun, opts.Legacy, opts.LockTimeout)
 			renderer := opts.Renderer
 			if renderer == nil {
 				renderer = renderDefault
@@ -154,7 +159,6 @@ func noArgs(opts CommandOptions) cobra.PositionalArgs {
 type target struct{ Harness, Dir string }
 
 var (
-	absolutePath = filepath.Abs
 	syncPrepared = func(ctx context.Context, prepared skillsync.Prepared, opts skillsync.Options) (skillsync.Report, error) {
 		return prepared.Sync(ctx, opts)
 	}
@@ -263,21 +267,7 @@ func resolveTargets(dir string, names []string, harnesses []Harness, home func()
 }
 
 func normalizedTarget(dir string) (string, error) {
-	path, err := absolutePath(filepath.Clean(dir))
-	if err != nil {
-		return "", err
-	}
-	if info, err := os.Lstat(path); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			return "", fmt.Errorf("skills directory %s is a symlink", path)
-		}
-		if !info.IsDir() {
-			return "", fmt.Errorf("skills directory %s is not a directory", path)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	return path, nil
+	return skillsync.ValidateTarget(dir)
 }
 func sameTarget(a, b string) bool {
 	if a == b {
@@ -288,13 +278,13 @@ func sameTarget(a, b string) bool {
 	return aErr == nil && bErr == nil && os.SameFile(ai, bi)
 }
 
-func syncTargets(ctx context.Context, prepared skillsync.Prepared, targets []target, dryRun bool) ([]TargetResult, error) {
+func syncTargets(ctx context.Context, prepared skillsync.Prepared, targets []target, dryRun bool, legacy skillsync.LegacyImport, lockTimeout time.Duration) ([]TargetResult, error) {
 	results := make([]TargetResult, 0, len(targets))
 	for _, target := range targets {
 		if err := ctx.Err(); err != nil {
 			return results, err
 		}
-		report, err := syncPrepared(ctx, prepared, skillsync.Options{Dir: target.Dir, DryRun: dryRun})
+		report, err := syncPrepared(ctx, prepared, skillsync.Options{Dir: target.Dir, DryRun: dryRun, Legacy: legacy, LockTimeout: lockTimeout})
 		results = append(results, TargetResult{Harness: target.Harness, Dir: target.Dir, Report: report, Err: err})
 		if err != nil && errors.Is(err, context.Canceled) {
 			return results, err

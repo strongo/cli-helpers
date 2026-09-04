@@ -88,3 +88,41 @@ func TestPublicDescriptorJSONAndInvalidCompatibilityBounds(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestDevelopmentCLIVersionStateRemainsReadable(t *testing.T) {
+	for _, version := range []string{"(devel)", "unknown", "dev"} {
+		t.Run(version, func(t *testing.T) {
+			dir := t.TempDir()
+			b := bundle(t, "plugin", "development-"+version, "body")
+			cfg := config(t, b)
+			cfg.CurrentVersion = version
+			if _, err := Sync(context.Background(), cfg, Options{Dir: dir}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ReadStatus(dir); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Sync(context.Background(), cfg, Options{Dir: dir}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestValidateTargetRejectsSymlinkedAncestor(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateTarget(filepath.Join(alias, "skills")); err == nil {
+		t.Fatal("symlinked ancestor accepted")
+	}
+	if _, err := ValidateTarget(filepath.Join(real, "skills")); err != nil {
+		t.Fatal(err)
+	}
+}

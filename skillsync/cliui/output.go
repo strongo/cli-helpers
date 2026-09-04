@@ -62,7 +62,9 @@ func WriteTargetText(out io.Writer, reports []TargetReport) error {
 			harness = "directory"
 		}
 		verb := "synced"
-		if item.Report.DryRun {
+		if item.Err != nil {
+			verb = "failed"
+		} else if item.Report.DryRun {
 			verb = "preview"
 		}
 		if _, err := fmt.Fprintf(out, "%s %s: %s\n", harness, verb, item.Dir); err != nil {
@@ -80,20 +82,9 @@ func WriteTargetText(out io.Writer, reports []TargetReport) error {
 	return nil
 }
 
-// WriteText is retained for callers with one core report. New adapters should
-// use WriteTargetText, which has outcome-aware reporting.
+// WriteText renders one core report through the outcome-aware target renderer.
 func WriteText(out io.Writer, report skillsync.Report) error {
-	if _, err := fmt.Fprintf(out, "skills synced %s\n", report.Dir); err != nil {
-		return err
-	}
-	for _, action := range []skillsync.Action{skillsync.Added, skillsync.Updated, skillsync.Unchanged, skillsync.Removed, skillsync.Conflict} {
-		if names := report.Names(action); len(names) > 0 {
-			if _, err := fmt.Fprintf(out, "  %s: %s\n", action, strings.Join(names, ", ")); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return WriteTargetText(out, []TargetReport{{Dir: report.Dir, Report: report}})
 }
 
 func writeChanges(out io.Writer, report skillsync.Report) error {

@@ -93,7 +93,7 @@ func readState(dir string) (state, error) {
 			}
 		}
 		for cli, version := range entry.SupplierCLIVersions {
-			if !validIdentityParts(cli) || !validVersion(version) {
+			if !validIdentityParts(cli) || !validCurrentCLIVersion(version) {
 				return state{}, fmt.Errorf("%w: invalid supplier CLI version", ErrStateCorrupt)
 			}
 			if !entry.Legacy && entry.Suppliers[cli] == "" {

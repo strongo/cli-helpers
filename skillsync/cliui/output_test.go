@@ -34,10 +34,10 @@ func TestWriteJSONOneReport(t *testing.T) {
 }
 func TestWriteText(t *testing.T) {
 	var out bytes.Buffer
-	if err := WriteText(&out, skillsync.Report{Dir: "/skills", Changes: []skillsync.Change{{Name: "alpha", Action: skillsync.Added}}}); err != nil {
+	if err := WriteText(&out, skillsync.Report{Dir: "/skills", Changes: []skillsync.Change{{Name: "alpha", Action: skillsync.Added, Outcome: skillsync.Applied}}}); err != nil {
 		t.Fatal(err)
 	}
-	if got := out.String(); got != "skills synced /skills\n  added: alpha\n" {
+	if got := out.String(); got != "directory synced: /skills\n  added: alpha\n" {
 		t.Fatalf("got %q", got)
 	}
 }
@@ -55,13 +55,23 @@ func TestWriteTargetTextCallsDryRunPreviewAndDoesNotClaimRestoredSuccess(t *test
 		t.Fatal(err)
 	}
 	got := out.String()
-	for _, want := range []string{"codex preview", "planned: add", "restored: old", "incomplete removal: broken", "unchanged: 2", "conflicts: mine", "failed: disk full"} {
+	for _, want := range []string{"codex failed", "planned: add", "restored: old", "incomplete removal: broken", "unchanged: 2", "conflicts: mine", "failed: disk full"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("%q missing from %q", want, got)
 		}
 	}
 	if strings.Contains(got, "updated: old") || strings.Contains(got, "removed: broken") {
 		t.Fatalf("misleading success output: %q", got)
+	}
+}
+
+func TestWriteTargetTextCallsDryRunWithoutFailurePreview(t *testing.T) {
+	var out bytes.Buffer
+	if err := WriteTargetText(&out, []TargetReport{{Harness: "claude", Dir: "/skills", Report: skillsync.Report{DryRun: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "claude preview") {
+		t.Fatalf("output = %q", out.String())
 	}
 }
 

@@ -315,6 +315,13 @@ func validVersion(v string) bool {
 	}
 	return true
 }
+
+// validCurrentCLIVersion accepts the stable semantic versions used for
+// compatibility plus the deliberate development-build labels Go CLIs expose.
+// Source and release versions remain stricter: they use validVersion.
+func validCurrentCLIVersion(v string) bool {
+	return validVersion(v) || v == "(devel)" || v == "unknown" || v == "dev"
+}
 func versionCompare(a, b string) int {
 	a = strings.TrimPrefix(a, "v")
 	b = strings.TrimPrefix(b, "v")
