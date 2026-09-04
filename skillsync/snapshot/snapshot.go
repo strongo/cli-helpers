@@ -173,7 +173,9 @@ func Unpack(artifact []byte, limits Limits) (skillsync.BundleDescriptor, fs.FS, 
 		if count > limits.MaxFiles || head.Size < 0 || head.Size > limits.MaxBytes-total {
 			return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: archive limits exceeded", skillsync.ErrInvalidConfig)
 		}
-		if (head.Typeflag != tar.TypeReg && head.Typeflag != tar.TypeRegA) || head.Linkname != "" || !validArchivePath(head.Name) || seen[head.Name] {
+		// A legacy regular-file header encodes Typeflag as NUL (0); modern tar
+		// writers use tar.TypeReg. Both carry the same accepted file semantics.
+		if (head.Typeflag != tar.TypeReg && head.Typeflag != 0) || head.Linkname != "" || !validArchivePath(head.Name) || seen[head.Name] {
 			return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: unsafe archive entry %q", skillsync.ErrInvalidConfig, head.Name)
 		}
 		seen[head.Name] = true

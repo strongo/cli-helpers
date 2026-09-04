@@ -880,6 +880,146 @@ func TestReadStatusDoesNotTraverseSkills(t *testing.T) {
 	}
 }
 
+func TestStateMarkerRejectsCorruptOwnershipAndPreservesStatusSafety(t *testing.T) {
+	b := bundle(t, "plugin", "r1", "body")
+	entry := pluginState{Revision: b.Source.Revision, Digest: b.Source.Digest, CLI: "strongo/tool", Suppliers: map[string]string{"strongo/tool": b.Source.Revision}, Source: b.Source, Skills: map[string]string{"alpha": strings.Repeat("a", 64)}}
+	writeRawState := func(t *testing.T, dir string, value any) {
+		t.Helper()
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(statePath(dir), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("normalizes absent maps", func(t *testing.T) {
+		dir := t.TempDir()
+		writeRawState(t, dir, state{Schema: stateSchema})
+		loaded, err := readState(dir)
+		if err != nil || loaded.Plugins == nil {
+			t.Fatalf("state=%#v err=%v", loaded, err)
+		}
+		writeRawState(t, dir, state{Schema: stateSchema, Plugins: map[string]pluginState{"strongo/plugin": {Revision: entry.Revision, Digest: entry.Digest, CLI: entry.CLI, Source: entry.Source, Skills: entry.Skills}}})
+		loaded, err = readState(dir)
+		if err != nil || loaded.Plugins["strongo/plugin"].Suppliers[entry.CLI] != entry.Revision {
+			t.Fatalf("legacy supplier normalization=%#v err=%v", loaded, err)
+		}
+	})
+	for _, mutate := range []func(*state){
+		func(s *state) { s.Schema = 0 },
+		func(s *state) { s.Schema = stateSchema + 1 },
+		func(s *state) { s.Plugins["bad/"] = s.Plugins["strongo/plugin"]; delete(s.Plugins, "strongo/plugin") },
+		func(s *state) {
+			s.Plugins["strongo/plugin"] = pluginState{Legacy: true, Revision: "unexpected", Skills: entry.Skills}
+		},
+		func(s *state) { p := s.Plugins["strongo/plugin"]; p.CLI = "bad/"; s.Plugins["strongo/plugin"] = p },
+		func(s *state) {
+			p := s.Plugins["strongo/plugin"]
+			p.Source.Revision = revisionForTest("different")
+			s.Plugins["strongo/plugin"] = p
+		},
+		func(s *state) {
+			p := s.Plugins["strongo/plugin"]
+			p.Suppliers = map[string]string{"strongo/tool": "short"}
+			s.Plugins["strongo/plugin"] = p
+		},
+		func(s *state) {
+			p := s.Plugins["strongo/plugin"]
+			p.Suppliers = map[string]string{"strongo/tool": revisionForTest("different supplier")}
+			s.Plugins["strongo/plugin"] = p
+		},
+		func(s *state) {
+			p := s.Plugins["strongo/plugin"]
+			p.Skills = map[string]string{"alpha": strings.Repeat("z", 64)}
+			s.Plugins["strongo/plugin"] = p
+		},
+		func(s *state) { s.Plugins["other/plugin"] = entry },
+	} {
+		t.Run("invalid", func(t *testing.T) {
+			dir := t.TempDir()
+			s := state{Schema: stateSchema, Plugins: map[string]pluginState{"strongo/plugin": entry}}
+			mutate(&s)
+			writeRawState(t, dir, s)
+			if _, err := readState(dir); !errors.Is(err, ErrStateCorrupt) {
+				t.Fatalf("state=%#v err=%v", s, err)
+			}
+			if _, err := ReadStatus(dir); !errors.Is(err, ErrStateCorrupt) {
+				t.Fatalf("status err=%v", err)
+			}
+		})
+	}
+	t.Run("symlink", func(t *testing.T) {
+		dir, outside := t.TempDir(), filepath.Join(t.TempDir(), "state")
+		if err := os.WriteFile(outside, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, statePath(dir)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readState(dir); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("symlink err=%v", err)
+		}
+	})
+}
+
+func TestLegacyImportFailsClosedBeforePublishingOwnership(t *testing.T) {
+	b := bundle(t, "plugin", "r1", "body")
+	legacy := LegacyImport{MarkerFile: ".wb-skills-sync.json", Plugin: b.Plugin}
+	if _, err := importLegacy(t.TempDir(), LegacyImport{}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("invalid input err=%v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+		want  error
+	}{
+		{name: "missing", setup: func(*testing.T, string) {}, want: fs.ErrNotExist},
+		{name: "invalid-json", setup: func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, legacy.MarkerFile), []byte("{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, want: ErrStateCorrupt},
+		{name: "invalid-schema", setup: func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, legacy.MarkerFile), []byte(`{"schema_version":2,"skills":{"alpha":"x"}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, want: ErrStateCorrupt},
+		{name: "reserved-name", setup: func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, legacy.MarkerFile), []byte(`{"schema_version":1,"skills":{".cli-helpers-skills-recovery.json":"x"}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, want: ErrStateCorrupt},
+		{name: "missing-skill", setup: func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, legacy.MarkerFile), []byte(`{"schema_version":1,"skills":{"alpha":"x"}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, want: ErrStateCorrupt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.setup(t, dir)
+			if _, err := importLegacy(dir, legacy); !errors.Is(err, tc.want) {
+				t.Fatalf("err=%v want=%v", err, tc.want)
+			}
+			if _, err := os.Lstat(statePath(dir)); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("legacy import wrote state: %v", err)
+			}
+		})
+	}
+	// A symlinked marker must never be followed, even when its content looks valid.
+	dir, outside := t.TempDir(), filepath.Join(t.TempDir(), "marker")
+	if err := os.WriteFile(outside, []byte(`{"schema_version":1,"skills":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, legacy.MarkerFile)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importLegacy(dir, legacy); !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("symlink marker err=%v", err)
+	}
+}
+
 func TestRecoveryRollsBackInterruptedReplacement(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "alpha")
@@ -1160,6 +1300,67 @@ func TestSyncRejectsDivergentRevisionFromAnotherSupplier(t *testing.T) {
 	}
 }
 
+func TestSyncRejectsConflictingImmutableSourceFromAnotherSupplier(t *testing.T) {
+	dir := t.TempDir()
+	fromA := bundleWith(t, "plugin", "r1", map[string]string{"alpha": "bytes from CLI A", "beta": "also from CLI A"})
+	fromB := bundleWith(t, "plugin", "r1", map[string]string{"alpha": "different bytes from CLI B", "beta": "also different from CLI B"})
+	cliA := config(t, fromA)
+	cliA.CLI = Identity{Publisher: "strongo", Name: "cli-a"}
+	cliB := config(t, fromB)
+	cliB.CLI = Identity{Publisher: "strongo", Name: "cli-b"}
+	if _, err := Sync(context.Background(), cliA, Options{Dir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	report, err := Sync(context.Background(), cliB, Options{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(report.Names(Conflict), ","); got != "alpha,beta" {
+		t.Fatalf("conflicting source report=%#v", report)
+	}
+	for _, change := range report.Changes {
+		if change.Reason != "plugin immutable source already owned by another CLI" {
+			t.Fatalf("source conflict reason=%#v", change)
+		}
+	}
+	for name, want := range map[string]string{"alpha": "bytes from CLI A", "beta": "also from CLI A"} {
+		data, err := os.ReadFile(filepath.Join(dir, name, "SKILL.md"))
+		if err != nil || string(data) != want {
+			t.Fatalf("CLI B changed CLI A %s target: %q, %v", name, data, err)
+		}
+	}
+	installed, err := readState(dir)
+	if err != nil || installed.Plugins[fromA.Plugin.String()].Source != fromA.Source || len(installed.Plugins[fromA.Plugin.String()].Suppliers) != 1 {
+		t.Fatalf("CLI B changed CLI A ownership: %#v, %v", installed, err)
+	}
+	if _, err := Sync(context.Background(), cliA, Options{Dir: dir}); err != nil {
+		t.Fatalf("CLI A retry: %v", err)
+	}
+	for name, want := range map[string]string{"alpha": "bytes from CLI A", "beta": "also from CLI A"} {
+		data, err := os.ReadFile(filepath.Join(dir, name, "SKILL.md"))
+		if err != nil || string(data) != want {
+			t.Fatalf("CLI A retry changed %s target: %q, %v", name, data, err)
+		}
+	}
+}
+
+func TestSyncRejectsCompatibilityChangeFromAnotherSupplier(t *testing.T) {
+	dir := t.TempDir()
+	matched := bundle(t, "plugin", "r1", "same bytes")
+	first := config(t, matched)
+	first.CLI = Identity{Publisher: "strongo", Name: "cli-a"}
+	if _, err := Sync(context.Background(), first, Options{Dir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	other := config(t, matched)
+	other.CLI = Identity{Publisher: "strongo", Name: "cli-b"}
+	other.Bundles[0].Source.Compatibility = Compatibility{MinCLI: "1.0.0", MaxCLI: "2.0.0"}
+	report, err := Sync(context.Background(), other, Options{Dir: dir})
+	if err != nil || strings.Join(report.Names(Conflict), ",") != "alpha" {
+		t.Fatalf("compatibility conflict report=%#v err=%v", report, err)
+	}
+}
+
 func TestSyncDoesNotClaimOrPartiallyApplyAConflictedPluginRevision(t *testing.T) {
 	dir := t.TempDir()
 	old := bundleWith(t, "plugin", "r1", map[string]string{"alpha": "old alpha", "beta": "old beta"})
@@ -1362,6 +1563,91 @@ func TestSyncStateFailureReportsRollbackFailureAndLeavesRecoveryEvidence(t *test
 	data, err := os.ReadFile(filepath.Join(dir, "alpha", "SKILL.md"))
 	if err != nil || string(data) != "new" {
 		t.Fatalf("final content = %q, %v", data, err)
+	}
+}
+
+func TestSyncRetainsPublishedStateAndFilesWhenFinalDirectorySyncFails(t *testing.T) {
+	dir := t.TempDir()
+	old := bundle(t, "plugin", "r1", "old")
+	newer := bundle(t, "plugin", "r2", "new")
+	if _, err := Sync(context.Background(), config(t, old), Options{Dir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	previous := stateDirectorySync
+	t.Cleanup(func() { stateDirectorySync = previous })
+	stateDirectorySync = func(string) error { return errors.New("state directory sync failed") }
+	report, err := Sync(context.Background(), config(t, newer), Options{Dir: dir})
+	if err == nil || report.Changes[0].Outcome != Incomplete {
+		t.Fatalf("report=%#v err=%v", report, err)
+	}
+	data, readErr := os.ReadFile(filepath.Join(dir, "alpha", "SKILL.md"))
+	if readErr != nil || string(data) != "new" {
+		t.Fatalf("target=%q err=%v", data, readErr)
+	}
+	installed, readErr := readState(dir)
+	if readErr != nil || installed.Plugins[newer.Plugin.String()].Revision != newer.Source.Revision || installed.RecoveryID == "" {
+		t.Fatalf("state=%#v err=%v", installed, readErr)
+	}
+	if _, readErr := os.Lstat(filepath.Join(dir, recoveryFileName)); readErr != nil {
+		t.Fatalf("missing recovery journal: %v", readErr)
+	}
+	if _, err := Sync(context.Background(), config(t, newer), Options{Dir: dir}); err == nil {
+		t.Fatal("recovery accepted an undurable state marker")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, recoveryFileName)); err != nil {
+		t.Fatalf("recovery discarded evidence after persistence retry failure: %v", err)
+	}
+	stateDirectorySync = previous
+	retry, err := Sync(context.Background(), config(t, newer), Options{Dir: dir})
+	if err != nil || strings.Join(retry.Names(Unchanged), ",") != "alpha" {
+		t.Fatalf("retry=%#v err=%v", retry, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, recoveryFileName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("journal remains after public retry: %v", err)
+	}
+}
+
+func TestSyncDryRunRefusesPendingRecoveryWithoutMutating(t *testing.T) {
+	dir := t.TempDir()
+	old := bundle(t, "plugin", "r1", "old")
+	newer := bundle(t, "plugin", "r2", "new")
+	if _, err := Sync(context.Background(), config(t, old), Options{Dir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestSyncCrashChild$", "--", "skillsync-crash", "publish", dir)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("crash child: %v\n%s", err, output)
+	}
+	before, err := os.ReadFile(filepath.Join(dir, "alpha", "SKILL.md"))
+	if err != nil || string(before) != "new" {
+		t.Fatalf("published target=%q err=%v", before, err)
+	}
+	if _, err := Sync(context.Background(), config(t, newer), Options{Dir: dir, DryRun: true}); !errors.Is(err, ErrRecoveryPending) {
+		t.Fatalf("dry-run err=%v", err)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "alpha", "SKILL.md"))
+	if err != nil || string(after) != "new" {
+		t.Fatalf("dry-run mutated target=%q err=%v", after, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, recoveryFileName)); err != nil {
+		t.Fatalf("dry-run mutated journal: %v", err)
+	}
+	if _, err := Sync(context.Background(), config(t, newer), Options{Dir: dir}); err != nil {
+		t.Fatalf("normal Sync recovery: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, recoveryFileName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("journal remains after recovery: %v", err)
+	}
+}
+
+func TestSyncDryRunRejectsCorruptRecoveryJournal(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, recoveryFileName), []byte("not a journal"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Sync(context.Background(), config(t, bundle(t, "plugin", "r1", "body")), Options{Dir: dir, DryRun: true})
+	if !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("dry-run err=%v", err)
 	}
 }
 

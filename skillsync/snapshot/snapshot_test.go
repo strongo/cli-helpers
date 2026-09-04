@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -95,6 +96,41 @@ func TestPackIsReproducibleAndRoundTripsModeAwareContent(t *testing.T) {
 	installedDigest, err = skillsync.DigestWithExecutables(installedFiles, descriptor.ExecutablePaths)
 	if err != nil || installedDigest != descriptor.Source.Digest {
 		t.Fatalf("synced digest=%s err=%v", installedDigest, err)
+	}
+}
+
+func TestUnpackAcceptsLegacyRegularTarEntries(t *testing.T) {
+	descriptor, content := fixture(t)
+	artifact, err := Pack(descriptor, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := append([]byte(nil), artifact...)
+	for offset := 0; offset+512 <= len(legacy); {
+		if legacy[offset] == 0 {
+			break
+		}
+		size, err := strconv.ParseInt(strings.Trim(string(legacy[offset+124:offset+136]), " \x00"), 8, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		legacy[offset+156] = 0
+		for i := offset + 148; i < offset+156; i++ {
+			legacy[i] = ' '
+		}
+		checksum := 0
+		for _, b := range legacy[offset : offset+512] {
+			checksum += int(b)
+		}
+		copy(legacy[offset+148:offset+156], fmt.Sprintf("%06o\x00 ", checksum))
+		offset += 512 + int((size+511)/512)*512
+	}
+	decoded, unpacked, err := Unpack(legacy, Limits{})
+	if err != nil || decoded.Source != descriptor.Source {
+		t.Fatalf("decoded=%#v err=%v", decoded, err)
+	}
+	if digest, err := skillsync.DigestWithExecutables(unpacked, decoded.ExecutablePaths); err != nil || digest != descriptor.Source.Digest {
+		t.Fatalf("digest=%q err=%v", digest, err)
 	}
 }
 

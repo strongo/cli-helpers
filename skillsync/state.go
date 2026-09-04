@@ -32,6 +32,16 @@ type pluginState struct {
 	SyncedAt  time.Time         `json:"synced_at"`
 }
 
+// statePublishedError reports a failure after the replacement marker has
+// already become visible. Callers must retain matching target files and the
+// recovery journal so a later Sync can verify and durably finalize it.
+type statePublishedError struct{ err error }
+
+func (e statePublishedError) Error() string { return e.err.Error() }
+func (e statePublishedError) Unwrap() error { return e.err }
+
+var stateDirectorySync = syncDirectory
+
 func statePath(dir string) string { return filepath.Join(dir, StateFileName) }
 func readState(dir string) (state, error) {
 	if info, err := os.Lstat(statePath(dir)); err == nil && info.Mode()&os.ModeSymlink != 0 {
@@ -73,7 +83,7 @@ func readState(dir string) (state, error) {
 			s.Plugins[plugin] = entry
 		}
 		for cli, revision := range entry.Suppliers {
-			if !validIdentityParts(cli) || !validRevision(revision) {
+			if !validIdentityParts(cli) || !validRevision(revision) || revision != entry.Source.Revision {
 				return state{}, fmt.Errorf("%w: invalid supplier", ErrStateCorrupt)
 			}
 		}
@@ -123,7 +133,10 @@ func writeState(dir string, s state) error {
 	if err := rootedRename(dir, name, statePath(dir)); err != nil {
 		return err
 	}
-	return syncDirectory(dir)
+	if err := stateDirectorySync(dir); err != nil {
+		return statePublishedError{err: err}
+	}
+	return nil
 }
 func emptyOrExistingState(dir string) (state, error) {
 	s, err := readState(dir)

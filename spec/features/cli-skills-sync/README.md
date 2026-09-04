@@ -28,6 +28,8 @@ and installs them into a selected harness directory. Normal sync is offline and
 uses the installed CLI's matched revision. A caller may explicitly supply a
 resolver for a newer compatible bundle. The core has no command-framework
 dependency; the optional Cobra adapter owns target selection and rendering.
+The provider and adapter MUST reach 100% statement coverage before this Feature
+is publishable; a local checkpoint below that gate remains work in progress.
 
 ### REQ: immutable-bundle-provenance
 
@@ -42,8 +44,11 @@ A plugin identity owns its skill names. The library MUST reject a name owned by
 another plugin, an unmanaged target, a modified owned target, and symlink or
 path-traversal targets. A newer bundle from the sole recorded supplier MAY
 replace that plugin's verified content. When more than one CLI supplies a
-plugin, divergent revisions MUST be reported as a conflict and leave existing
-content unchanged.
+plugin, every supplier MUST agree on the complete `BundleDescriptor.Source`:
+repository, path, immutable revision, digest, version, and compatibility
+bounds. A source mismatch, including different content under the same revision,
+MUST be reported as a conflict for the whole plugin and leave existing content
+unchanged.
 
 ### REQ: crash-safe-transaction
 
@@ -54,6 +59,11 @@ and new digests, and recovery state before the original is moved. Recovery and
 rollback MUST validate the journal, transaction ownership, and content before
 removing anything. If those checks cannot prove an action preserves a known
 copy, recovery MUST fail closed without deleting target content.
+
+A dry run MUST validate a present recovery journal and its transaction control
+path without mutating either. If a valid journal is pending, it MUST return the
+typed `ErrRecoveryPending` result rather than classify the interrupted target
+against stale ownership. A corrupt journal remains a typed corruption error.
 
 ### REQ: target-confinement
 
@@ -132,8 +142,9 @@ request; a repeated sync leaves skill timestamps unchanged.
 
 Given a target owned only by the requesting CLI, when that CLI supplies a newer
 verified revision of the same plugin, then the installed skill is updated. Given
-another CLI records a divergent revision for that plugin, sync reports a
-conflict and preserves the current content.
+another CLI records a different complete source for that plugin, including
+different bytes under the same revision, sync reports a conflict for every skill
+in that plugin and preserves the current content.
 
 ### AC: abrupt-process-recovery
 
@@ -142,6 +153,8 @@ boundary, when a new public `Sync` process starts on that target, then it either
 restores the complete prior verified content or retains the complete committed
 content, removes only verified transaction leftovers, and never loses the only
 copy. The journey includes failed record, publish, and rollback paths.
+A dry run during this pending state returns `ErrRecoveryPending` without changing
+the target or journal; a normal public `Sync` then performs the verified recovery.
 
 ### AC: hostile-recovery-input
 

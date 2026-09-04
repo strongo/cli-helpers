@@ -17,6 +17,7 @@ var (
 	ErrInvalidConfig     = errors.New("invalid skills sync configuration")
 	ErrDigestMismatch    = errors.New("bundle digest mismatch")
 	ErrStateCorrupt      = errors.New("skills sync state is corrupt")
+	ErrRecoveryPending   = errors.New("skills sync recovery is pending")
 	ErrNoNewerCompatible = errors.New("no newer compatible bundle")
 	ErrSearchIncomplete  = errors.New("newer-compatible release search incomplete")
 )

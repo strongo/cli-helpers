@@ -38,6 +38,9 @@ func Sync(ctx context.Context, cfg Config, opts Options) (Report, error) {
 		if err := validateTargetAncestry(opts.Dir); err != nil {
 			return report, err
 		}
+		if err := recoveryPending(opts.Dir); err != nil {
+			return report, err
+		}
 		return syncLocked(ctx, cfg, bundles, opts, report)
 	}
 	// Reject an existing unsafe marker before lock() creates its parent-level
@@ -151,17 +154,18 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 		changeStart, operationStart := len(report.Changes), len(operations)
 		bundleConflict := false
 		conflictingSupplier := false
-		for supplier, revision := range prior.Suppliers {
-			if supplier != cfg.CLI.String() && revision != rb.Bundle.Source.Revision {
+		for supplier := range prior.Suppliers {
+			if supplier != cfg.CLI.String() && prior.Source != rb.Bundle.Source {
 				conflictingSupplier = true
 				break
 			}
 		}
-		// A CLI may advance the plugin revision it is the sole supplier of.
-		// A second supplier protects its previously recorded revision instead.
+		// A CLI may advance the plugin source it is the sole supplier of. A
+		// second supplier protects the complete immutable source it recorded:
+		// repository, path, revision, digest, version, and compatibility bounds.
 		if conflictingSupplier {
 			for _, item := range rb.Skills {
-				report.Changes = append(report.Changes, Change{Plugin: rb.Bundle.Plugin, Name: item.Name, Action: Conflict, Reason: "plugin revision already owned by another CLI"})
+				report.Changes = append(report.Changes, Change{Plugin: rb.Bundle.Plugin, Name: item.Name, Action: Conflict, Reason: "plugin immutable source already owned by another CLI"})
 			}
 			continue
 		}
@@ -300,6 +304,13 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 		next.RecoveryID = strings.TrimPrefix(tx.id, transactionPrefix)
 	}
 	if err := writeState(opts.Dir, next); err != nil {
+		var published statePublishedError
+		if errors.As(err, &published) {
+			// The marker now names this transaction. Preserve the matching target
+			// and journal; a later Sync retries durable persistence before cleanup.
+			markOutcomes(&report, operations, tx, Restored, Incomplete)
+			return report, fmt.Errorf("persist skills ownership: %w", err)
+		}
 		if rollbackErr := tx.rollback(); rollbackErr != nil {
 			markOutcomes(&report, operations, tx, Restored, Incomplete)
 			return report, fmt.Errorf("persist skills ownership: %w; rollback: %v", err, rollbackErr)
@@ -658,25 +669,11 @@ func (t *transaction) setPhase(index int, phase string) error {
 }
 
 func recoverTransaction(dir string) error {
-	path := filepath.Join(dir, recoveryFileName)
-	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%w: recovery journal is a symlink", ErrStateCorrupt)
-	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	raw, err := os.ReadFile(path)
+	journal, path, txDir, err := readRecoveryJournal(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return err
-	}
-	var journal recoveryJournal
-	if err := json.Unmarshal(raw, &journal); err != nil || !validJournal(journal) {
-		return fmt.Errorf("%w: invalid recovery journal", ErrStateCorrupt)
-	}
-	txDir := filepath.Join(dir, journal.Transaction)
-	if err := validTransactionDir(txDir); err != nil {
 		return err
 	}
 	state, err := readState(dir)
@@ -688,6 +685,9 @@ func recoverTransaction(dir string) error {
 			if err := verifyCommittedChange(dir, c); err != nil {
 				return err
 			}
+		}
+		if err := stateDirectorySync(dir); err != nil {
+			return fmt.Errorf("persist committed skills ownership: %w", err)
 		}
 		return finalizeJournal(path, txDir)
 	}
@@ -702,6 +702,44 @@ func recoverTransaction(dir string) error {
 		}
 	}
 	return finalizeJournal(path, txDir)
+}
+
+// recoveryPending checks a journal without touching any target or transaction
+// content. A dry-run cannot safely classify an interrupted target against the
+// pre-transaction marker, so callers must retry with a real Sync first.
+func recoveryPending(dir string) error {
+	_, _, _, err := readRecoveryJournal(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: rerun sync without dry-run", ErrRecoveryPending)
+}
+
+func readRecoveryJournal(dir string) (recoveryJournal, string, string, error) {
+	path := filepath.Join(dir, recoveryFileName)
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return recoveryJournal{}, "", "", fmt.Errorf("%w: recovery journal is a symlink", ErrStateCorrupt)
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return recoveryJournal{}, "", "", err
+	} else if errors.Is(err, fs.ErrNotExist) {
+		return recoveryJournal{}, "", "", err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return recoveryJournal{}, "", "", err
+	}
+	var journal recoveryJournal
+	if err := json.Unmarshal(raw, &journal); err != nil || !validJournal(journal) {
+		return recoveryJournal{}, "", "", fmt.Errorf("%w: invalid recovery journal", ErrStateCorrupt)
+	}
+	txDir := filepath.Join(dir, journal.Transaction)
+	if err := validTransactionDir(txDir); err != nil {
+		return recoveryJournal{}, "", "", err
+	}
+	return journal, path, txDir, nil
 }
 
 func stateOwnsDigest(s state, name, digest string) bool {
