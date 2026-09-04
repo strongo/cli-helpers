@@ -682,6 +682,61 @@ func TestTransactionMutationPreconditionsFailClosed(t *testing.T) {
 	})
 }
 
+func TestTransactionMutationFaultSeams(t *testing.T) {
+	t.Run("backup validation errors", func(t *testing.T) {
+		dir := t.TempDir()
+		tx := filepath.Join(dir, transactionPrefix+"backup")
+		if err := os.MkdirAll(tx, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tx, "backup"), []byte("unsafe"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := verifyBackupChange(tx, recoveryChange{Name: "alpha", Old: strings.Repeat("a", 64), Existed: true}); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("backup directory=%v", err)
+		}
+		if err := os.Remove(filepath.Join(tx, "backup")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(tx, "backup"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(dir, filepath.Join(tx, "backup", "alpha")); err != nil {
+			t.Fatal(err)
+		}
+		if err := verifyBackupChange(tx, recoveryChange{Name: "alpha", Old: strings.Repeat("a", 64), Existed: true}); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("backup content=%v", err)
+		}
+	})
+	t.Run("replace checks staged and proof content", func(t *testing.T) {
+		dir := t.TempDir()
+		source := fstest.MapFS{"alpha/SKILL.md": &fstest.MapFile{Data: []byte("body")}}
+		actual, err := subtreeDigest(source, "alpha")
+		if err != nil {
+			t.Fatal(err)
+		}
+		tx := newTransaction(dir)
+		if err := tx.replace(source, nil, "alpha", "", strings.Repeat("a", 64)); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("stage mismatch=%v", err)
+		}
+		tx = newTransaction(t.TempDir())
+		if err := tx.replace(source, []string{"missing"}, "alpha", "", actual); err == nil {
+			t.Fatal("invalid executable set accepted")
+		}
+	})
+	t.Run("copy propagates source and read failures", func(t *testing.T) {
+		if err := copySkill(failingFS{err: errors.New("walk")}, "alpha", filepath.Join(t.TempDir(), "stage"), nil); err == nil {
+			t.Fatal("walk failure accepted")
+		}
+		base := fstest.MapFS{"alpha/SKILL.md": &fstest.MapFile{Data: []byte("body")}}
+		readErr := errors.New("read")
+		source := openFailureFS{FS: base, path: "alpha/SKILL.md", err: readErr}
+		if err := copySkill(source, "alpha", filepath.Join(t.TempDir(), "stage"), nil); !errors.Is(err, readErr) {
+			t.Fatalf("read=%v", err)
+		}
+	})
+}
+
 func TestRecoveryRetriesDirectorySyncBeforeDiscardingEvidence(t *testing.T) {
 	dir := t.TempDir()
 	old := bundle(t, "plugin", "retry-old", "old")

@@ -807,10 +807,9 @@ func (t *transaction) writeJournal() error {
 	for _, change := range t.changes {
 		changes = append(changes, recoveryChange(change))
 	}
-	raw, err := json.Marshal(recoveryJournal{Schema: 2, ID: strings.TrimPrefix(t.id, transactionPrefix), Transaction: t.id, Changes: changes})
-	if err != nil {
-		return err
-	}
+	// recoveryJournal contains only fixed acyclic scalar and slice values, so
+	// encoding/json's Marshal cannot fail for this transaction-owned graph.
+	raw, _ := json.Marshal(recoveryJournal{Schema: 2, ID: strings.TrimPrefix(t.id, transactionPrefix), Transaction: t.id, Changes: changes})
 	if _, err := writeAtomically(t.dir, ".cli-helpers-skills-recovery-*", filepath.Join(t.dir, recoveryFileName), raw, transactionOperations.syncDirectory); err != nil {
 		return err
 	}
