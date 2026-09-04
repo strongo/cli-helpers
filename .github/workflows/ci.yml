@@ -26,7 +26,14 @@ jobs:
         shell: pwsh
         run: |
           go test ./skillsync -coverprofile=coverage-windows.out
-          $platform = @(go tool cover -func=coverage-windows.out | Select-String 'sync_directory_windows.go')
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $coverage = go tool cover -func=coverage-windows.out
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $platform = @($coverage | Select-String 'sync_directory_windows.go')
           if ($platform.Count -lt 4) {
             throw "Windows directory-sync functions were not present in coverage output"
           }
