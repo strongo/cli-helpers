@@ -47,8 +47,52 @@ func (l Limits) normalized() Limits {
 // Pack emits byte-for-byte reproducible tar content. HTTPS transport and the
 // descriptor digest provide integrity; this format does not claim signatures.
 func Pack(descriptor skillsync.BundleDescriptor, content fs.FS) ([]byte, error) {
+	captured, err := Capture(content)
+	if err != nil {
+		return nil, err
+	}
+	return captured.Pack(descriptor)
+}
+
+// Captured is an immutable, mode-preserving copy of a source filesystem. A
+// producer captures once, verifies that copy, then uses it for every output so
+// a changing filesystem cannot make the archive and descriptor disagree.
+type Captured struct {
+	files []sourceFile
+	fs    fstest.MapFS
+}
+
+// Capture reads every regular source file once and retains its bytes and mode.
+// Symlinks, special entries, and unsafe paths are rejected before a caller can
+// publish any output.
+func Capture(content fs.FS) (Captured, error) {
+	files, err := sourceFiles(content)
+	if err != nil {
+		return Captured{}, err
+	}
+	contents := make(fstest.MapFS, len(files))
+	for _, file := range files {
+		contents[file.name] = &fstest.MapFile{Data: append([]byte(nil), file.data...), Mode: file.mode}
+	}
+	return Captured{files: files, fs: contents}, nil
+}
+
+// NormalizeDescriptor binds descriptor metadata to the captured bytes. It is
+// intentionally the one validation point shared by archive and embed output.
+func (c Captured) NormalizeDescriptor(descriptor skillsync.BundleDescriptor) (skillsync.BundleDescriptor, error) {
+	return normalizedDescriptor(descriptor, c.fs)
+}
+
+// Digest computes the mode-aware digest from the captured bytes, using the
+// shared skillsync digest implementation.
+func (c Captured) Digest(executablePaths []string) (string, error) {
+	return skillsync.DigestWithExecutables(c.fs, executablePaths)
+}
+
+// Pack emits a reproducible archive from one captured source image.
+func (c Captured) Pack(descriptor skillsync.BundleDescriptor) ([]byte, error) {
 	var out bytes.Buffer
-	if err := Write(&out, descriptor, content); err != nil {
+	if err := c.Write(&out, descriptor); err != nil {
 		return nil, err
 	}
 	return out.Bytes(), nil
@@ -57,7 +101,16 @@ func Pack(descriptor skillsync.BundleDescriptor, content fs.FS) ([]byte, error) 
 // DescriptorJSON returns canonical descriptor metadata for a companion release
 // asset and normalizes executable modes discovered in local source content.
 func DescriptorJSON(descriptor skillsync.BundleDescriptor, content fs.FS) ([]byte, error) {
-	descriptor, err := normalizedDescriptor(descriptor, content)
+	captured, err := Capture(content)
+	if err != nil {
+		return nil, err
+	}
+	return captured.DescriptorJSON(descriptor)
+}
+
+// DescriptorJSON returns canonical descriptor metadata for a captured image.
+func (c Captured) DescriptorJSON(descriptor skillsync.BundleDescriptor) ([]byte, error) {
+	descriptor, err := c.NormalizeDescriptor(descriptor)
 	if err != nil {
 		return nil, err
 	}
@@ -68,12 +121,16 @@ func DescriptorJSON(descriptor skillsync.BundleDescriptor, content fs.FS) ([]byt
 // Write emits a reproducible archive to w. It is useful to release producers
 // that upload an artifact without first duplicating it on disk.
 func Write(w io.Writer, descriptor skillsync.BundleDescriptor, content fs.FS) error {
-	var err error
-	descriptor, err = normalizedDescriptor(descriptor, content)
+	captured, err := Capture(content)
 	if err != nil {
 		return err
 	}
-	files, err := sourceFiles(content)
+	return captured.Write(w, descriptor)
+}
+
+// Write emits a reproducible archive from one captured source image.
+func (c Captured) Write(w io.Writer, descriptor skillsync.BundleDescriptor) error {
+	descriptor, err := c.NormalizeDescriptor(descriptor)
 	if err != nil {
 		return err
 	}
@@ -82,7 +139,7 @@ func Write(w io.Writer, descriptor skillsync.BundleDescriptor, content fs.FS) er
 	if err := writeEntry(tw, descriptorName, 0o644, raw); err != nil {
 		return err
 	}
-	for _, file := range files {
+	for _, file := range c.files {
 		mode := int64(0o644)
 		if executable(descriptor.ExecutablePaths, file.name) {
 			mode = 0o755
@@ -112,6 +169,7 @@ func normalizedDescriptor(descriptor skillsync.BundleDescriptor, content fs.FS) 
 type sourceFile struct {
 	name string
 	data []byte
+	mode fs.FileMode
 }
 
 func sourceFiles(content fs.FS) ([]sourceFile, error) {
@@ -130,7 +188,11 @@ func sourceFiles(content fs.FS) ([]sourceFile, error) {
 		if err != nil {
 			return err
 		}
-		files = append(files, sourceFile{name: name, data: data})
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		files = append(files, sourceFile{name: name, data: append([]byte(nil), data...), mode: info.Mode()})
 		return nil
 	})
 	if err != nil {
@@ -226,7 +288,11 @@ func Unpack(artifact []byte, limits Limits) (skillsync.BundleDescriptor, fs.FS, 
 // failure may leave partial output in this newly created directory; callers
 // must discard that output before retrying or embedding it.
 func WriteEmbedDirectory(dir string, descriptor skillsync.BundleDescriptor, content fs.FS) error {
-	return writeEmbedDirectory(dir, descriptor, content, embedOutput{os.Mkdir, os.MkdirAll, os.WriteFile})
+	captured, err := Capture(content)
+	if err != nil {
+		return err
+	}
+	return captured.WriteEmbedDirectory(dir, descriptor)
 }
 
 // Keep filesystem fault injection at the output boundary, so tests can prove
@@ -237,13 +303,12 @@ type embedOutput struct {
 	writeFile func(string, []byte, fs.FileMode) error
 }
 
-func writeEmbedDirectory(dir string, descriptor skillsync.BundleDescriptor, content fs.FS, output embedOutput) error {
-	var err error
-	descriptor, err = normalizedDescriptor(descriptor, content)
-	if err != nil {
-		return err
-	}
-	files, err := sourceFiles(content)
+func (c Captured) WriteEmbedDirectory(dir string, descriptor skillsync.BundleDescriptor) error {
+	return c.writeEmbedDirectory(dir, descriptor, embedOutput{os.Mkdir, os.MkdirAll, os.WriteFile})
+}
+
+func (c Captured) writeEmbedDirectory(dir string, descriptor skillsync.BundleDescriptor, output embedOutput) error {
+	descriptor, err := c.NormalizeDescriptor(descriptor)
 	if err != nil {
 		return err
 	}
@@ -256,7 +321,7 @@ func writeEmbedDirectory(dir string, descriptor skillsync.BundleDescriptor, cont
 	if err := output.writeFile(filepath.Join(dir, descriptorName), append(raw, '\n'), 0o644); err != nil {
 		return err
 	}
-	for _, file := range files {
+	for _, file := range c.files {
 		path := filepath.Join(dir, filepath.FromSlash(contentPrefix), filepath.FromSlash(file.name))
 		if err := output.mkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err

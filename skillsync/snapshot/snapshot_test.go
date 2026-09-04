@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/strongo/cli-helpers/skillsync"
 )
@@ -230,6 +232,74 @@ func TestDescriptorJSONBindsTheSameNormalizedContentAsArchive(t *testing.T) {
 	}
 }
 
+// changingBytesFS returns a different regular-file body and mode after the
+// first validation reads. Packaging must either use the captured original
+// image or fail; it must never publish a descriptor for one image and bytes
+// from another.
+type changingBytesFS struct {
+	fs.FS
+	reads int
+}
+
+func (f *changingBytesFS) ReadFile(name string) ([]byte, error) {
+	f.reads++
+	if f.reads >= 3 {
+		return []byte("changed"), nil
+	}
+	return fs.ReadFile(f.FS, name)
+}
+
+func TestPublicationUsesOneCapturedByteAndModeImage(t *testing.T) {
+	content := fstest.MapFS{"demo/SKILL.md": &fstest.MapFile{Data: []byte("original"), Mode: 0o644}}
+	digest, err := skillsync.Digest(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor := skillsync.BundleDescriptor{Plugin: skillsync.PluginIdentity{Publisher: "example", Name: "demo"}, Source: skillsync.Source{Repository: "github.com/example/demo", Path: "skills", Revision: "0123456789012345678901234567890123456789", Version: "1.0.0", Digest: digest}}
+	changed := &changingBytesFS{FS: content}
+	archive, err := Pack(descriptor, changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, unpacked, err := Unpack(archive, Limits{})
+	if err != nil {
+		t.Fatalf("published archive is invalid after %d reads: %v", changed.reads, err)
+	}
+	if digest, err := skillsync.DigestWithExecutables(unpacked, decoded.ExecutablePaths); err != nil || digest != descriptor.Source.Digest {
+		t.Fatalf("archive digest=%q err=%v", digest, err)
+	}
+
+	changed = &changingBytesFS{FS: content}
+	dir := filepath.Join(t.TempDir(), "embed")
+	if err := WriteEmbedDirectory(dir, descriptor, changed); err != nil {
+		t.Fatal(err)
+	}
+	installed := os.DirFS(filepath.Join(dir, contentPrefix))
+	if digest, err := skillsync.DigestWithExecutables(installed, descriptor.ExecutablePaths); err != nil || digest != descriptor.Source.Digest {
+		t.Fatalf("embed digest=%q err=%v", digest, err)
+	}
+}
+
+func TestCapturedPublicMethodsAndCaptureFailures(t *testing.T) {
+	descriptor, content := fixture(t)
+	captured, err := Capture(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest, err := captured.Digest(descriptor.ExecutablePaths); err != nil || digest != descriptor.Source.Digest {
+		t.Fatalf("digest=%q err=%v", digest, err)
+	}
+	if _, err := DescriptorJSON(descriptor, errorFS{}); err == nil {
+		t.Fatal("expected descriptor capture failure")
+	}
+	if err := Write(io.Discard, descriptor, errorFS{}); err == nil {
+		t.Fatal("expected archive capture failure")
+	}
+	if _, err := sourceFiles(infoErrorFS{}); err == nil {
+		t.Fatal("expected entry info failure")
+	}
+}
+
 func TestWriteEmbedDirectoryRequiresFreshNonSymlinkDestination(t *testing.T) {
 	descriptor, content := fixture(t)
 	parent := t.TempDir()
@@ -364,18 +434,14 @@ func TestSourceAndEmbedDirectoryFailures(t *testing.T) {
 	if err := WriteEmbedDirectory(file, descriptor, content); err == nil {
 		t.Fatal("expected directory creation failure")
 	}
-	stable := &failAfterFS{FS: content, failAfter: 100}
-	if _, err := normalizedDescriptor(descriptor, stable); err != nil {
-		t.Fatal(err)
-	}
-	changed := &failAfterFS{FS: content, failAfter: stable.opens}
+	changed := &failAfterFS{FS: content, failAfter: 0}
 	if _, err := Pack(descriptor, changed); err == nil {
-		t.Fatal("expected source mutation failure after validation")
+		t.Fatal("expected source capture failure")
 	}
-	changed = &failAfterFS{FS: content, failAfter: stable.opens}
+	changed = &failAfterFS{FS: content, failAfter: 0}
 	dir := filepath.Join(t.TempDir(), "embed")
 	if err := WriteEmbedDirectory(dir, descriptor, changed); err == nil {
-		t.Fatal("expected source mutation failure before embed output")
+		t.Fatal("expected source capture failure before embed output")
 	}
 	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("source failure created output: %v", err)
@@ -401,7 +467,11 @@ func TestEmbedOutputFailuresAfterFreshDirectoryCreation(t *testing.T) {
 					return os.WriteFile(name, data, mode)
 				}
 			}
-			if err := writeEmbedDirectory(dir, descriptor, content, output); !errors.Is(err, failure) || !reached {
+			captured, err := Capture(content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := captured.writeEmbedDirectory(dir, descriptor, output); !errors.Is(err, failure) || !reached {
 				t.Fatalf("failure phase reached=%v, error=%v", reached, err)
 			}
 			if info, err := os.Stat(dir); err != nil || !info.IsDir() {
@@ -478,6 +548,41 @@ func mustJSON(t *testing.T, value any) []byte {
 type errorFS struct{}
 
 func (errorFS) Open(string) (fs.File, error) { return nil, errors.New("unavailable") }
+
+type infoErrorFS struct{}
+
+func (infoErrorFS) Open(name string) (fs.File, error) {
+	if name == "." {
+		return infoErrorRoot{}, nil
+	}
+	return nil, fs.ErrNotExist
+}
+func (infoErrorFS) ReadDir(string) ([]fs.DirEntry, error) {
+	return []fs.DirEntry{infoErrorEntry{}}, nil
+}
+func (infoErrorFS) ReadFile(string) ([]byte, error) { return []byte("x"), nil }
+
+type infoErrorRoot struct{}
+
+func (infoErrorRoot) Stat() (fs.FileInfo, error) { return infoErrorInfo{mode: fs.ModeDir}, nil }
+func (infoErrorRoot) Read([]byte) (int, error)   { return 0, io.EOF }
+func (infoErrorRoot) Close() error               { return nil }
+
+type infoErrorEntry struct{}
+
+func (infoErrorEntry) Name() string               { return "file" }
+func (infoErrorEntry) IsDir() bool                { return false }
+func (infoErrorEntry) Type() fs.FileMode          { return 0 }
+func (infoErrorEntry) Info() (fs.FileInfo, error) { return nil, errors.New("info") }
+
+type infoErrorInfo struct{ mode fs.FileMode }
+
+func (i infoErrorInfo) Name() string       { return "." }
+func (i infoErrorInfo) Size() int64        { return 0 }
+func (i infoErrorInfo) Mode() fs.FileMode  { return i.mode }
+func (i infoErrorInfo) ModTime() time.Time { return time.Time{} }
+func (infoErrorInfo) IsDir() bool          { return true }
+func (infoErrorInfo) Sys() any             { return nil }
 
 type readFileErrorFS struct{ fs.FS }
 
