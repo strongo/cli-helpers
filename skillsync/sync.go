@@ -1,0 +1,1040 @@
+package skillsync
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/gofrs/flock"
+)
+
+// Sync validates all bundles before touching a target, then applies a
+// plugin-scoped plan under a target lock. It defaults to the embedded bundle
+// snapshots supplied in Config and never contacts a Resolver unless the
+// caller explicitly selected PreferNewerCompatible.
+func Sync(ctx context.Context, cfg Config, opts Options) (Report, error) {
+	report := Report{Dir: opts.Dir, CLI: cfg.CLI, DryRun: opts.DryRun}
+	if !validIdentity(cfg.CLI) || cfg.CurrentVersion == "" || opts.Dir == "" || len(cfg.Bundles) == 0 {
+		return report, fmt.Errorf("%w: CLI, current version, target directory, and bundles are required", ErrInvalidConfig)
+	}
+	bundles, err := resolvedBundles(ctx, cfg, opts)
+	if err != nil {
+		return report, err
+	}
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
+	for _, bundle := range bundles {
+		report.Bundles = append(report.Bundles, ResolvedBundle{Plugin: bundle.Bundle.Plugin, Source: bundle.Bundle.Source})
+	}
+	if opts.DryRun {
+		return syncLocked(ctx, cfg, bundles, opts, report)
+	}
+	unlock, err := lock(ctx, opts.Dir, opts.LockTimeout)
+	if err != nil {
+		return report, err
+	}
+	defer unlock()
+	return syncLocked(ctx, cfg, bundles, opts, report)
+}
+
+type resolvedBundle struct {
+	Bundle Bundle
+	Skills []skill
+}
+
+type operation struct {
+	source      fs.FS
+	executables []string
+	plugin      PluginIdentity
+	name        string
+	remove      bool
+	old         string
+	new         string
+}
+
+func resolvedBundles(ctx context.Context, cfg Config, opts Options) ([]resolvedBundle, error) {
+	seen := map[string]bool{}
+	result := make([]resolvedBundle, 0, len(cfg.Bundles))
+	for _, b := range cfg.Bundles {
+		if opts.PreferNewerCompatible {
+			if opts.Resolver == nil {
+				return nil, fmt.Errorf("%w: newer-compatible selection requires a resolver", ErrInvalidConfig)
+			}
+			var err error
+			b, err = opts.Resolver.Resolve(ctx, b)
+			if err != nil {
+				return nil, fmt.Errorf("resolve newer %s: %w", b.Plugin.String(), err)
+			}
+		}
+		key := b.Plugin.String()
+		if seen[key] {
+			return nil, fmt.Errorf("%w: plugin %s is declared more than once", ErrInvalidConfig, key)
+		}
+		seen[key] = true
+		skills, err := validateBundle(b, cfg.CurrentVersion)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, resolvedBundle{b, skills})
+	}
+	return result, nil
+}
+
+func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts Options, report Report) (Report, error) {
+	if err := rejectSymlink(opts.Dir); err != nil {
+		return report, err
+	}
+	if !opts.DryRun {
+		if err := recoverTransaction(opts.Dir); err != nil {
+			return report, err
+		}
+	}
+	current, err := emptyOrExistingState(opts.Dir)
+	if err != nil {
+		return report, err
+	}
+	legacyImported := false
+	if len(current.Plugins) == 0 && opts.Legacy.MarkerFile != "" {
+		legacy, err := importLegacy(opts.Dir, opts.Legacy)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return report, err
+		}
+		if err == nil {
+			current.Plugins[opts.Legacy.Plugin.String()] = legacy
+			legacyImported = true
+		}
+	}
+	next := cloneState(current)
+	owners := ownersOf(current)
+	tx := newTransaction(opts.Dir)
+	// Discover every requested name before looking at the target. This makes a
+	// collision between two bundles deterministic in both dry-run and apply.
+	desiredNames := map[string]int{}
+	for _, rb := range bundles {
+		for _, item := range rb.Skills {
+			desiredNames[item.Name]++
+		}
+	}
+	var operations []operation
+	for _, rb := range bundles {
+		if err := ctx.Err(); err != nil {
+			tx.rollback()
+			return report, err
+		}
+		key := rb.Bundle.Plugin.String()
+		prior := current.Plugins[key]
+		changeStart, operationStart := len(report.Changes), len(operations)
+		bundleConflict := false
+		conflictingSupplier := false
+		for supplier, revision := range prior.Suppliers {
+			if supplier != cfg.CLI.String() && revision != rb.Bundle.Source.Revision {
+				conflictingSupplier = true
+				break
+			}
+		}
+		// A CLI may advance the plugin revision it is the sole supplier of.
+		// A second supplier protects its previously recorded revision instead.
+		if conflictingSupplier {
+			for _, item := range rb.Skills {
+				report.Changes = append(report.Changes, Change{Plugin: rb.Bundle.Plugin, Name: item.Name, Action: Conflict, Reason: "plugin revision already owned by another CLI"})
+			}
+			continue
+		}
+		desired := map[string]string{}
+		for _, item := range rb.Skills {
+			desired[item.Name] = item.Digest
+			action, reason, err := classify(opts.Dir, item, prior, owners, key)
+			if desiredNames[item.Name] > 1 {
+				action, reason = Conflict, "requested by multiple plugins"
+			}
+			if err != nil {
+				tx.rollback()
+				return report, err
+			}
+			report.Changes = append(report.Changes, Change{Plugin: rb.Bundle.Plugin, Name: item.Name, Action: action, Reason: reason})
+			if action == Conflict {
+				bundleConflict = true
+				continue
+			}
+			if action == Added || action == Updated {
+				report.Changes[len(report.Changes)-1].Outcome = Planned
+			}
+			if action == Added || action == Updated {
+				operations = append(operations, operation{source: rb.Bundle.FS, executables: rb.Bundle.ExecutablePaths, plugin: rb.Bundle.Plugin, name: item.Name, old: prior.Skills[item.Name], new: item.Digest})
+			}
+		}
+		for name, oldDigest := range prior.Skills {
+			if _, still := desired[name]; still {
+				continue
+			}
+			action, reason, err := classifyRemoval(opts.Dir, name, oldDigest, owners, key)
+			if err != nil {
+				tx.rollback()
+				return report, err
+			}
+			report.Changes = append(report.Changes, Change{Plugin: rb.Bundle.Plugin, Name: name, Action: action, Reason: reason})
+			if action == Removed {
+				report.Changes[len(report.Changes)-1].Outcome = Planned
+				operations = append(operations, operation{plugin: rb.Bundle.Plugin, name: name, remove: true, old: oldDigest})
+			}
+			if action == Conflict {
+				bundleConflict = true
+			}
+		}
+		// A plugin state describes one verified revision. Do not publish a
+		// mixture of old and new ownership when any skill in that revision is
+		// unresolved: retain the last complete revision and leave every target
+		// mutation for this plugin for a later safe retry.
+		if bundleConflict {
+			for i := changeStart; i < len(report.Changes); i++ {
+				if report.Changes[i].Action != Conflict {
+					report.Changes[i].Action = Conflict
+					report.Changes[i].Outcome = ""
+					report.Changes[i].Reason = "plugin has unresolved conflicts"
+				}
+			}
+			operations = operations[:operationStart]
+			if prior.Revision != "" {
+				next.Plugins[key] = prior
+			} else {
+				delete(next.Plugins, key)
+			}
+			continue
+		}
+		// State records only skills we have actually verified as owned. A
+		// conflict stays out of it, so the later retry cannot claim it.
+		owned := map[string]string{}
+		for _, item := range rb.Skills {
+			a := actionFor(report.Changes, key, item.Name)
+			if a != Conflict {
+				owned[item.Name] = item.Digest
+			}
+		}
+		if len(owned) == 0 {
+			delete(next.Plugins, key)
+		} else {
+			suppliers := map[string]string{}
+			for cli, revision := range prior.Suppliers {
+				suppliers[cli] = revision
+			}
+			suppliers[cfg.CLI.String()] = rb.Bundle.Source.Revision
+			next.Plugins[key] = pluginState{Revision: rb.Bundle.Source.Revision, Digest: rb.Bundle.Source.Digest, CLI: cfg.CLI.String(), Suppliers: suppliers, Source: rb.Bundle.Source, Skills: owned, SyncedAt: time.Now().UTC()}
+		}
+	}
+	sort.Slice(report.Changes, func(i, j int) bool {
+		if report.Changes[i].Name == report.Changes[j].Name {
+			return report.Changes[i].Plugin.String() < report.Changes[j].Plugin.String()
+		}
+		return report.Changes[i].Name < report.Changes[j].Name
+	})
+	if opts.DryRun {
+		return report, nil
+	}
+	// The old WB marker is enough to verify content but is not sufficient for
+	// crash recovery. Publish that verified ownership before the first rename,
+	// so a fresh process can prove which original a legacy upgrade may restore.
+	if legacyImported && len(operations) > 0 {
+		if err := writeState(opts.Dir, current); err != nil {
+			return report, fmt.Errorf("persist imported legacy ownership: %w", err)
+		}
+	}
+	// Only after every bundle, collision, removal and state transition has
+	// been classified do we make the first target mutation.
+	for _, op := range operations {
+		if err := ctx.Err(); err != nil {
+			if rollbackErr := tx.rollback(); rollbackErr != nil {
+				markOutcomes(&report, operations, tx, Restored, Incomplete)
+				return report, fmt.Errorf("apply canceled: %w; rollback: %v", err, rollbackErr)
+			}
+			markOutcomes(&report, operations, tx, Restored, Incomplete)
+			return report, err
+		}
+		var err error
+		if op.remove {
+			err = tx.remove(op.name, op.old)
+		} else {
+			err = tx.replace(op.source, op.executables, op.name, op.old, op.new)
+		}
+		if err != nil {
+			if rollbackErr := tx.rollback(); rollbackErr != nil {
+				markOutcomes(&report, operations, tx, Restored, Incomplete)
+				return report, fmt.Errorf("apply %s: %w; rollback: %v", op.name, err, rollbackErr)
+			}
+			markOutcomes(&report, operations, tx, Restored, Incomplete)
+			return report, fmt.Errorf("apply %s: %w", op.name, err)
+		}
+		setOutcome(&report, op, Applied)
+	}
+	if statesEqual(current, next) {
+		if err := tx.commit(); err != nil {
+			return report, fmt.Errorf("finalize skills transaction: %w", err)
+		}
+		return report, nil
+	}
+	if tx.id != "" {
+		next.RecoveryID = strings.TrimPrefix(tx.id, transactionPrefix)
+	}
+	if err := writeState(opts.Dir, next); err != nil {
+		if rollbackErr := tx.rollback(); rollbackErr != nil {
+			markOutcomes(&report, operations, tx, Restored, Incomplete)
+			return report, fmt.Errorf("persist skills ownership: %w; rollback: %v", err, rollbackErr)
+		}
+		markOutcomes(&report, operations, tx, Restored, Incomplete)
+		return report, fmt.Errorf("persist skills ownership: %w", err)
+	}
+	transactionBoundary("state")
+	if err := tx.commit(); err != nil {
+		return report, fmt.Errorf("finalize skills transaction: %w", err)
+	}
+	return report, nil
+}
+
+func markOutcomes(report *Report, operations []operation, tx transaction, rolledBack, incomplete Outcome) {
+	for _, op := range operations {
+		if tx.restored(op.name) {
+			setOutcome(report, op, rolledBack)
+		} else {
+			setOutcome(report, op, incomplete)
+		}
+	}
+}
+
+func setOutcome(report *Report, op operation, outcome Outcome) {
+	for i := range report.Changes {
+		change := &report.Changes[i]
+		if change.Plugin == op.plugin && change.Name == op.name {
+			change.Outcome = outcome
+			return
+		}
+	}
+}
+
+func actionFor(changes []Change, plugin, name string) Action {
+	for i := len(changes) - 1; i >= 0; i-- {
+		if changes[i].Plugin.String() == plugin && changes[i].Name == name {
+			return changes[i].Action
+		}
+	}
+	return Conflict
+}
+func ownersOf(s state) map[string]string {
+	owners := map[string]string{}
+	for p, ps := range s.Plugins {
+		for n := range ps.Skills {
+			owners[n] = p
+		}
+	}
+	return owners
+}
+func cloneState(s state) state {
+	n := state{Schema: s.Schema, Plugins: map[string]pluginState{}}
+	for k, v := range s.Plugins {
+		skills := map[string]string{}
+		for a, b := range v.Skills {
+			skills[a] = b
+		}
+		v.Skills = skills
+		suppliers := map[string]string{}
+		for cli, revision := range v.Suppliers {
+			suppliers[cli] = revision
+		}
+		v.Suppliers = suppliers
+		n.Plugins[k] = v
+	}
+	return n
+}
+func statesEqual(a, b state) bool {
+	if len(a.Plugins) != len(b.Plugins) {
+		return false
+	}
+	for k, x := range a.Plugins {
+		y, ok := b.Plugins[k]
+		if !ok || x.Revision != y.Revision || x.Digest != y.Digest || x.CLI != y.CLI || x.Legacy != y.Legacy || x.Source != y.Source || len(x.Skills) != len(y.Skills) || len(x.Suppliers) != len(y.Suppliers) {
+			return false
+		}
+		for n, h := range x.Skills {
+			if y.Skills[n] != h {
+				return false
+			}
+		}
+		for cli, revision := range x.Suppliers {
+			if y.Suppliers[cli] != revision {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func classify(dir string, item skill, prior pluginState, owners map[string]string, plugin string) (Action, string, error) {
+	path := filepath.Join(dir, item.Name)
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return Added, "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return Conflict, "symlinked target", nil
+	}
+	if !info.IsDir() {
+		return Conflict, "non-directory target", nil
+	}
+	if owner := owners[item.Name]; owner != "" && owner != plugin {
+		return Conflict, "owned by " + owner, nil
+	}
+	previous, known := prior.Skills[item.Name]
+	if !known {
+		return Conflict, "unmanaged target", nil
+	}
+	digest, err := installedDigest(dir, item.Name)
+	if err != nil {
+		return Conflict, "unsafe target", nil
+	}
+	if digest != previous {
+		return Conflict, "modified target", nil
+	}
+	if digest == item.Digest {
+		return Unchanged, "", nil
+	}
+	return Updated, "", nil
+}
+func classifyRemoval(dir, name, old string, owners map[string]string, plugin string) (Action, string, error) {
+	if owners[name] != plugin {
+		return Conflict, "owned by another plugin", nil
+	}
+	path := filepath.Join(dir, name)
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return Removed, "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return Conflict, "symlinked target", nil
+	}
+	if !info.IsDir() {
+		return Conflict, "non-directory target", nil
+	}
+	digest, err := installedDigest(dir, name)
+	if err != nil {
+		return Conflict, "unsafe target", nil
+	}
+	if digest != old {
+		return Conflict, "modified target", nil
+	}
+	return Removed, "", nil
+}
+
+func rejectSymlink(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refuse symlinked skills directory %s", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("skills directory %s is not a directory", path)
+	}
+	return nil
+}
+func installedDigest(dir, name string) (string, error) {
+	hfs := os.DirFS(dir)
+	return subtreeDigest(hfs, name)
+}
+
+type transaction struct {
+	dir           string
+	id            string
+	changes       []txChange
+	restoredNames map[string]bool
+}
+type txChange struct {
+	Name, Old, New string
+	Existed        bool
+	Phase          string
+}
+
+const recoveryFileName = ".cli-helpers-skills-recovery.json"
+const transactionPrefix = ".cli-helpers-skills-txn-"
+
+// transactionOperations names the two filesystem boundaries whose failures
+// change recovery behavior. It is internal so tests can deterministically
+// exercise those boundaries without adding options or runtime switches.
+var transactionOperations = struct {
+	rename    func(*os.Root, string, string) error
+	removeAll func(*os.Root, string) error
+}{rename: func(root *os.Root, old, new string) error { return root.Rename(old, new) }, removeAll: func(root *os.Root, name string) error { return root.RemoveAll(name) }}
+
+var transactionBoundary = func(string) {}
+
+func rootRelative(root, path string) (string, error) {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." || !filepath.IsLocal(rel) {
+		return "", fmt.Errorf("%w: path escapes transaction root", ErrStateCorrupt)
+	}
+	return rel, nil
+}
+
+func rootedRename(rootPath, old, new string) error {
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	oldRel, err := rootRelative(rootPath, old)
+	if err != nil {
+		return err
+	}
+	newRel, err := rootRelative(rootPath, new)
+	if err != nil {
+		return err
+	}
+	return transactionOperations.rename(root, oldRel, newRel)
+}
+
+func rootedRemoveAll(rootPath, path string) error {
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	rel, err := rootRelative(rootPath, path)
+	if err != nil {
+		return err
+	}
+	return transactionOperations.removeAll(root, rel)
+}
+
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
+type recoveryChange struct {
+	Name    string `json:"name"`
+	Old     string `json:"old,omitempty"`
+	New     string `json:"new,omitempty"`
+	Existed bool   `json:"existed"`
+	Phase   string `json:"phase"`
+}
+type recoveryJournal struct {
+	Schema      int              `json:"schema"`
+	ID          string           `json:"id"`
+	Transaction string           `json:"transaction"`
+	Changes     []recoveryChange `json:"changes"`
+}
+
+func newTransaction(dir string) transaction {
+	return transaction{dir: dir, restoredNames: map[string]bool{}}
+}
+
+func validSkillName(name string) bool {
+	return name != "" && name != "." && !strings.HasPrefix(name, ".cli-helpers-skills-") && fs.ValidPath(name) && filepath.Base(name) == name
+}
+
+func validDigest(digest string) bool {
+	if len(digest) != 64 {
+		return false
+	}
+	for _, r := range digest {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func (t *transaction) transactionDir() string { return filepath.Join(t.dir, t.id) }
+func (t *transaction) backup(name string) string {
+	return filepath.Join(t.transactionDir(), "backup", name)
+}
+
+func (t *transaction) start() error {
+	if t.id != "" {
+		return nil
+	}
+	if err := os.MkdirAll(t.dir, 0o755); err != nil {
+		return err
+	}
+	dir, err := os.MkdirTemp(t.dir, transactionPrefix)
+	if err != nil {
+		return err
+	}
+	t.id = filepath.Base(dir)
+	return nil
+}
+
+func (t *transaction) record(c txChange) error {
+	if err := t.start(); err != nil {
+		return err
+	}
+	if !validSkillName(c.Name) || (c.Old != "" && !validDigest(c.Old)) || (c.New != "" && !validDigest(c.New)) || (c.Existed && c.Old == "") || (!c.Existed && c.Old != "") {
+		return fmt.Errorf("%w: invalid transaction change", ErrStateCorrupt)
+	}
+	c.Phase = "prepared"
+	t.changes = append(t.changes, c)
+	if err := t.writeJournal(); err != nil {
+		t.changes = t.changes[:len(t.changes)-1]
+		return err
+	}
+	return nil
+}
+
+func (t *transaction) writeJournal() error {
+	changes := make([]recoveryChange, 0, len(t.changes))
+	for _, change := range t.changes {
+		changes = append(changes, recoveryChange{Name: change.Name, Old: change.Old, New: change.New, Existed: change.Existed, Phase: change.Phase})
+	}
+	raw, err := json.Marshal(recoveryJournal{Schema: 2, ID: strings.TrimPrefix(t.id, transactionPrefix), Transaction: t.id, Changes: changes})
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(t.dir, ".cli-helpers-skills-recovery-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if _, err = tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	if err := rootedRename(t.dir, name, filepath.Join(t.dir, recoveryFileName)); err != nil {
+		return err
+	}
+	if err := syncDirectory(t.dir); err != nil {
+		return err
+	}
+	transactionBoundary("journal")
+	return nil
+}
+
+func (t *transaction) setPhase(index int, phase string) error {
+	t.changes[index].Phase = phase
+	return t.writeJournal()
+}
+
+func recoverTransaction(dir string) error {
+	path := filepath.Join(dir, recoveryFileName)
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: recovery journal is a symlink", ErrStateCorrupt)
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var journal recoveryJournal
+	if err := json.Unmarshal(raw, &journal); err != nil || !validJournal(journal) {
+		return fmt.Errorf("%w: invalid recovery journal", ErrStateCorrupt)
+	}
+	txDir := filepath.Join(dir, journal.Transaction)
+	if err := validTransactionDir(txDir); err != nil {
+		return err
+	}
+	state, err := readState(dir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if err == nil && state.RecoveryID == journal.ID {
+		for _, c := range journal.Changes {
+			if err := verifyCommittedChange(dir, c); err != nil {
+				return err
+			}
+		}
+		return finalizeJournal(path, txDir)
+	}
+	for _, c := range journal.Changes {
+		if c.Existed && !stateOwnsDigest(state, c.Name, c.Old) {
+			return fmt.Errorf("%w: recovery target %s lacks prior ownership", ErrStateCorrupt, c.Name)
+		}
+	}
+	for i := len(journal.Changes) - 1; i >= 0; i-- {
+		if err := restoreChange(dir, txDir, journal.Changes[i]); err != nil {
+			return err
+		}
+	}
+	return finalizeJournal(path, txDir)
+}
+
+func stateOwnsDigest(s state, name, digest string) bool {
+	for _, plugin := range s.Plugins {
+		if plugin.Skills[name] == digest {
+			return true
+		}
+	}
+	return false
+}
+
+func validJournal(j recoveryJournal) bool {
+	if j.Schema != 2 || j.ID == "" || j.Transaction != transactionPrefix+j.ID || filepath.Base(j.Transaction) != j.Transaction || len(j.Changes) == 0 {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, c := range j.Changes {
+		if !validSkillName(c.Name) || seen[c.Name] || (c.Old != "" && !validDigest(c.Old)) || (c.New != "" && !validDigest(c.New)) || (c.Existed && c.Old == "") || (!c.Existed && c.Old != "") || (c.New == "" && !c.Existed) || (c.Phase != "prepared" && c.Phase != "backed_up" && c.Phase != "published") {
+			return false
+		}
+		seen[c.Name] = true
+	}
+	return true
+}
+
+func validTransactionDir(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil // A completed cleanup can leave a journal whose target proves recovery safe.
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("%w: transaction directory is unsafe", ErrStateCorrupt)
+	}
+	return nil
+}
+
+func checkTransactionSubdir(root, name string) error {
+	path := filepath.Join(root, name)
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("%w: transaction %s directory is unsafe", ErrStateCorrupt, name)
+	}
+	return nil
+}
+
+func digestAt(root, name string) (exists bool, digest string, err error) {
+	dir, err := os.OpenRoot(root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, "", nil
+	}
+	if err != nil {
+		return false, "", err
+	}
+	defer dir.Close()
+	info, err := dir.Lstat(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, "", nil
+	}
+	if err != nil {
+		return false, "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return true, "", fmt.Errorf("%w: unsafe transaction content", ErrStateCorrupt)
+	}
+	digest, err = subtreeDigest(dir.FS(), name)
+	if err != nil {
+		return true, "", fmt.Errorf("%w: digest transaction content: %v", ErrStateCorrupt, err)
+	}
+	return true, digest, nil
+}
+
+func verifyCommittedChange(dir string, c recoveryChange) error {
+	exists, digest, err := digestAt(dir, c.Name)
+	if err != nil {
+		return err
+	}
+	if c.New == "" {
+		if exists {
+			return fmt.Errorf("%w: committed removal %s reappeared", ErrStateCorrupt, c.Name)
+		}
+		return nil
+	}
+	if !exists || digest != c.New {
+		return fmt.Errorf("%w: committed target %s differs", ErrStateCorrupt, c.Name)
+	}
+	return nil
+}
+
+func restoreChange(dir, txDir string, c recoveryChange) error {
+	targetExists, targetDigest, err := digestAt(dir, c.Name)
+	if err != nil {
+		return err
+	}
+	if !c.Existed {
+		if !targetExists {
+			return nil
+		}
+		if err := checkTransactionSubdir(txDir, "proof"); err != nil {
+			return err
+		}
+		proofExists, proofDigest, err := digestAt(filepath.Join(txDir, "proof"), c.Name)
+		if err != nil {
+			return err
+		}
+		if !proofExists || proofDigest != c.New {
+			return fmt.Errorf("%w: added target %s lacks transaction proof", ErrStateCorrupt, c.Name)
+		}
+		if targetDigest != c.New {
+			return fmt.Errorf("%w: added target %s is not transaction content", ErrStateCorrupt, c.Name)
+		}
+		return rootedRemoveAll(dir, filepath.Join(dir, c.Name))
+	}
+	if err := checkTransactionSubdir(txDir, "backup"); err != nil {
+		return err
+	}
+	backupRoot := filepath.Join(txDir, "backup")
+	backupExists, backupDigest, err := digestAt(backupRoot, c.Name)
+	if err != nil {
+		return err
+	}
+	if !backupExists {
+		if targetExists && targetDigest == c.Old {
+			return nil
+		}
+		return fmt.Errorf("%w: original %s is not recoverable", ErrStateCorrupt, c.Name)
+	}
+	if backupDigest != c.Old {
+		return fmt.Errorf("%w: backup %s differs", ErrStateCorrupt, c.Name)
+	}
+	if targetExists {
+		if targetDigest == c.Old {
+			return nil
+		}
+		if targetDigest != c.New {
+			return fmt.Errorf("%w: target %s differs", ErrStateCorrupt, c.Name)
+		}
+		if err := rootedRemoveAll(dir, filepath.Join(dir, c.Name)); err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, c.Name)), 0o755); err != nil {
+		return err
+	}
+	return rootedRename(dir, filepath.Join(backupRoot, c.Name), filepath.Join(dir, c.Name))
+}
+
+func finalizeJournal(path, txDir string) error {
+	if err := rootedRemoveAll(filepath.Dir(txDir), txDir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (t *transaction) replace(source fs.FS, executablePaths []string, name, old, new string) error {
+	if err := t.start(); err != nil {
+		return err
+	}
+	stageRoot := filepath.Join(t.transactionDir(), "stage")
+	if err := checkTransactionSubdir(t.transactionDir(), "stage"); err != nil {
+		return err
+	}
+	executables, err := executableSet(source, executablePaths)
+	if err != nil {
+		return err
+	}
+	if err := copySkill(source, name, stageRoot, executables); err != nil {
+		return err
+	}
+	stageExists, stageDigest, err := digestAt(stageRoot, name)
+	if err != nil || !stageExists || stageDigest != new {
+		if err == nil {
+			err = fmt.Errorf("%w: staged skill digest differs", ErrStateCorrupt)
+		}
+		return err
+	}
+	proofRoot := filepath.Join(t.transactionDir(), "proof")
+	if err := checkTransactionSubdir(t.transactionDir(), "proof"); err != nil {
+		return err
+	}
+	if err := copySkill(source, name, proofRoot, executables); err != nil {
+		return err
+	}
+	proofExists, proofDigest, err := digestAt(proofRoot, name)
+	if err != nil || !proofExists || proofDigest != new {
+		if err == nil {
+			err = fmt.Errorf("%w: transaction proof digest differs", ErrStateCorrupt)
+		}
+		return err
+	}
+	targetExists, targetDigest, err := digestAt(t.dir, name)
+	if err != nil {
+		return err
+	}
+	if old == "" && targetExists || old != "" && (!targetExists || targetDigest != old) {
+		return fmt.Errorf("%w: target %s changed after planning", ErrStateCorrupt, name)
+	}
+	c := txChange{Name: name, Old: old, New: new, Existed: old != ""}
+	if err := t.record(c); err != nil {
+		return err
+	}
+	index := len(t.changes) - 1
+	target := filepath.Join(t.dir, name)
+	if c.Existed {
+		backup := t.backup(name)
+		if err := checkTransactionSubdir(t.transactionDir(), "backup"); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(backup), 0o755); err != nil {
+			return err
+		}
+		if err := rootedRename(t.dir, target, backup); err != nil {
+			return err
+		}
+		transactionBoundary("backup")
+		if err := t.setPhase(index, "backed_up"); err != nil {
+			return err
+		}
+	}
+	if err := rootedRename(t.dir, filepath.Join(stageRoot, name), target); err != nil {
+		return err
+	}
+	transactionBoundary("publish")
+	return t.setPhase(index, "published")
+}
+func (t *transaction) remove(name, old string) error {
+	if err := t.start(); err != nil {
+		return err
+	}
+	targetExists, targetDigest, err := digestAt(t.dir, name)
+	if err != nil {
+		return err
+	}
+	if !targetExists {
+		return nil
+	}
+	if targetDigest != old {
+		return fmt.Errorf("%w: target %s changed after planning", ErrStateCorrupt, name)
+	}
+	c := txChange{Name: name, Old: old, Existed: true}
+	if err := t.record(c); err != nil {
+		return err
+	}
+	backup := t.backup(name)
+	if err := checkTransactionSubdir(t.transactionDir(), "backup"); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(backup), 0o755); err != nil {
+		return err
+	}
+	if err := rootedRename(t.dir, filepath.Join(t.dir, name), backup); err != nil {
+		return err
+	}
+	transactionBoundary("backup")
+	return t.setPhase(len(t.changes)-1, "backed_up")
+}
+func (t *transaction) rollback() error {
+	var rollbackErr error
+	for i := len(t.changes) - 1; i >= 0; i-- {
+		c := t.changes[i]
+		if err := restoreChange(t.dir, t.transactionDir(), recoveryChange{Name: c.Name, Old: c.Old, New: c.New, Existed: c.Existed, Phase: c.Phase}); err != nil {
+			rollbackErr = errors.Join(rollbackErr, err)
+			continue
+		}
+		t.restoredNames[c.Name] = true
+	}
+	if rollbackErr == nil {
+		rollbackErr = finalizeJournal(filepath.Join(t.dir, recoveryFileName), t.transactionDir())
+	}
+	return rollbackErr
+}
+func (t *transaction) restored(name string) bool { return t.restoredNames[name] }
+func (t *transaction) commit() error {
+	if t.id == "" {
+		return nil
+	}
+	return finalizeJournal(filepath.Join(t.dir, recoveryFileName), t.transactionDir())
+}
+func copySkill(source fs.FS, name, stage string, executables map[string]bool) error {
+	return fs.WalkDir(source, name, func(path string, e fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if e.Type()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("refuse symlink source %s", path)
+		}
+		dest := filepath.Join(stage, filepath.FromSlash(path))
+		if e.IsDir() {
+			return os.MkdirAll(dest, 0o755)
+		}
+		if !e.Type().IsRegular() {
+			return fmt.Errorf("refuse non-regular source %s", path)
+		}
+		data, err := fs.ReadFile(source, path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return err
+		}
+		mode := fs.FileMode(0o644)
+		if executables[path] {
+			mode = 0o755
+		}
+		return os.WriteFile(dest, data, mode)
+	})
+}
+
+func lock(ctx context.Context, dir string, timeout time.Duration) (func(), error) {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	parent := filepath.Dir(filepath.Clean(dir))
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256([]byte(filepath.Clean(dir)))
+	path := filepath.Join(parent, fmt.Sprintf(".cli-helpers-skills-lock-%x", sum[:8]))
+	file := flock.New(path)
+	deadline := time.Now().Add(timeout)
+	for {
+		locked, err := file.TryLock()
+		if err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if locked {
+			return func() { _ = file.Unlock(); _ = file.Close() }, nil
+		}
+		if time.Now().After(deadline) {
+			_ = file.Close()
+			return nil, fmt.Errorf("skills target lock timed out: %s", dir)
+		}
+		select {
+		case <-ctx.Done():
+			_ = file.Close()
+			return nil, ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}

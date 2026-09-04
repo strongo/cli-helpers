@@ -5,6 +5,7 @@ go 1.26.0
 toolchain go1.27.0
 
 require (
+	github.com/gofrs/flock v0.13.1
 	github.com/spf13/cobra v1.10.2
 	github.com/strongo/buildinfo v0.2.0
 	golang.org/x/term v0.45.0
