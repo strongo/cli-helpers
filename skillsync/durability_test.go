@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 )
 
@@ -463,6 +464,154 @@ func TestTransactionStartAndRecordRejectUnsafeInput(t *testing.T) {
 	if tx.id == "" || len(tx.changes) != 0 {
 		t.Fatalf("invalid record changed transaction: %#v", tx)
 	}
+}
+
+func TestTransactionHelperErrorBoundaries(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := rootedRename(file, "from", "to"); err == nil {
+		t.Fatal("file root accepted for rename")
+	}
+	if err := rootedRename(dir, file, filepath.Join(dir, "..", "outside")); !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("unsafe rename destination=%v", err)
+	}
+	if err := rootedRemoveAll(file, "from"); err == nil {
+		t.Fatal("file root accepted for remove")
+	}
+	if err := syncDirectory(filepath.Join(dir, "missing")); err == nil {
+		t.Fatal("missing directory synced")
+	}
+	if err := syncDirectoryChain(filepath.Join(dir, "missing"), dir); err == nil {
+		t.Fatal("missing chain synced")
+	}
+	if _, err := ensureDirectoryAncestry(filepath.Join(dir, strings.Repeat("a", 300)), os.MkdirAll); err == nil {
+		t.Fatal("lstat failure accepted")
+	}
+	if _, err := ensureDirectoryAncestry(file, os.MkdirAll); err == nil {
+		t.Fatal("file itself accepted as directory")
+	}
+	if err := syncCreatedDirectoryAncestry([]string{dir, dir}, func(string) error { return nil }); err != nil {
+		t.Fatalf("duplicate created paths=%v", err)
+	}
+
+	t.Run("start sync creation failure", func(t *testing.T) {
+		target := filepath.Join(t.TempDir(), "target")
+		syncErr := errors.New("sync created")
+		previous := transactionOperations
+		t.Cleanup(func() { transactionOperations = previous })
+		transactionOperations.syncDirectory = func(string) error { return syncErr }
+		tx := newTransaction(target)
+		if err := tx.start(); !errors.Is(err, syncErr) {
+			t.Fatalf("start=%v", err)
+		}
+	})
+	t.Run("start temp creation failure", func(t *testing.T) {
+		dir := t.TempDir()
+		tempErr := errors.New("temp")
+		withDurableFileOperations(t, func(ops *durableFileOperationSet) {
+			ops.mkdirTemp = func(string, string) (string, error) { return "", tempErr }
+		})
+		tx := newTransaction(dir)
+		if err := tx.start(); !errors.Is(err, tempErr) {
+			t.Fatalf("start=%v", err)
+		}
+	})
+	t.Run("record journal failure restores in-memory change", func(t *testing.T) {
+		dir := t.TempDir()
+		syncErr := errors.New("journal sync")
+		previous := transactionOperations
+		t.Cleanup(func() { transactionOperations = previous })
+		transactionOperations.syncDirectory = func(string) error { return syncErr }
+		tx := newTransaction(dir)
+		tx.id = transactionPrefix + "record"
+		if err := os.Mkdir(filepath.Join(dir, tx.id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.record(txChange{Name: "alpha", New: strings.Repeat("a", 64)}); !errors.Is(err, syncErr) {
+			t.Fatalf("record=%v", err)
+		}
+		if len(tx.changes) != 0 {
+			t.Fatalf("failed record retained=%#v", tx.changes)
+		}
+	})
+	t.Run("record start failure retains no change", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "target")
+		syncErr := errors.New("start sync")
+		previous := transactionOperations
+		t.Cleanup(func() { transactionOperations = previous })
+		transactionOperations.syncDirectory = func(string) error { return syncErr }
+		tx := newTransaction(dir)
+		if err := tx.record(txChange{Name: "alpha", New: strings.Repeat("a", 64)}); !errors.Is(err, syncErr) {
+			t.Fatalf("record=%v", err)
+		}
+		if len(tx.changes) != 0 {
+			t.Fatalf("failed start recorded=%#v", tx.changes)
+		}
+	})
+}
+
+func TestCopySkillAndLockFailClosed(t *testing.T) {
+	t.Run("copies executable content durably", func(t *testing.T) {
+		stage := filepath.Join(t.TempDir(), "stage")
+		source := fstest.MapFS{"alpha/SKILL.md": &fstest.MapFile{Data: []byte("body")}}
+		if err := copySkill(source, "alpha", stage, map[string]bool{"alpha/SKILL.md": true}); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(filepath.Join(stage, "alpha", "SKILL.md"))
+		if err != nil || info.Mode().Perm() != 0o755 {
+			t.Fatalf("mode=%v err=%v", info.Mode(), err)
+		}
+	})
+	for _, tc := range []struct {
+		name   string
+		source fs.FS
+	}{
+		{name: "symlink", source: fstest.MapFS{"alpha/link": &fstest.MapFile{Mode: fs.ModeSymlink}}},
+		{name: "non-regular", source: fstest.MapFS{"alpha/fifo": &fstest.MapFile{Mode: fs.ModeNamedPipe}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := copySkill(tc.source, "alpha", filepath.Join(t.TempDir(), "stage"), nil); err == nil {
+				t.Fatal("unsafe source copied")
+			}
+		})
+	}
+	t.Run("write failure preserves no completed content", func(t *testing.T) {
+		createErr := errors.New("create")
+		withDurableFileOperations(t, func(ops *durableFileOperationSet) {
+			ops.createFile = func(string, fs.FileMode) (durableFile, error) { return nil, createErr }
+		})
+		err := copySkill(fstest.MapFS{"alpha/SKILL.md": &fstest.MapFile{Data: []byte("body")}}, "alpha", filepath.Join(t.TempDir(), "stage"), nil)
+		if !errors.Is(err, createErr) {
+			t.Fatalf("copy=%v", err)
+		}
+	})
+
+	t.Run("lock serializes and observes cancellation", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "nested", "skills")
+		unlock, err := lock(context.Background(), dir, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unlock()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := lock(ctx, dir, time.Second); !errors.Is(err, context.Canceled) {
+			t.Fatalf("contended lock=%v", err)
+		}
+	})
+	t.Run("symlinked lock is refused", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "skills")
+		parent := filepath.Dir(dir)
+		if err := os.Symlink(filepath.Join(parent, "outside"), filepath.Join(parent, ".cli-helpers-skills-lock")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := lock(context.Background(), dir, time.Second); err == nil {
+			t.Fatal("symlinked lock accepted")
+		}
+	})
 }
 
 func TestRecoveryRetriesDirectorySyncBeforeDiscardingEvidence(t *testing.T) {
