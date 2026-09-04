@@ -78,6 +78,111 @@ func TestWriteStateRejectsUnencodableTimestamp(t *testing.T) {
 	}
 }
 
+func TestAtomicPublicationFaultsDoNotClaimPublication(t *testing.T) {
+	for _, phase := range []string{"temp-create", "temp-sync", "rename", "directory-sync"} {
+		t.Run(phase, func(t *testing.T) {
+			dir := t.TempDir()
+			switch phase {
+			case "temp-create":
+				createErr := errors.New("temp create")
+				withDurableFileOperations(t, func(ops *durableFileOperationSet) {
+					ops.createTemp = func(string, string) (durableFile, error) { return nil, createErr }
+				})
+				if published, err := writeAtomically(dir, ".tmp-*", filepath.Join(dir, "marker"), []byte("x"), syncDirectory); published || !errors.Is(err, createErr) {
+					t.Fatalf("published=%v err=%v", published, err)
+				}
+			case "temp-sync":
+				withDurableFileOperations(t, func(ops *durableFileOperationSet) {
+					original := ops.createTemp
+					ops.createTemp = func(parent, pattern string) (durableFile, error) {
+						file, err := original(parent, pattern)
+						if err != nil {
+							return nil, err
+						}
+						return syncFaultFile{durableFile: file, err: errors.New("temp sync")}, nil
+					}
+				})
+				if published, err := writeAtomically(dir, ".tmp-*", filepath.Join(dir, "marker"), []byte("x"), syncDirectory); published || err == nil {
+					t.Fatalf("published=%v err=%v", published, err)
+				}
+			case "rename":
+				withTransactionOperations(t, func(ops *transactionOperationSet) {
+					original := ops.rename
+					ops.rename = func(root *os.Root, from, to string) error {
+						if filepath.Base(to) == "marker" {
+							return errors.New("rename")
+						}
+						return original(root, from, to)
+					}
+				})
+				if published, err := writeAtomically(dir, ".tmp-*", filepath.Join(dir, "marker"), []byte("x"), syncDirectory); published || err == nil {
+					t.Fatalf("published=%v err=%v", published, err)
+				}
+			case "directory-sync":
+				directoryErr := errors.New("directory sync")
+				if published, err := writeAtomically(dir, ".tmp-*", filepath.Join(dir, "marker"), []byte("x"), func(string) error { return directoryErr }); !published || !errors.Is(err, directoryErr) {
+					t.Fatalf("published=%v err=%v", published, err)
+				}
+			}
+		})
+	}
+}
+
+func TestWriteStateMkdirFailureLeavesNoMarker(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "target")
+	mkdirErr := errors.New("mkdir")
+	withDurableFileOperations(t, func(ops *durableFileOperationSet) {
+		ops.mkdirAll = func(string, fs.FileMode) error { return mkdirErr }
+	})
+	err := writeState(dir, state{Plugins: map[string]pluginState{}})
+	if !errors.Is(err, mkdirErr) {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := os.Lstat(statePath(dir)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("marker exists: %v", err)
+	}
+}
+
+func TestPreparedAndTargetPublicFailureContracts(t *testing.T) {
+	b := bundle(t, "plugin", "prepared", "body")
+	if _, err := Prepare(context.Background(), Config{}, Options{}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("invalid prepare=%v", err)
+	}
+	if _, err := Prepare(context.Background(), config(t, b), Options{PreferNewerCompatible: true}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("resolver prepare=%v", err)
+	}
+	prepared, err := Prepare(context.Background(), config(t, b), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepared.Sync(context.Background(), Options{}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("empty target=%v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := Prepare(canceled, config(t, b), Options{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled prepare=%v", err)
+	}
+	if _, err := ValidateTarget(""); err != nil {
+		t.Fatalf("empty target validation=%v", err)
+	}
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateTarget(file); err == nil {
+		t.Fatal("file target accepted")
+	}
+	outside := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateTarget(filepath.Join(link, "skills")); err == nil {
+		t.Fatal("symlink ancestor accepted")
+	}
+}
+
 func TestSyncCopyFileSyncFailureLeavesVerifiedOriginal(t *testing.T) {
 	dir := t.TempDir()
 	old := bundle(t, "plugin", "durable-old", "old")
