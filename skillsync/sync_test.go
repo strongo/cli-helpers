@@ -251,10 +251,7 @@ func TestSyncRemovalFailureRestoresOriginal(t *testing.T) {
 	if _, err := Sync(context.Background(), config(t, old), Options{Dir: dir}); err != nil {
 		t.Fatal(err)
 	}
-	withTransactionOperations(t, func(ops *struct {
-		rename    func(*os.Root, string, string) error
-		removeAll func(*os.Root, string) error
-	}) {
+	withTransactionOperations(t, func(ops *transactionOperationSet) {
 		original := ops.rename
 		ops.rename = func(root *os.Root, from, to string) error {
 			if filepath.Base(from) == "beta" && strings.Contains(filepath.ToSlash(to), "/backup/") {
@@ -1431,10 +1428,7 @@ func TestSyncWithMissingLegacyMarkerStartsFresh(t *testing.T) {
 	}
 }
 
-func withTransactionOperations(t *testing.T, mutate func(*struct {
-	rename    func(*os.Root, string, string) error
-	removeAll func(*os.Root, string) error
-})) {
+func withTransactionOperations(t *testing.T, mutate func(*transactionOperationSet)) {
 	t.Helper()
 	previous := transactionOperations
 	t.Cleanup(func() { transactionOperations = previous })
@@ -1447,10 +1441,7 @@ func TestSyncRecordFailurePreservesOriginalAndReportsIncomplete(t *testing.T) {
 	if _, err := Sync(context.Background(), config(t, old), Options{Dir: dir}); err != nil {
 		t.Fatal(err)
 	}
-	withTransactionOperations(t, func(ops *struct {
-		rename    func(*os.Root, string, string) error
-		removeAll func(*os.Root, string) error
-	}) {
+	withTransactionOperations(t, func(ops *transactionOperationSet) {
 		original := ops.rename
 		ops.rename = func(root *os.Root, from, to string) error {
 			if filepath.Base(to) == recoveryFileName {
@@ -1475,10 +1466,7 @@ func TestSyncPublishFailureRestoresOriginalAndReportsRestored(t *testing.T) {
 	if _, err := Sync(context.Background(), config(t, old), Options{Dir: dir}); err != nil {
 		t.Fatal(err)
 	}
-	withTransactionOperations(t, func(ops *struct {
-		rename    func(*os.Root, string, string) error
-		removeAll func(*os.Root, string) error
-	}) {
+	withTransactionOperations(t, func(ops *transactionOperationSet) {
 		original := ops.rename
 		ops.rename = func(root *os.Root, from, to string) error {
 			if strings.Contains(filepath.ToSlash(from), "/stage/") {
@@ -1503,10 +1491,7 @@ func TestSyncRollbackFailurePreservesBackupAndReportsIncomplete(t *testing.T) {
 	if _, err := Sync(context.Background(), config(t, old), Options{Dir: dir}); err != nil {
 		t.Fatal(err)
 	}
-	withTransactionOperations(t, func(ops *struct {
-		rename    func(*os.Root, string, string) error
-		removeAll func(*os.Root, string) error
-	}) {
+	withTransactionOperations(t, func(ops *transactionOperationSet) {
 		original := ops.rename
 		ops.rename = func(root *os.Root, from, to string) error {
 			if strings.Contains(filepath.ToSlash(from), "/backup/") {
@@ -1833,10 +1818,7 @@ func TestLegacyMarkerPublicationFailureDoesNotMoveOriginal(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".wb-skills-sync.json"), marker, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	withTransactionOperations(t, func(ops *struct {
-		rename    func(*os.Root, string, string) error
-		removeAll func(*os.Root, string) error
-	}) {
+	withTransactionOperations(t, func(ops *transactionOperationSet) {
 		original := ops.rename
 		ops.rename = func(root *os.Root, from, to string) error {
 			if filepath.Base(to) == StateFileName {

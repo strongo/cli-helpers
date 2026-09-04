@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -46,6 +47,74 @@ func (e statePublishedError) Error() string { return e.err.Error() }
 func (e statePublishedError) Unwrap() error { return e.err }
 
 var stateDirectorySync = syncDirectory
+
+// durableFileOperations keeps failure injection private to the package tests.
+// Production callers always use the os-backed defaults below.
+type durableFile interface {
+	Name() string
+	Write([]byte) (int, error)
+	Sync() error
+	Close() error
+}
+
+type durableFileOperationSet struct {
+	mkdirAll   func(string, fs.FileMode) error
+	mkdirTemp  func(string, string) (string, error)
+	createTemp func(string, string) (durableFile, error)
+	createFile func(string, fs.FileMode) (durableFile, error)
+	remove     func(string) error
+}
+
+var durableFileOperations = durableFileOperationSet{
+	mkdirAll:  func(path string, mode fs.FileMode) error { return os.MkdirAll(path, mode) },
+	mkdirTemp: os.MkdirTemp,
+	createTemp: func(dir, pattern string) (durableFile, error) {
+		return os.CreateTemp(dir, pattern)
+	},
+	createFile: func(path string, mode fs.FileMode) (durableFile, error) {
+		return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	},
+	remove: os.Remove,
+}
+
+func writeAndSync(file durableFile, data []byte) error {
+	n, err := file.Write(data)
+	if err != nil {
+		_ = file.Close()
+		return err
+	}
+	if n != len(data) {
+		_ = file.Close()
+		return io.ErrShortWrite
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+// writeAtomically publishes a complete file only after its bytes reached stable
+// storage. The returned flag means the replacement rename has succeeded, so a
+// caller can retain recovery evidence when only parent persistence failed.
+func writeAtomically(dir, pattern, destination string, data []byte, directorySync func(string) error) (published bool, err error) {
+	tmp, err := durableFileOperations.createTemp(dir, pattern)
+	if err != nil {
+		return false, err
+	}
+	name := tmp.Name()
+	defer func() { _ = durableFileOperations.remove(name) }()
+	if err := writeAndSync(tmp, data); err != nil {
+		return false, err
+	}
+	if err := rootedRename(dir, name, destination); err != nil {
+		return false, err
+	}
+	if err := directorySync(dir); err != nil {
+		return true, err
+	}
+	return true, nil
+}
 
 func statePath(dir string) string { return filepath.Join(dir, StateFileName) }
 func readState(dir string) (state, error) {
@@ -123,33 +192,14 @@ func writeState(dir string, s state) error {
 		return err
 	}
 	raw = append(raw, '\n')
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := durableFileOperations.mkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".cli-helpers-skills-*.tmp")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer func() { _ = os.Remove(name) }()
-	if _, err = tmp.Write(raw); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err = tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err = tmp.Close(); err != nil {
-		return err
-	}
-	if err := rootedRename(dir, name, statePath(dir)); err != nil {
-		return err
-	}
-	if err := stateDirectorySync(dir); err != nil {
+	published, err := writeAtomically(dir, ".cli-helpers-skills-*.tmp", statePath(dir), raw, stateDirectorySync)
+	if err != nil && published {
 		return statePublishedError{err: err}
 	}
-	return nil
+	return err
 }
 func emptyOrExistingState(dir string) (state, error) {
 	s, err := readState(dir)
@@ -225,7 +275,7 @@ func importLegacy(dir string, legacy LegacyImport, suppliedCLI ...Identity) (plu
 	}
 	versions := map[string]string{}
 	if marker.WBVersion != "" {
-		if !validVersion(marker.WBVersion) {
+		if !validCurrentCLIVersion(marker.WBVersion) {
 			return pluginState{}, fmt.Errorf("%w: invalid legacy wb_version", ErrStateCorrupt)
 		}
 		if len(suppliedCLI) > 0 {

@@ -311,7 +311,14 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 				supplierVersions[cli] = version
 			}
 			supplierVersions[cfg.CLI.String()] = cfg.CurrentVersion
-			next.Plugins[key] = pluginState{Revision: rb.Bundle.Source.Revision, Digest: rb.Bundle.Source.Digest, CLI: cfg.CLI.String(), Suppliers: suppliers, SupplierCLIVersions: supplierVersions, Source: rb.Bundle.Source, Skills: owned, SyncedAt: time.Now().UTC()}
+			// CLI is the original primary supplier retained by old markers. A
+			// registered supplier with identical immutable source must not flip
+			// that field back and forth or rewrite an otherwise unchanged marker.
+			primaryCLI := cfg.CLI.String()
+			if prior.CLI != "" && prior.Source == rb.Bundle.Source {
+				primaryCLI = prior.CLI
+			}
+			next.Plugins[key] = pluginState{Revision: rb.Bundle.Source.Revision, Digest: rb.Bundle.Source.Digest, CLI: primaryCLI, Suppliers: suppliers, SupplierCLIVersions: supplierVersions, Source: rb.Bundle.Source, Skills: owned, SyncedAt: time.Now().UTC()}
 		}
 	}
 	sort.Slice(report.Changes, func(i, j int) bool {
@@ -574,13 +581,24 @@ type txChange struct {
 const recoveryFileName = ".cli-helpers-skills-recovery.json"
 const transactionPrefix = ".cli-helpers-skills-txn-"
 
-// transactionOperations names the two filesystem boundaries whose failures
+// transactionOperationSet names the filesystem boundaries whose failures
 // change recovery behavior. It is internal so tests can deterministically
 // exercise those boundaries without adding options or runtime switches.
-var transactionOperations = struct {
-	rename    func(*os.Root, string, string) error
-	removeAll func(*os.Root, string) error
-}{rename: func(root *os.Root, old, new string) error { return root.Rename(old, new) }, removeAll: func(root *os.Root, name string) error { return root.RemoveAll(name) }}
+type transactionOperationSet struct {
+	rename        func(*os.Root, string, string) error
+	removeAll     func(*os.Root, string) error
+	mkdirAll      func(string, fs.FileMode) error
+	remove        func(string) error
+	syncDirectory func(string) error
+}
+
+var transactionOperations = transactionOperationSet{
+	rename:        func(root *os.Root, old, new string) error { return root.Rename(old, new) },
+	removeAll:     func(root *os.Root, name string) error { return root.RemoveAll(name) },
+	mkdirAll:      func(path string, mode fs.FileMode) error { return os.MkdirAll(path, mode) },
+	remove:        os.Remove,
+	syncDirectory: syncDirectory,
+}
 
 var transactionBoundary = func(string) {}
 
@@ -631,6 +649,82 @@ func syncDirectory(path string) error {
 	return dir.Sync()
 }
 
+func syncTransactionDirectories(paths ...string) error {
+	seen := map[string]bool{}
+	for _, path := range paths {
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		if err := transactionOperations.syncDirectory(path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func syncDirectoryChain(path, stop string) error {
+	for {
+		if err := syncTransactionDirectories(path); err != nil {
+			return err
+		}
+		if path == stop {
+			return nil
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return fmt.Errorf("%w: directory sync escaped transaction root", ErrStateCorrupt)
+		}
+		path = parent
+	}
+}
+
+// ensureDirectoryAncestry creates each missing directory separately so callers
+// can durably persist every newly-created entry without syncing beyond the
+// first pre-existing ancestor.
+func ensureDirectoryAncestry(path string, mkdir func(string, fs.FileMode) error) ([]string, error) {
+	var missing []string
+	for current := path; ; current = filepath.Dir(current) {
+		info, err := os.Lstat(current)
+		if err == nil {
+			if !info.IsDir() {
+				return nil, fmt.Errorf("directory ancestor %s is not a directory", current)
+			}
+			break
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return nil, err
+		}
+		missing = append(missing, current)
+	}
+	for i := len(missing) - 1; i >= 0; i-- {
+		if err := mkdir(missing[i], 0o755); err != nil {
+			return nil, err
+		}
+	}
+	return missing, nil
+}
+
+func syncCreatedDirectoryAncestry(created []string, directorySync func(string) error) error {
+	seen := map[string]bool{}
+	for _, path := range created {
+		for _, candidate := range []string{path, filepath.Dir(path)} {
+			if seen[candidate] {
+				continue
+			}
+			seen[candidate] = true
+			if err := directorySync(candidate); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 type recoveryChange struct {
 	Name    string `json:"name"`
 	Old     string `json:"old,omitempty"`
@@ -674,15 +768,19 @@ func (t *transaction) start() error {
 	if t.id != "" {
 		return nil
 	}
-	if err := os.MkdirAll(t.dir, 0o755); err != nil {
+	created, err := ensureDirectoryAncestry(t.dir, transactionOperations.mkdirAll)
+	if err != nil {
 		return err
 	}
-	dir, err := os.MkdirTemp(t.dir, transactionPrefix)
+	if err := syncCreatedDirectoryAncestry(created, transactionOperations.syncDirectory); err != nil {
+		return err
+	}
+	dir, err := durableFileOperations.mkdirTemp(t.dir, transactionPrefix)
 	if err != nil {
 		return err
 	}
 	t.id = filepath.Base(dir)
-	return nil
+	return syncTransactionDirectories(t.dir)
 }
 
 func (t *transaction) record(c txChange) error {
@@ -710,27 +808,7 @@ func (t *transaction) writeJournal() error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(t.dir, ".cli-helpers-skills-recovery-*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer func() { _ = os.Remove(name) }()
-	if _, err = tmp.Write(raw); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err = tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err = tmp.Close(); err != nil {
-		return err
-	}
-	if err := rootedRename(t.dir, name, filepath.Join(t.dir, recoveryFileName)); err != nil {
-		return err
-	}
-	if err := syncDirectory(t.dir); err != nil {
+	if _, err := writeAtomically(t.dir, ".cli-helpers-skills-recovery-*", filepath.Join(t.dir, recoveryFileName), raw, transactionOperations.syncDirectory); err != nil {
 		return err
 	}
 	transactionBoundary("journal")
@@ -918,7 +996,7 @@ func restoreChange(dir, txDir string, c recoveryChange) error {
 	}
 	if !c.Existed {
 		if !targetExists {
-			return nil
+			return syncTransactionDirectories(dir)
 		}
 		if err := checkTransactionSubdir(txDir, "proof"); err != nil {
 			return err
@@ -933,7 +1011,10 @@ func restoreChange(dir, txDir string, c recoveryChange) error {
 		if targetDigest != c.New {
 			return fmt.Errorf("%w: added target %s is not transaction content", ErrStateCorrupt, c.Name)
 		}
-		return rootedRemoveAll(dir, filepath.Join(dir, c.Name))
+		if err := rootedRemoveAll(dir, filepath.Join(dir, c.Name)); err != nil {
+			return err
+		}
+		return syncTransactionDirectories(dir)
 	}
 	if err := checkTransactionSubdir(txDir, "backup"); err != nil {
 		return err
@@ -945,7 +1026,7 @@ func restoreChange(dir, txDir string, c recoveryChange) error {
 	}
 	if !backupExists {
 		if targetExists && targetDigest == c.Old {
-			return nil
+			return syncTransactionDirectories(dir)
 		}
 		return fmt.Errorf("%w: original %s is not recoverable", ErrStateCorrupt, c.Name)
 	}
@@ -954,7 +1035,7 @@ func restoreChange(dir, txDir string, c recoveryChange) error {
 	}
 	if targetExists {
 		if targetDigest == c.Old {
-			return nil
+			return syncTransactionDirectories(dir)
 		}
 		if targetDigest != c.New {
 			return fmt.Errorf("%w: target %s differs", ErrStateCorrupt, c.Name)
@@ -963,20 +1044,33 @@ func restoreChange(dir, txDir string, c recoveryChange) error {
 			return err
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, c.Name)), 0o755); err != nil {
+	target := filepath.Join(dir, c.Name)
+	if err := transactionOperations.mkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
 	}
-	return rootedRename(dir, filepath.Join(backupRoot, c.Name), filepath.Join(dir, c.Name))
+	backup := filepath.Join(backupRoot, c.Name)
+	if err := rootedRename(dir, backup, target); err != nil {
+		return err
+	}
+	return syncTransactionDirectories(filepath.Dir(backup), filepath.Dir(target))
 }
 
 func finalizeJournal(path, txDir string) error {
-	if err := rootedRemoveAll(filepath.Dir(txDir), txDir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	root := filepath.Dir(txDir)
+	if err := rootedRemoveAll(root, txDir); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := syncTransactionDirectories(root); err != nil {
 		return err
 	}
-	return nil
+	if err := transactionOperations.remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return syncTransactionDirectories(root)
+}
+
+func (t *transaction) syncRenameParents(from, to string) error {
+	return syncTransactionDirectories(filepath.Dir(from), filepath.Dir(to))
 }
 
 func (t *transaction) replace(source fs.FS, executablePaths []string, name, old, new string) error {
@@ -1033,10 +1127,17 @@ func (t *transaction) replace(source fs.FS, executablePaths []string, name, old,
 		if err := checkTransactionSubdir(t.transactionDir(), "backup"); err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(backup), 0o755); err != nil {
+		created, err := ensureDirectoryAncestry(filepath.Dir(backup), transactionOperations.mkdirAll)
+		if err != nil {
+			return err
+		}
+		if err := syncCreatedDirectoryAncestry(created, transactionOperations.syncDirectory); err != nil {
 			return err
 		}
 		if err := rootedRename(t.dir, target, backup); err != nil {
+			return err
+		}
+		if err := t.syncRenameParents(target, backup); err != nil {
 			return err
 		}
 		transactionBoundary("backup")
@@ -1045,6 +1146,9 @@ func (t *transaction) replace(source fs.FS, executablePaths []string, name, old,
 		}
 	}
 	if err := rootedRename(t.dir, filepath.Join(stageRoot, name), target); err != nil {
+		return err
+	}
+	if err := t.syncRenameParents(filepath.Join(stageRoot, name), target); err != nil {
 		return err
 	}
 	transactionBoundary("publish")
@@ -1072,10 +1176,17 @@ func (t *transaction) remove(name, old string) error {
 	if err := checkTransactionSubdir(t.transactionDir(), "backup"); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(backup), 0o755); err != nil {
+	created, err := ensureDirectoryAncestry(filepath.Dir(backup), transactionOperations.mkdirAll)
+	if err != nil {
+		return err
+	}
+	if err := syncCreatedDirectoryAncestry(created, transactionOperations.syncDirectory); err != nil {
 		return err
 	}
 	if err := rootedRename(t.dir, filepath.Join(t.dir, name), backup); err != nil {
+		return err
+	}
+	if err := t.syncRenameParents(filepath.Join(t.dir, name), backup); err != nil {
 		return err
 	}
 	transactionBoundary("backup")
@@ -1104,7 +1215,15 @@ func (t *transaction) commit() error {
 	return finalizeJournal(filepath.Join(t.dir, recoveryFileName), t.transactionDir())
 }
 func copySkill(source fs.FS, name, stage string, executables map[string]bool) error {
-	return fs.WalkDir(source, name, func(path string, e fs.DirEntry, err error) error {
+	created := map[string]bool{}
+	makeDir := func(path string) error {
+		if err := transactionOperations.mkdirAll(path, 0o755); err != nil {
+			return err
+		}
+		created[path] = true
+		return nil
+	}
+	err := fs.WalkDir(source, name, func(path string, e fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -1113,7 +1232,7 @@ func copySkill(source fs.FS, name, stage string, executables map[string]bool) er
 		}
 		dest := filepath.Join(stage, filepath.FromSlash(path))
 		if e.IsDir() {
-			return os.MkdirAll(dest, 0o755)
+			return makeDir(dest)
 		}
 		if !e.Type().IsRegular() {
 			return fmt.Errorf("refuse non-regular source %s", path)
@@ -1122,15 +1241,31 @@ func copySkill(source fs.FS, name, stage string, executables map[string]bool) er
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		if err := makeDir(filepath.Dir(dest)); err != nil {
 			return err
 		}
 		mode := fs.FileMode(0o644)
 		if executables[path] {
 			mode = 0o755
 		}
-		return os.WriteFile(dest, data, mode)
+		file, err := durableFileOperations.createFile(dest, mode)
+		if err != nil {
+			return err
+		}
+		return writeAndSync(file, data)
 	})
+	if err != nil {
+		return err
+	}
+	dirs := make([]string, 0, len(created))
+	for path := range created {
+		dirs = append(dirs, path)
+	}
+	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+	if err := syncTransactionDirectories(dirs...); err != nil {
+		return err
+	}
+	return syncDirectoryChain(stage, filepath.Dir(stage))
 }
 
 func lock(ctx context.Context, dir string, timeout time.Duration) (func(), error) {
@@ -1149,7 +1284,11 @@ func lock(ctx context.Context, dir string, timeout time.Duration) (func(), error
 		return nil, err
 	}
 	parent := filepath.Dir(abs)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
+	created, err := ensureDirectoryAncestry(parent, func(path string, mode fs.FileMode) error { return os.Mkdir(path, mode) })
+	if err != nil {
+		return nil, err
+	}
+	if err := syncCreatedDirectoryAncestry(created, syncDirectory); err != nil {
 		return nil, err
 	}
 	// One parent-level lock deliberately trades sibling parallelism for a stable

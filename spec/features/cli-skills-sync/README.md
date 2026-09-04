@@ -60,6 +60,17 @@ rollback MUST validate the journal, transaction ownership, and content before
 removing anything. If those checks cannot prove an action preserves a known
 copy, recovery MUST fail closed without deleting target content.
 
+Each copied stage and proof file MUST be written, file-synchronized, and
+closed before its containing transaction directories are synchronized. The
+transaction directory entry MUST be synchronized before its journal is relied
+upon. After a backup, publish, or restore rename across directory parents, the
+library MUST synchronize both the source and destination parents before it
+advances the journal phase or discards recovery evidence. A state marker and
+journal use a write, file-sync, close, rename, and parent-directory-sync
+publication protocol. A persistence failure after marker rename MUST retain the
+matching marker, target, and journal for a later public `Sync` to verify and
+finish safely.
+
 A dry run MUST validate a present recovery journal and its transaction control
 path without mutating either. If a valid journal is pending, it MUST return the
 typed `ErrRecoveryPending` result rather than classify the interrupted target
@@ -189,7 +200,10 @@ Given a child process exits at each journal, backup, publish, and state
 boundary, when a new public `Sync` process starts on that target, then it either
 restores the complete prior verified content or retains the complete committed
 content, removes only verified transaction leftovers, and never loses the only
-copy. The journey includes failed record, publish, and rollback paths.
+copy. These are process-exit recovery checks; they do not claim to reproduce
+power loss. The journey includes failed record, publish, persistence, and
+rollback paths, preserving a valid backup or proof plus journal whenever the
+operation cannot prove rollback or final persistence.
 A dry run during this pending state returns `ErrRecoveryPending` without changing
 the target or journal; a normal public `Sync` then performs the verified recovery.
 

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestSyncAndStatusRecordSupplierCLIVersionWithoutChangingSource(t *testing.T) {
@@ -36,9 +37,81 @@ func TestSyncAndStatusRecordSupplierCLIVersionWithoutChangingSource(t *testing.T
 	}
 }
 
-func TestLegacyWBVersionSurvivesMigrationAsReportPriorVersion(t *testing.T) {
+func TestRepeatedRegisteredSupplierDoesNotRewriteUnchangedOwnership(t *testing.T) {
 	dir := t.TempDir()
-	b := bundle(t, "plugin", "legacy-version", "body")
+	b := bundle(t, "plugin", "supplier-idempotence", "body")
+	first := config(t, b)
+	second := config(t, b)
+	second.CLI = Identity{Publisher: "strongo", Name: "other-tool"}
+	second.CurrentVersion = "1.2.4"
+	if _, err := Sync(context.Background(), first, Options{Dir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Sync(context.Background(), second, Options{Dir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(statePath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeInfo, err := os.Stat(statePath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	report, err := Sync(context.Background(), first, Options{Dir: dir})
+	if err != nil || len(report.Names(Unchanged)) != 1 {
+		t.Fatalf("report=%#v err=%v", report, err)
+	}
+	after, err := os.ReadFile(statePath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterInfo, err := os.Stat(statePath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) || !afterInfo.ModTime().Equal(beforeInfo.ModTime()) {
+		t.Fatalf("unchanged marker rewritten: before=%q after=%q beforeTime=%v afterTime=%v", before, after, beforeInfo.ModTime(), afterInfo.ModTime())
+	}
+}
+
+func TestLegacyWBVersionSurvivesMigrationAsReportPriorVersion(t *testing.T) {
+	for _, version := range []string{"0.92.0", "(devel)", "unknown", "dev"} {
+		t.Run(version, func(t *testing.T) {
+			dir := t.TempDir()
+			b := bundle(t, "plugin", "legacy-version-"+version, "body")
+			if err := os.MkdirAll(filepath.Join(dir, "alpha"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "alpha", "SKILL.md"), []byte("body"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			digest, err := legacyWBDigest(os.DirFS(dir), "alpha")
+			if err != nil {
+				t.Fatal(err)
+			}
+			marker, err := json.Marshal(map[string]any{"schema_version": 1, "wb_version": version, "skills": map[string]string{"alpha": digest}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".wb-skills-sync.json"), marker, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			report, err := Sync(context.Background(), config(t, b), Options{Dir: dir, Legacy: LegacyImport{MarkerFile: ".wb-skills-sync.json", Plugin: b.Plugin}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := report.Bundles[0].PriorCLIVersion; got != version {
+				t.Fatalf("prior CLI version = %q", got)
+			}
+		})
+	}
+}
+
+func TestLegacyWBVersionRejectsUnrecognizedBuildLabel(t *testing.T) {
+	dir := t.TempDir()
+	b := bundle(t, "plugin", "legacy-invalid-version", "body")
 	if err := os.MkdirAll(filepath.Join(dir, "alpha"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -49,19 +122,19 @@ func TestLegacyWBVersionSurvivesMigrationAsReportPriorVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	marker, err := json.Marshal(map[string]any{"schema_version": 1, "wb_version": "0.92.0", "skills": map[string]string{"alpha": digest}})
+	marker, err := json.Marshal(map[string]any{"schema_version": 1, "wb_version": "nightly-42", "skills": map[string]string{"alpha": digest}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, ".wb-skills-sync.json"), marker, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	report, err := Sync(context.Background(), config(t, b), Options{Dir: dir, Legacy: LegacyImport{MarkerFile: ".wb-skills-sync.json", Plugin: b.Plugin}})
-	if err != nil {
-		t.Fatal(err)
+	_, err = Sync(context.Background(), config(t, b), Options{Dir: dir, Legacy: LegacyImport{MarkerFile: ".wb-skills-sync.json", Plugin: b.Plugin}})
+	if !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("err=%v", err)
 	}
-	if got := report.Bundles[0].PriorCLIVersion; got != "0.92.0" {
-		t.Fatalf("prior CLI version = %q", got)
+	if data, readErr := os.ReadFile(filepath.Join(dir, "alpha", "SKILL.md")); readErr != nil || string(data) != "body" {
+		t.Fatalf("legacy target=%q err=%v", data, readErr)
 	}
 }
 
