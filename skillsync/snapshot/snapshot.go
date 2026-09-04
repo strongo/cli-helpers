@@ -23,6 +23,7 @@ import (
 
 // DefaultAssetName is the stable GitHub Release asset name for packed bundles.
 const DefaultAssetName = "skillsync-bundle.tar"
+const DefaultDescriptorAssetName = "skillsync-bundle.json"
 
 const descriptorName = "bundle.json"
 const contentPrefix = "content/"
@@ -53,10 +54,23 @@ func Pack(descriptor skillsync.BundleDescriptor, content fs.FS) ([]byte, error) 
 	return out.Bytes(), nil
 }
 
+// DescriptorJSON returns canonical descriptor metadata for a companion release
+// asset and normalizes executable modes discovered in local source content.
+func DescriptorJSON(descriptor skillsync.BundleDescriptor, content fs.FS) ([]byte, error) {
+	descriptor, err := normalizedDescriptor(descriptor, content)
+	if err != nil {
+		return nil, err
+	}
+	raw, _ := json.Marshal(descriptor)
+	return raw, nil
+}
+
 // Write emits a reproducible archive to w. It is useful to release producers
 // that upload an artifact without first duplicating it on disk.
 func Write(w io.Writer, descriptor skillsync.BundleDescriptor, content fs.FS) error {
-	if _, err := skillsync.EmbeddedBundle(descriptor, content); err != nil {
+	var err error
+	descriptor, err = normalizedDescriptor(descriptor, content)
+	if err != nil {
 		return err
 	}
 	files, err := sourceFiles(content)
@@ -81,6 +95,18 @@ func Write(w io.Writer, descriptor skillsync.BundleDescriptor, content fs.FS) er
 		return err
 	}
 	return nil
+}
+
+func normalizedDescriptor(descriptor skillsync.BundleDescriptor, content fs.FS) (skillsync.BundleDescriptor, error) {
+	executables, err := skillsync.NormalizeExecutablePaths(content, descriptor.ExecutablePaths)
+	if err != nil {
+		return skillsync.BundleDescriptor{}, err
+	}
+	descriptor.ExecutablePaths = executables
+	if _, err := skillsync.EmbeddedBundle(descriptor, content); err != nil {
+		return skillsync.BundleDescriptor{}, err
+	}
+	return descriptor, nil
 }
 
 type sourceFile struct {
@@ -191,14 +217,18 @@ func Unpack(artifact []byte, limits Limits) (skillsync.BundleDescriptor, fs.FS, 
 // WriteEmbedDirectory materializes the exact descriptor/content pair for a
 // caller's go:embed directory. It is intentionally separate from archive IO.
 func WriteEmbedDirectory(dir string, descriptor skillsync.BundleDescriptor, content fs.FS) error {
-	if _, err := skillsync.EmbeddedBundle(descriptor, content); err != nil {
+	var err error
+	descriptor, err = normalizedDescriptor(descriptor, content)
+	if err != nil {
 		return err
 	}
 	files, err := sourceFiles(content)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// A producer owns a freshly-created output only. Reusing an existing tree
+	// could retain stale content, follow a symlink, or preserve the wrong mode.
+	if err := os.Mkdir(dir, 0o755); err != nil {
 		return err
 	}
 	raw, _ := json.MarshalIndent(descriptor, "", "  ") // BundleDescriptor contains only marshalable value fields.

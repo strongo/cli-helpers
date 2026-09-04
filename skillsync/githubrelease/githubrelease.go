@@ -6,11 +6,13 @@ package githubrelease
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
 	"net/url"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -21,12 +23,13 @@ import (
 
 // Source implements skillsync.ReleaseSource against the GitHub Releases API.
 type Source struct {
-	Client           *http.Client
-	BaseURL          string
-	AssetName        string
-	MaxPages         int
-	MaxMetadataBytes int64
-	MaxAssetBytes    int64
+	Client              *http.Client
+	BaseURL             string
+	AssetName           string
+	DescriptorAssetName string
+	MaxPages            int
+	MaxMetadataBytes    int64
+	MaxAssetBytes       int64
 }
 
 type release struct {
@@ -51,6 +54,9 @@ func (s Source) defaults() Source {
 	if s.AssetName == "" {
 		s.AssetName = snapshot.DefaultAssetName
 	}
+	if s.DescriptorAssetName == "" {
+		s.DescriptorAssetName = snapshot.DefaultDescriptorAssetName
+	}
 	if s.MaxPages <= 0 {
 		s.MaxPages = 10
 	}
@@ -71,38 +77,57 @@ func (s Source) NewerCompatible(ctx context.Context, matched skillsync.Source, c
 	if err != nil {
 		return skillsync.BundleDescriptor{}, nil, err
 	}
-	var releases []release
+	var candidates []candidate
 	for page := 1; page <= s.MaxPages; page++ {
-		pageReleases, err := s.list(ctx, owner, repository, page)
+		pageReleases, next, err := s.list(ctx, owner, repository, page)
 		if err != nil {
 			return skillsync.BundleDescriptor{}, nil, err
 		}
-		releases = append(releases, pageReleases...)
-		if len(pageReleases) == 0 {
+		for _, release := range pageReleases {
+			if release.Draft || release.Prerelease {
+				continue
+			}
+			descriptorAsset, ok := releaseAsset(release.Assets, s.DescriptorAssetName)
+			if !ok {
+				continue
+			}
+			if descriptorAsset.Size < 0 || descriptorAsset.Size > s.MaxMetadataBytes {
+				return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: release descriptor exceeds size limit", skillsync.ErrInvalidConfig)
+			}
+			raw, err := s.download(ctx, descriptorAsset.URL)
+			if err != nil {
+				return skillsync.BundleDescriptor{}, nil, err
+			}
+			descriptor, err := decodeDescriptor(raw)
+			if err != nil {
+				return skillsync.BundleDescriptor{}, nil, err
+			}
+			archive, ok := releaseAsset(release.Assets, s.AssetName)
+			if !ok || descriptor.Source.Repository != matched.Repository || descriptor.Source.Path != matched.Path || !skillsync.Compatible(current, descriptor.Source.Compatibility) {
+				continue
+			}
+			cmp, err := skillsync.CompareVersions(descriptor.Source.Version, matched.Version)
+			if err != nil || cmp <= 0 {
+				continue
+			}
+			candidates = append(candidates, candidate{descriptor: descriptor, archive: archive})
+		}
+		if !next {
 			break
 		}
+		if page == s.MaxPages {
+			return skillsync.BundleDescriptor{}, nil, skillsync.ErrSearchIncomplete
+		}
 	}
-	sort.Slice(releases, func(i, j int) bool {
-		cmp, err := skillsync.CompareVersions(versionForTag(releases[i].TagName), versionForTag(releases[j].TagName))
-		return err == nil && cmp > 0
+	sort.Slice(candidates, func(i, j int) bool {
+		cmp, _ := skillsync.CompareVersions(candidates[i].descriptor.Source.Version, candidates[j].descriptor.Source.Version)
+		return cmp > 0
 	})
-	for _, release := range releases {
-		if release.Draft || release.Prerelease {
-			continue
-		}
-		version := versionForTag(release.TagName)
-		cmp, err := skillsync.CompareVersions(version, matched.Version)
-		if err != nil || cmp <= 0 {
-			continue
-		}
-		asset, ok := releaseAsset(release.Assets, s.AssetName)
-		if !ok {
-			continue
-		}
-		if asset.Size < 0 || asset.Size > s.MaxAssetBytes {
+	for _, candidate := range candidates {
+		if candidate.archive.Size < 0 || candidate.archive.Size > s.MaxAssetBytes {
 			return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: release asset exceeds size limit", skillsync.ErrInvalidConfig)
 		}
-		raw, err := s.download(ctx, asset.URL)
+		raw, err := s.download(ctx, candidate.archive.URL)
 		if err != nil {
 			return skillsync.BundleDescriptor{}, nil, err
 		}
@@ -110,33 +135,38 @@ func (s Source) NewerCompatible(ctx context.Context, matched skillsync.Source, c
 		if err != nil {
 			return skillsync.BundleDescriptor{}, nil, err
 		}
-		if descriptor.Source.Repository != matched.Repository || descriptor.Source.Path != matched.Path || descriptor.Source.Version != version || !skillsync.Compatible(current, descriptor.Source.Compatibility) {
-			continue
+		if !reflect.DeepEqual(descriptor, candidate.descriptor) {
+			return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: archive descriptor differs from companion descriptor", skillsync.ErrInvalidConfig)
 		}
 		return descriptor, content, nil
 	}
 	return skillsync.BundleDescriptor{}, nil, skillsync.ErrNoNewerCompatible
 }
 
-func (s Source) list(ctx context.Context, owner, repository string, page int) ([]release, error) {
+type candidate struct {
+	descriptor skillsync.BundleDescriptor
+	archive    asset
+}
+
+func (s Source) list(ctx context.Context, owner, repository string, page int) ([]release, bool, error) {
 	base, err := url.Parse(s.BaseURL)
 	if err != nil || base.Scheme != "https" || base.Host == "" {
-		return nil, fmt.Errorf("%w: invalid GitHub base URL", skillsync.ErrInvalidConfig)
+		return nil, false, fmt.Errorf("%w: invalid GitHub base URL", skillsync.ErrInvalidConfig)
 	}
 	base.Path = strings.TrimSuffix(base.Path, "/") + "/repos/" + owner + "/" + repository + "/releases"
 	query := base.Query()
 	query.Set("per_page", "100")
 	query.Set("page", fmt.Sprint(page))
 	base.RawQuery = query.Encode()
-	raw, err := s.get(ctx, base.String(), s.MaxMetadataBytes)
+	raw, headers, err := s.get(ctx, base.String(), s.MaxMetadataBytes)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var releases []release
 	if err := json.Unmarshal(raw, &releases); err != nil {
-		return nil, fmt.Errorf("%w: invalid GitHub releases response", skillsync.ErrInvalidConfig)
+		return nil, false, fmt.Errorf("%w: invalid GitHub releases response", skillsync.ErrInvalidConfig)
 	}
-	return releases, nil
+	return releases, hasNextPage(headers.Get("Link")), nil
 }
 
 func (s Source) download(ctx context.Context, rawURL string) ([]byte, error) {
@@ -145,35 +175,67 @@ func (s Source) download(ctx context.Context, rawURL string) ([]byte, error) {
 	if err != nil || baseErr != nil || base.Scheme != "https" || base.Host == "" || parsed.Scheme != "https" || parsed.Host == "" {
 		return nil, fmt.Errorf("%w: invalid release asset URL", skillsync.ErrInvalidConfig)
 	}
-	return s.get(ctx, rawURL, s.MaxAssetBytes)
+	raw, _, err := s.get(ctx, rawURL, s.MaxAssetBytes)
+	return raw, err
 }
 
-func (s Source) get(ctx context.Context, target string, limit int64) ([]byte, error) {
+var errHTTPDowngrade = errors.New("GitHub redirect left HTTPS")
+
+func (s Source) get(ctx context.Context, target string, limit int64) ([]byte, http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	response, err := s.Client.Do(req)
+	client := *s.Client
+	previousRedirect := client.CheckRedirect
+	client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+		if next.URL.Scheme != "https" {
+			return errHTTPDowngrade
+		}
+		if previousRedirect != nil {
+			return previousRedirect(next, via)
+		}
+		return nil
+	}
+	response, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, errHTTPDowngrade) {
+			return nil, nil, fmt.Errorf("%w: GitHub request left HTTPS", skillsync.ErrInvalidConfig)
+		}
+		return nil, nil, err
 	}
 	defer response.Body.Close()
 	if response.Request == nil || response.Request.URL.Scheme != "https" {
-		return nil, fmt.Errorf("%w: GitHub request left HTTPS", skillsync.ErrInvalidConfig)
+		return nil, nil, fmt.Errorf("%w: GitHub request left HTTPS", skillsync.ErrInvalidConfig)
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub request %s: %s", target, response.Status)
+		return nil, nil, fmt.Errorf("GitHub request %s: %s", target, response.Status)
 	}
 	if response.ContentLength > limit {
-		return nil, fmt.Errorf("%w: HTTP response exceeds size limit", skillsync.ErrInvalidConfig)
+		return nil, nil, fmt.Errorf("%w: HTTP response exceeds size limit", skillsync.ErrInvalidConfig)
 	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil || int64(len(raw)) > limit {
-		return nil, fmt.Errorf("%w: HTTP response exceeds size limit", skillsync.ErrInvalidConfig)
+		return nil, nil, fmt.Errorf("%w: HTTP response exceeds size limit", skillsync.ErrInvalidConfig)
 	}
-	return raw, nil
+	return raw, response.Header, nil
 }
+
+func decodeDescriptor(raw []byte) (skillsync.BundleDescriptor, error) {
+	var descriptor skillsync.BundleDescriptor
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&descriptor); err != nil {
+		return skillsync.BundleDescriptor{}, fmt.Errorf("%w: invalid release descriptor", skillsync.ErrInvalidConfig)
+	}
+	if err := skillsync.ValidateDescriptor(descriptor); err != nil {
+		return skillsync.BundleDescriptor{}, err
+	}
+	return descriptor, nil
+}
+
+func hasNextPage(link string) bool { return strings.Contains(link, "rel=\"next\"") }
 
 func githubRepository(repository string) (string, string, error) {
 	parts := strings.Split(strings.TrimPrefix(repository, "https://"), "/")

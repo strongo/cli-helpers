@@ -154,6 +154,22 @@ func executableSet(source fs.FS, paths []string) (map[string]bool, error) {
 	return result, nil
 }
 
+// NormalizeExecutablePaths returns the complete sorted executable manifest.
+// It combines declared paths with executable modes carried by a local source
+// filesystem, which embedding otherwise loses.
+func NormalizeExecutablePaths(source fs.FS, paths []string) ([]string, error) {
+	set, err := executableSet(source, paths)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]string, 0, len(set))
+	for path := range set {
+		result = append(result, path)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
 // Digest returns a deterministic SHA-256 of source bytes and executable mode.
 // For embed.FS callers, use DigestWithExecutables with the source descriptor's
 // explicit executable paths.

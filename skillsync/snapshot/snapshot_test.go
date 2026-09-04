@@ -52,7 +52,7 @@ func TestPackIsReproducibleAndRoundTripsModeAwareContent(t *testing.T) {
 	if err != nil || digest != descriptor.Source.Digest {
 		t.Fatalf("digest=%s err=%v", digest, err)
 	}
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "embed")
 	if err := WriteEmbedDirectory(dir, descriptor, content); err != nil {
 		t.Fatal(err)
 	}
@@ -94,6 +94,68 @@ func TestPackIsReproducibleAndRoundTripsModeAwareContent(t *testing.T) {
 	installedDigest, err = skillsync.DigestWithExecutables(installedFiles, descriptor.ExecutablePaths)
 	if err != nil || installedDigest != descriptor.Source.Digest {
 		t.Fatalf("synced digest=%s err=%v", installedDigest, err)
+	}
+}
+
+func TestIntrinsicExecutableModeIsPublishedInArchiveAndEmbedMetadata(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "alpha"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "alpha", "SKILL.md"), []byte("skill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "alpha", "run"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := os.DirFS(root)
+	digest, err := skillsync.Digest(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor := skillsync.BundleDescriptor{Plugin: skillsync.PluginIdentity{Publisher: "strongo", Name: "plugin"}, Source: skillsync.Source{Repository: "github.com/strongo/plugin", Path: "skills", Revision: strings.Repeat("b", 40), Version: "1.2.3", Digest: digest}}
+	raw, err := Pack(descriptor, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, unpacked, err := Unpack(raw, Limits{})
+	if err != nil || len(decoded.ExecutablePaths) != 1 || decoded.ExecutablePaths[0] != "alpha/run" {
+		t.Fatalf("descriptor=%#v err=%v", decoded, err)
+	}
+	if got, err := skillsync.DigestWithExecutables(unpacked, decoded.ExecutablePaths); err != nil || got != digest {
+		t.Fatalf("digest=%s err=%v", got, err)
+	}
+	embed := filepath.Join(t.TempDir(), "embed")
+	if err := WriteEmbedDirectory(embed, descriptor, content); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(filepath.Join(embed, contentPrefix, "alpha", "run")); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("mode=%v err=%v", info.Mode(), err)
+	}
+}
+
+func TestWriteEmbedDirectoryRequiresFreshNonSymlinkDestination(t *testing.T) {
+	descriptor, content := fixture(t)
+	parent := t.TempDir()
+	stale := filepath.Join(parent, "stale")
+	if err := os.Mkdir(stale, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "leftover"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteEmbedDirectory(stale, descriptor, content); err == nil {
+		t.Fatal("expected stale destination rejection")
+	}
+	link := filepath.Join(parent, "link")
+	if err := os.Symlink(parent, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteEmbedDirectory(link, descriptor, content); err == nil {
+		t.Fatal("expected symlink destination rejection")
+	}
+	if err := WriteEmbedDirectory(filepath.Join(parent, "new"), descriptor, content); err != nil {
+		t.Fatal(err)
 	}
 }
 

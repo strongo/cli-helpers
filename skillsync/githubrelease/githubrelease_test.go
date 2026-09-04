@@ -38,19 +38,32 @@ func artifact(t *testing.T, version string, compatibility skillsync.Compatibilit
 	return raw
 }
 
+func companion(t *testing.T, version string, compatibility skillsync.Compatibility) []byte {
+	t.Helper()
+	descriptor, content := descriptor(t, version, compatibility)
+	raw, err := snapshot.DescriptorJSON(descriptor, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
 func TestNewerCompatiblePaginatesSkipsIneligibleAndValidatesAsset(t *testing.T) {
 	compatible := artifact(t, "1.2.0", skillsync.Compatibility{MinCLI: "1.0.0", MaxCLI: "2.0.0"})
 	incompatible := artifact(t, "2.0.0", skillsync.Compatibility{MinCLI: "9.0.0"})
+	compatibleDescriptor := companion(t, "1.2.0", skillsync.Compatibility{MinCLI: "1.0.0", MaxCLI: "2.0.0"})
+	incompatibleDescriptor := companion(t, "2.0.0", skillsync.Compatibility{MinCLI: "9.0.0"})
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/strongo/plugin/releases":
 			page := r.URL.Query().Get("page")
 			if page == "1" {
-				_ = json.NewEncoder(w).Encode([]release{{TagName: "v3.0.0", Prerelease: true}, {TagName: "v2.0.0", Assets: []asset{{Name: "skillsync-bundle.tar", URL: serverURL(r, "/assets/incompatible"), Size: int64(len(incompatible))}}}})
+				w.Header().Set("Link", "<next>; rel=\"next\"")
+				_ = json.NewEncoder(w).Encode([]release{{TagName: "v3.0.0", Prerelease: true}, {TagName: "v2.0.0", Assets: []asset{{Name: snapshot.DefaultDescriptorAssetName, URL: serverURL(r, "/descriptors/incompatible"), Size: int64(len(incompatibleDescriptor))}, {Name: "skillsync-bundle.tar", URL: serverURL(r, "/assets/incompatible"), Size: int64(len(incompatible))}}}})
 				return
 			}
 			if page == "2" {
-				_ = json.NewEncoder(w).Encode([]release{{TagName: "v1.2.0", Assets: []asset{{Name: "skillsync-bundle.tar", URL: serverURL(r, "/assets/compatible"), Size: int64(len(compatible))}}}})
+				_ = json.NewEncoder(w).Encode([]release{{TagName: "v0.92.2", Assets: []asset{{Name: snapshot.DefaultDescriptorAssetName, URL: serverURL(r, "/descriptors/compatible"), Size: int64(len(compatibleDescriptor))}, {Name: "skillsync-bundle.tar", URL: serverURL(r, "/assets/compatible"), Size: int64(len(compatible))}}}})
 				return
 			}
 			_ = json.NewEncoder(w).Encode([]release{})
@@ -58,6 +71,10 @@ func TestNewerCompatiblePaginatesSkipsIneligibleAndValidatesAsset(t *testing.T) 
 			_, _ = w.Write(incompatible)
 		case "/assets/compatible":
 			_, _ = w.Write(compatible)
+		case "/descriptors/incompatible":
+			_, _ = w.Write(incompatibleDescriptor)
+		case "/descriptors/compatible":
+			_, _ = w.Write(compatibleDescriptor)
 		default:
 			http.NotFound(w, r)
 		}
@@ -91,13 +108,21 @@ func TestNewerCompatibleNoMatchCorruptAndLimits(t *testing.T) {
 		{name: "size", body: artifact(t, "1.1.0", skillsync.Compatibility{}), size: 1 << 20, limit: 8, want: skillsync.ErrInvalidConfig},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			descriptorBody := companion(t, "1.1.0", skillsync.Compatibility{})
+			if tc.name == "no-match" {
+				descriptorBody = companion(t, "1.1.0", skillsync.Compatibility{MinCLI: "9.0.0"})
+			}
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if strings.HasPrefix(r.URL.Path, "/repos/") {
 					size := tc.size
 					if size == 0 {
 						size = int64(len(tc.body))
 					}
-					_ = json.NewEncoder(w).Encode([]release{{TagName: "v1.1.0", Assets: []asset{{Name: "skillsync-bundle.tar", URL: serverURL(r, "/asset"), Size: size}}}})
+					_ = json.NewEncoder(w).Encode([]release{{TagName: "v1.1.0", Assets: []asset{{Name: snapshot.DefaultDescriptorAssetName, URL: serverURL(r, "/descriptor"), Size: int64(len(descriptorBody))}, {Name: "skillsync-bundle.tar", URL: serverURL(r, "/asset"), Size: size}}}})
+					return
+				}
+				if r.URL.Path == "/descriptor" {
+					_, _ = w.Write(descriptorBody)
 					return
 				}
 				_, _ = w.Write(tc.body)
@@ -131,11 +156,15 @@ func TestSourceRejectsInvalidReleaseMetadataAndUntrustedAssetURLs(t *testing.T) 
 		t.Fatalf("invalid repository error = %v", err)
 	}
 	client := &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		if strings.Contains(request.URL.Path, "/descriptor") {
+			raw := companion(t, "1.2.0", skillsync.Compatibility{})
+			return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{}, Body: io.NopCloser(strings.NewReader(string(raw))), Request: request}, nil
+		}
 		raw, _ := json.Marshal([]release{
 			{TagName: "not-a-version"},
 			{TagName: "v1.1.0"},
 			{TagName: "v1.3.0", Assets: []asset{{Name: "different-asset"}}},
-			{TagName: "v1.2.0", Assets: []asset{{Name: snapshot.DefaultAssetName, URL: "http://untrusted.invalid/archive"}}},
+			{TagName: "v1.2.0", Assets: []asset{{Name: snapshot.DefaultDescriptorAssetName, URL: "https://api.github.example/descriptor", Size: 100}, {Name: snapshot.DefaultAssetName, URL: "http://untrusted.invalid/archive"}}},
 		})
 		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{}, Body: io.NopCloser(strings.NewReader(string(raw))), Request: request}, nil
 	})}
@@ -168,28 +197,28 @@ func TestHTTPAndMetadataErrors(t *testing.T) {
 	}))
 	defer server.Close()
 	source := Source{BaseURL: server.URL, Client: server.Client(), MaxMetadataBytes: 32, MaxAssetBytes: 4}
-	if _, err := (Source{BaseURL: "://bad", Client: server.Client()}).list(context.Background(), "strongo", "plugin", 1); !errors.Is(err, skillsync.ErrInvalidConfig) {
+	if _, _, err := (Source{BaseURL: "://bad", Client: server.Client()}).list(context.Background(), "strongo", "plugin", 1); !errors.Is(err, skillsync.ErrInvalidConfig) {
 		t.Fatalf("bad base error = %v", err)
 	}
-	if _, err := source.get(context.Background(), server.URL+"/status", 4); err == nil {
+	if _, _, err := source.get(context.Background(), server.URL+"/status", 4); err == nil {
 		t.Fatal("expected status failure")
 	}
-	if _, err := source.get(context.Background(), server.URL+"/large", 4); !errors.Is(err, skillsync.ErrInvalidConfig) {
+	if _, _, err := source.get(context.Background(), server.URL+"/large", 4); !errors.Is(err, skillsync.ErrInvalidConfig) {
 		t.Fatalf("content length error = %v", err)
 	}
-	if _, err := source.get(context.Background(), server.URL+"/stream-large", 4); !errors.Is(err, skillsync.ErrInvalidConfig) {
+	if _, _, err := source.get(context.Background(), server.URL+"/stream-large", 4); !errors.Is(err, skillsync.ErrInvalidConfig) {
 		t.Fatalf("stream size error = %v", err)
 	}
-	if _, err := source.get(context.Background(), "://bad", 4); err == nil {
+	if _, _, err := source.get(context.Background(), "://bad", 4); err == nil {
 		t.Fatal("expected request construction failure")
 	}
-	if _, err := source.get(context.Background(), "http://127.0.0.1:1", 4); err == nil {
+	if _, _, err := source.get(context.Background(), "http://127.0.0.1:1", 4); err == nil {
 		t.Fatal("expected transport failure")
 	}
 	readFailure := Source{Client: &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: errReadCloser{}, Request: request}, nil
 	})}}
-	if _, err := readFailure.get(context.Background(), "https://api.github.example/asset", 4); !errors.Is(err, skillsync.ErrInvalidConfig) {
+	if _, _, err := readFailure.get(context.Background(), "https://api.github.example/asset", 4); !errors.Is(err, skillsync.ErrInvalidConfig) {
 		t.Fatalf("read failure error = %v", err)
 	}
 	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("[]")) }))
@@ -198,10 +227,10 @@ func TestHTTPAndMetadataErrors(t *testing.T) {
 		http.Redirect(w, r, httpServer.URL, http.StatusFound)
 	}))
 	defer tlsServer.Close()
-	if _, err := (Source{Client: tlsServer.Client()}).get(context.Background(), tlsServer.URL, 4); !errors.Is(err, skillsync.ErrInvalidConfig) {
+	if _, _, err := (Source{Client: tlsServer.Client()}).get(context.Background(), tlsServer.URL, 4); !errors.Is(err, skillsync.ErrInvalidConfig) {
 		t.Fatalf("redirect error = %v", err)
 	}
-	if _, err := (Source{BaseURL: server.URL, Client: server.Client(), MaxMetadataBytes: 64}).list(context.Background(), "bad-json", "x", 1); err == nil {
+	if _, _, err := (Source{BaseURL: server.URL, Client: server.Client(), MaxMetadataBytes: 64}).list(context.Background(), "bad-json", "x", 1); err == nil {
 		t.Fatal("expected malformed metadata rejection")
 	}
 }

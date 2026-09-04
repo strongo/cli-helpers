@@ -18,6 +18,7 @@ var (
 	ErrDigestMismatch    = errors.New("bundle digest mismatch")
 	ErrStateCorrupt      = errors.New("skills sync state is corrupt")
 	ErrNoNewerCompatible = errors.New("no newer compatible bundle")
+	ErrSearchIncomplete  = errors.New("newer-compatible release search incomplete")
 )
 
 // Identity identifies the CLI that supplied a bundle. It is recorded as
@@ -79,6 +80,26 @@ func EmbeddedBundle(d BundleDescriptor, content fs.FS) (Bundle, error) {
 		return Bundle{}, err
 	}
 	return b, nil
+}
+
+// ValidateDescriptor verifies provenance and descriptor-only fields before a
+// remote adapter uses them for release selection. Content and executable-file
+// existence are verified later by EmbeddedBundle.
+func ValidateDescriptor(d BundleDescriptor) error {
+	if !validPlugin(d.Plugin) || !validSource(d.Source) {
+		return fmt.Errorf("%w: descriptor requires plugin and source", ErrInvalidConfig)
+	}
+	if (d.Source.Compatibility.MinCLI != "" && !validVersion(d.Source.Compatibility.MinCLI)) || (d.Source.Compatibility.MaxCLI != "" && !validVersion(d.Source.Compatibility.MaxCLI)) {
+		return fmt.Errorf("%w: invalid CLI compatibility bounds", ErrInvalidConfig)
+	}
+	seen := map[string]bool{}
+	for _, path := range d.ExecutablePaths {
+		if path == "." || !fs.ValidPath(path) || seen[path] {
+			return fmt.Errorf("%w: invalid executable path %q", ErrInvalidConfig, path)
+		}
+		seen[path] = true
+	}
+	return nil
 }
 
 // Config declares the installed CLI and its offline matched snapshots. A
