@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
+	"path/filepath"
 )
 
 // Action is what Update actually did (or, for a dry run, would do).
@@ -88,7 +90,35 @@ type Outcome struct {
 	// the manager command completed. The mutation already succeeded — this
 	// is a warning to surface, not a failed Update.
 	PostSwapWarning error
+	// AfterUpdateWarning is set when Options.AfterUpdate could not resolve the
+	// installed executable or returned an error. The binary update has already
+	// completed, so this is a warning to surface separately, never an Update
+	// failure.
+	AfterUpdateWarning error
 }
+
+// ExecutableIdentity identifies the executable a post-update integration can
+// invoke after a successful update. Path is the absolute invocation path;
+// ResolvedPath is that path after symlinks are followed. Manager-owned updates
+// resolve both only after the package-manager command completes, so they track
+// cask or version-directory changes instead of retaining the old path.
+type ExecutableIdentity struct {
+	Path         string
+	ResolvedPath string
+}
+
+// AfterUpdate is supplied to Options.AfterUpdate after an update reaches a
+// successful terminal outcome. Outcome is the completed update receipt and
+// Executable identifies the installed binary that an integration may reexec.
+type AfterUpdate struct {
+	Outcome    Outcome
+	Executable ExecutableIdentity
+}
+
+// AfterUpdateFunc runs after a successful self-update outcome. Its error is
+// retained as Outcome.AfterUpdateWarning because the binary update is already
+// complete and must not be reported as failed.
+type AfterUpdateFunc func(ctx context.Context, update AfterUpdate) error
 
 // ManagedCommandRunner executes a configured package-manager program and argv.
 // The core deliberately owns no process I/O; command adapters provide a runner
@@ -139,7 +169,18 @@ type Options struct {
 	// VerifyManaged is required alongside RunManaged and probes the CLI found
 	// after the manager command using Config.VersionProbeArgs.
 	VerifyManaged ManagedBinaryVerifier
+	// AfterUpdate runs only after an actual successful update, an already-current
+	// result, or a successful executable package-manager update. It receives the
+	// resolved installed executable identity so integrations can reexec the new
+	// binary. An error becomes Outcome.AfterUpdateWarning; it never changes a
+	// completed binary update into a failure.
+	AfterUpdate AfterUpdateFunc
 }
+
+var (
+	execLookPath = exec.LookPath
+	absPath      = filepath.Abs
+)
 
 // Update resolves the target release (the latest stable release, or an
 // exact pin), and — unless the install is managed, the platform is
@@ -234,7 +275,9 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 
 		if result.Verdict == UpToDate {
 			// REQ: no-op-when-current.
-			return Outcome{Action: ActionAlreadyCurrent, Detection: detection, Result: result}, nil
+			outcome := Outcome{Action: ActionAlreadyCurrent, Detection: detection, Result: result}
+			cfg.runAfterUpdate(ctx, opts, &outcome)
+			return outcome, nil
 		}
 	}
 
@@ -289,6 +332,7 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 		// version-check).
 		outcome.PostSwapWarning = err
 	}
+	cfg.runAfterUpdate(ctx, opts, &outcome)
 	return outcome, nil
 }
 
@@ -350,7 +394,49 @@ func (c Config) updateManaged(ctx context.Context, opts Options, detection Detec
 	if err := opts.VerifyManaged(ctx, c.BinaryName, probeArgs); err != nil {
 		outcome.PostSwapWarning = err
 	}
+	c.runAfterUpdate(ctx, opts, &outcome)
 	return outcome, nil
+}
+
+func (c Config) runAfterUpdate(ctx context.Context, opts Options, outcome *Outcome) {
+	if opts.AfterUpdate == nil || opts.DryRun || !isAfterUpdateAction(outcome.Action) {
+		return
+	}
+	executable, err := c.installedExecutable(outcome)
+	if err != nil {
+		outcome.AfterUpdateWarning = fmt.Errorf("resolve installed executable after self-update: %w", err)
+		return
+	}
+	if err := opts.AfterUpdate(ctx, AfterUpdate{Outcome: *outcome, Executable: executable}); err != nil {
+		outcome.AfterUpdateWarning = err
+	}
+}
+
+func isAfterUpdateAction(action Action) bool {
+	return action == ActionUpdated || action == ActionAlreadyCurrent || action == ActionManagerExecuted
+}
+
+func (c Config) installedExecutable(outcome *Outcome) (ExecutableIdentity, error) {
+	path := outcome.Detection.Path
+	if outcome.Action == ActionManagerExecuted {
+		var err error
+		path, err = execLookPath(c.BinaryName)
+		if err != nil {
+			return ExecutableIdentity{}, err
+		}
+	}
+	if !filepath.IsAbs(path) {
+		var err error
+		path, err = absPath(path)
+		if err != nil {
+			return ExecutableIdentity{}, err
+		}
+	}
+	resolved, err := evalSymlinksFunc(path)
+	if err != nil {
+		return ExecutableIdentity{}, fmt.Errorf("resolve installed executable %q: %w", path, err)
+	}
+	return ExecutableIdentity{Path: path, ResolvedPath: resolved}, nil
 }
 
 // buildTransition renders the human-readable version-change description

@@ -1,6 +1,6 @@
-# selfupdate
+# cli-helpers
 
-`github.com/strongo/selfupdate` lets a Go CLI update its own binary in
+`github.com/strongo/cli-helpers/selfupdate` lets a Go CLI update its own binary in
 place — safely. It decides how the running binary was installed before it
 touches anything: a package-manager-owned install (Homebrew, Scoop, WinGet)
 is never overwritten directly. It is redirected to that manager's own upgrade
@@ -51,8 +51,23 @@ repository's GitHub releases using nothing but the public API below).
 ## Install
 
 ```
-go get github.com/strongo/selfupdate
+go get github.com/strongo/cli-helpers/selfupdate
 ```
+
+## Import migration
+
+The package now lives in the `github.com/strongo/cli-helpers` module. Maintained
+consumers must replace these imports together:
+
+| Previous import | Current import |
+| --- | --- |
+| `github.com/strongo/selfupdate` | `github.com/strongo/cli-helpers/selfupdate` |
+| `github.com/strongo/selfupdate/cobracmd` | `github.com/strongo/cli-helpers/selfupdate/cobracmd` |
+| `github.com/strongo/selfupdate/cliui` | `github.com/strongo/cli-helpers/selfupdate/cliui` |
+
+Historical `github.com/strongo/selfupdate` tags remain available at their
+published versions. New `github.com/strongo/cli-helpers` releases use the new
+module path, so consumers must not request the old path at `@latest`.
 
 ## Wiring example
 
@@ -63,8 +78,8 @@ package cli
 
 import (
 	"github.com/spf13/cobra"
-	"github.com/strongo/selfupdate"
-	"github.com/strongo/selfupdate/cobracmd"
+	"github.com/strongo/cli-helpers/selfupdate"
+	"github.com/strongo/cli-helpers/selfupdate/cobracmd"
 )
 
 // version is stamped at link time, e.g. -ldflags "-X your/module.version=v1.2.3".
@@ -123,7 +138,7 @@ func (wbErrors) UpdateAvailable(res selfupdate.CheckResult) error {
 A CLI that doesn't use Cobra calls `cfg.Check(ctx)` and `cfg.Update(ctx,
 opts)` directly — `cobracmd` is optional sugar over the same two calls; the
 root package has no command-framework dependency at all. It doesn't have to
-be hand-rolled from scratch either: `github.com/strongo/selfupdate/cliui`
+be hand-rolled from scratch either: `github.com/strongo/cli-helpers/selfupdate/cliui`
 holds the same confirmation prompt, non-interactive refusal, and text/JSON
 writers `cobracmd` itself is built from, with no Cobra (or any other
 framework) dependency:
@@ -135,8 +150,8 @@ import (
 	"context"
 	"os"
 
-	"github.com/strongo/selfupdate"
-	"github.com/strongo/selfupdate/cliui"
+	"github.com/strongo/cli-helpers/selfupdate"
+	"github.com/strongo/cli-helpers/selfupdate/cliui"
 )
 
 func selfUpdate(ctx context.Context, cfg selfupdate.Config, yes bool) error {
@@ -162,6 +177,22 @@ func selfUpdate(ctx context.Context, cfg selfupdate.Config, yes bool) error {
 just the Cobra flag/wiring layer on top of the latter — so a Cobra CLI and a
 hand-rolled one built from `cliui` directly print byte-identical output for
 the same `Outcome`/`CheckResult`.
+
+### Post-update integrations
+
+`Options.AfterUpdate` is an optional typed callback for work that must run from
+the installed binary after self-update, such as refreshing a CLI-matched skill
+bundle. It receives the completed `Outcome` and an absolute
+`ExecutableIdentity` with both the invocation path and its symlink-resolved
+target. The callback runs only after an update, an already-current result, or a
+successful executable package-manager update. For package-manager updates the
+identity is resolved after the manager finishes, so it follows a changed cask
+or version path.
+
+`cobracmd.CommandOptions.AfterUpdate` passes the same callback to the core.
+Callback failures are non-fatal `Outcome.AfterUpdateWarning` values: text output
+writes them to stderr and JSON keeps stdout parseable with an
+`after_update_warning` field.
 
 ### Why exit codes and output belong to the host, not this package
 

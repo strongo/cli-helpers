@@ -1,5 +1,5 @@
 // Command selfupdate is the reference consumer of github.com/strongo/
-// selfupdate: it exists so the package's own release path is genuinely
+// cli-helpers/selfupdate: it exists so the package's own release path is genuinely
 // exercised — something has to actually download, verify, and swap a real
 // executable, and it should be this repository's own binary rather than a
 // downstream CLI's users finding a bug first (REQ: reference-cli-single-
@@ -23,8 +23,8 @@ import (
 	"github.com/strongo/buildinfo"
 	buildinfocobracmd "github.com/strongo/buildinfo/cobracmd"
 
-	"github.com/strongo/selfupdate"
-	"github.com/strongo/selfupdate/cobracmd"
+	"github.com/strongo/cli-helpers/selfupdate"
+	"github.com/strongo/cli-helpers/selfupdate/cobracmd"
 )
 
 // info is this binary's own resolved build identity — version, commit and
@@ -44,7 +44,7 @@ var info = buildinfo.Get(binaryName)
 // ChecksumsName/DownloadURL conventions already point at, so building this
 // Config takes no overrides beyond identity (REQ: reference-cli-self-
 // hosting).
-const repository = "strongo/selfupdate"
+const repository = "strongo/cli-helpers"
 
 // binaryName matches .goreleaser.yml's archive/binary name, which is also
 // this package's own default asset-naming convention
@@ -135,7 +135,7 @@ var buildConfigFunc = buildConfig
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   binaryName,
-		Short: "selfupdate — reference CLI for github.com/strongo/selfupdate",
+		Short: "selfupdate — reference CLI for github.com/strongo/cli-helpers/selfupdate",
 		// main() prints the returned error itself; cobra's own default
 		// error/usage printing would otherwise duplicate it.
 		SilenceErrors: true,

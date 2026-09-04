@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/strongo/selfupdate"
+	"github.com/strongo/cli-helpers/selfupdate"
 )
 
 // ManagedCommandRunner returns a framework-neutral runner that passes the

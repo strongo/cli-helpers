@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/strongo/selfupdate"
+	"github.com/strongo/cli-helpers/selfupdate"
 )
 
 // --- Confirm ---

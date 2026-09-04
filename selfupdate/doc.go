@@ -36,9 +36,10 @@
 // # What the core does not do
 //
 // Config.Update and Config.Check themselves never print to a terminal, read
-// from stdin, or decide a process exit code. Confirmation and executable
-// manager commands are caller-supplied callbacks (Options.Confirm and
-// Options.RunManaged); process I/O, output formatting, and exit-code mapping
+// from stdin, or decide a process exit code. Confirmation, executable manager
+// commands, and optional post-update integrations are caller-supplied
+// callbacks (Options.Confirm, Options.RunManaged, and Options.AfterUpdate);
+// process I/O, output formatting, and exit-code mapping
 // belong to the caller or to the optional cobracmd adapter. This makes the package usable by a CLI
 // with any output convention, and what makes its own test suite able to
 // exercise every path without a network connection or a real installed

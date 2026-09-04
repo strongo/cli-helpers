@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/strongo/selfupdate"
+	"github.com/strongo/cli-helpers/selfupdate"
 )
 
 func testConfig() selfupdate.Config {
@@ -155,6 +155,17 @@ func TestWriteOutcome_UpdatedWithWarning(t *testing.T) {
 	}
 }
 
+func TestWriteOutcome_AfterUpdateWarningUsesStderr(t *testing.T) {
+	var out, errOut bytes.Buffer
+	WriteOutcome(&out, &errOut, testConfig(), selfupdate.Outcome{
+		Action:             selfupdate.ActionAlreadyCurrent,
+		AfterUpdateWarning: errors.New("skills refresh canceled"),
+	})
+	if !strings.Contains(errOut.String(), "post-update warning") || !strings.Contains(errOut.String(), "skills refresh canceled") {
+		t.Errorf("stderr %q does not contain the separate post-update warning", errOut.String())
+	}
+}
+
 // --- WriteOutcomeJSON ---
 
 func TestWriteOutcomeJSON_AllActions(t *testing.T) {
@@ -190,6 +201,23 @@ func TestWriteOutcomeJSON_AllActions(t *testing.T) {
 				t.Errorf("action = %v, want %q", got["action"], c.wantAct)
 			}
 		})
+	}
+}
+
+func TestWriteOutcomeJSON_AfterUpdateWarningKeepsStdoutParseable(t *testing.T) {
+	var out bytes.Buffer
+	if err := WriteOutcomeJSON(&out, selfupdate.Outcome{
+		Action:             selfupdate.ActionAlreadyCurrent,
+		AfterUpdateWarning: errors.New("skills refresh canceled"),
+	}); err != nil {
+		t.Fatalf("WriteOutcomeJSON() error = %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("stdout JSON does not parse: %v\n%s", err, out.String())
+	}
+	if got["after_update_warning"] != "skills refresh canceled" {
+		t.Errorf("after_update_warning = %v, want skills refresh canceled", got["after_update_warning"])
 	}
 }
 
