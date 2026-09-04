@@ -2,7 +2,6 @@ package skillsync
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +35,9 @@ func Sync(ctx context.Context, cfg Config, opts Options) (Report, error) {
 		report.Bundles = append(report.Bundles, ResolvedBundle{Plugin: bundle.Bundle.Plugin, Source: bundle.Bundle.Source})
 	}
 	if opts.DryRun {
+		if err := validateTargetAncestry(opts.Dir); err != nil {
+			return report, err
+		}
 		return syncLocked(ctx, cfg, bundles, opts, report)
 	}
 	unlock, err := lock(ctx, opts.Dir, opts.LockTimeout)
@@ -1029,8 +1031,10 @@ func lock(ctx context.Context, dir string, timeout time.Duration) (func(), error
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return nil, err
 	}
-	sum := sha256.Sum256([]byte(abs))
-	path := filepath.Join(parent, fmt.Sprintf(".cli-helpers-skills-lock-%x", sum[:8]))
+	// One parent-level lock deliberately trades sibling parallelism for a stable
+	// identity across relative, absolute, symlink-normalized, and case-folded
+	// spellings of the same filesystem target.
+	path := filepath.Join(parent, ".cli-helpers-skills-lock")
 	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("refuse symlinked skills lock %s", path)
 	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -1084,6 +1088,18 @@ func canonicalSystemAlias(path string) (string, error) {
 		return filepath.Join(resolved, strings.TrimPrefix(path, alias+string(filepath.Separator))), nil
 	}
 	return path, nil
+}
+
+func validateTargetAncestry(dir string) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	abs, err = canonicalSystemAlias(abs)
+	if err != nil {
+		return err
+	}
+	return validateExistingAncestry(abs)
 }
 
 func validateExistingAncestry(path string) error {
