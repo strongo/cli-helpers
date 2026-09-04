@@ -2,6 +2,7 @@ package skillsync
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
@@ -325,4 +326,417 @@ func TestRestoreChangeRetriesPersistenceWhenBytesAlreadyMatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRestoreChangeUsesOnlyVerifiedProofOrBackup(t *testing.T) {
+	t.Run("removes verified added target", func(t *testing.T) {
+		dir, tx := t.TempDir(), filepath.Join(t.TempDir(), "unused")
+		if err := os.Mkdir(filepath.Join(dir, "alpha"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "alpha", "SKILL.md"), []byte("new"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		newDigest, err := installedDigest(dir, "alpha")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(tx, "proof", "alpha"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tx, "proof", "alpha", "SKILL.md"), []byte("new"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := restoreChange(dir, tx, recoveryChange{Name: "alpha", New: newDigest, Phase: "published"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "alpha")); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("added target remains: %v", err)
+		}
+	})
+	t.Run("rejects mismatched backup", func(t *testing.T) {
+		dir, tx := t.TempDir(), t.TempDir()
+		if err := os.MkdirAll(filepath.Join(tx, "backup", "alpha"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tx, "backup", "alpha", "SKILL.md"), []byte("wrong"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := restoreChange(dir, tx, recoveryChange{Name: "alpha", Old: strings.Repeat("a", 64), New: strings.Repeat("b", 64), Existed: true, Phase: "published"}); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("err=%v", err)
+		}
+	})
+}
+
+func TestCommittedRecoveryValidationAndFinalizationFaults(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "alpha"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "alpha", "SKILL.md"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := installedDigest(dir, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyCommittedChange(dir, recoveryChange{Name: "alpha", New: digest, Phase: "published"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyCommittedChange(dir, recoveryChange{Name: "alpha", New: strings.Repeat("a", 64), Phase: "published"}); !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("mismatch=%v", err)
+	}
+	if err := verifyCommittedChange(dir, recoveryChange{Name: "alpha", Phase: "backed_up"}); !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("reappeared removal=%v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(dir, "alpha")); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyCommittedChange(dir, recoveryChange{Name: "alpha", Phase: "backed_up"}); err != nil {
+		t.Fatal(err)
+	}
+
+	tx := filepath.Join(dir, transactionPrefix+"cleanup")
+	if err := os.Mkdir(tx, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	journal := filepath.Join(dir, recoveryFileName)
+	if err := os.WriteFile(journal, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	removeErr := errors.New("journal remove")
+	withTransactionOperations(t, func(ops *transactionOperationSet) { ops.remove = func(string) error { return removeErr } })
+	if err := finalizeJournal(journal, tx); !errors.Is(err, removeErr) {
+		t.Fatalf("finalize=%v", err)
+	}
+	if _, err := os.Lstat(journal); err != nil {
+		t.Fatalf("journal evidence lost: %v", err)
+	}
+}
+
+func TestReadRecoveryJournalRejectsUnsafeMetadata(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, recoveryFileName)
+	for _, raw := range [][]byte{[]byte("{"), []byte(`{"schema":2,"id":"x","transaction":"bad","changes":[]}`)} {
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := readRecoveryJournal(dir); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("raw=%q err=%v", raw, err)
+		}
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := readRecoveryJournal(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing=%v", err)
+	}
+}
+
+func writeRecoveryJournal(t *testing.T, dir, id string, changes []recoveryChange) string {
+	t.Helper()
+	raw, err := json.Marshal(recoveryJournal{Schema: 2, ID: id, Transaction: transactionPrefix + id, Changes: changes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, recoveryFileName)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestRecoveryValidationHelpersRejectEveryUnsafeShape(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	valid := recoveryJournal{Schema: 2, ID: "safe", Transaction: transactionPrefix + "safe", Changes: []recoveryChange{{Name: "alpha", New: digest, Phase: "prepared"}}}
+	if !validJournal(valid) {
+		t.Fatal("valid journal rejected")
+	}
+	for _, journal := range []recoveryJournal{
+		{Schema: 1, ID: "safe", Transaction: transactionPrefix + "safe", Changes: valid.Changes},
+		{Schema: 2, Transaction: transactionPrefix + "safe", Changes: valid.Changes},
+		{Schema: 2, ID: "safe", Transaction: "wrong", Changes: valid.Changes},
+		{Schema: 2, ID: "safe", Transaction: transactionPrefix + "safe", Changes: nil},
+		{Schema: 2, ID: "safe", Transaction: transactionPrefix + "safe", Changes: []recoveryChange{{Name: "../escape", New: digest, Phase: "prepared"}}},
+		{Schema: 2, ID: "safe", Transaction: transactionPrefix + "safe", Changes: []recoveryChange{{Name: "alpha", New: digest, Phase: "bad"}}},
+		{Schema: 2, ID: "safe", Transaction: transactionPrefix + "safe", Changes: []recoveryChange{{Name: "alpha", Existed: true, New: digest, Phase: "prepared"}}},
+		{Schema: 2, ID: "safe", Transaction: transactionPrefix + "safe", Changes: []recoveryChange{{Name: "alpha", Old: digest, Phase: "prepared"}}},
+		{Schema: 2, ID: "safe", Transaction: transactionPrefix + "safe", Changes: []recoveryChange{{Name: "alpha", New: digest, Phase: "prepared"}, {Name: "alpha", New: digest, Phase: "prepared"}}},
+	} {
+		if validJournal(journal) {
+			t.Fatalf("unsafe journal accepted: %#v", journal)
+		}
+	}
+	if !stateOwnsDigest(state{Plugins: map[string]pluginState{"one/two": {Skills: map[string]string{"alpha": digest}}}}, "alpha", digest) {
+		t.Fatal("known ownership not found")
+	}
+	if stateOwnsDigest(state{Plugins: map[string]pluginState{"one/two": {Skills: map[string]string{"alpha": digest}}}}, "alpha", strings.Repeat("b", 64)) {
+		t.Fatal("wrong digest accepted as owned")
+	}
+
+	dir := t.TempDir()
+	if err := validTransactionDir(filepath.Join(dir, "missing")); err != nil {
+		t.Fatalf("missing transaction rejected: %v", err)
+	}
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validTransactionDir(file); !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("file transaction=%v", err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(file, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := validTransactionDir(link); !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("symlink transaction=%v", err)
+	}
+	if err := checkTransactionSubdir(dir, "missing"); err != nil {
+		t.Fatalf("missing subdir=%v", err)
+	}
+	if err := checkTransactionSubdir(dir, "file"); !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("file subdir=%v", err)
+	}
+	if err := checkTransactionSubdir(dir, "link"); !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("symlink subdir=%v", err)
+	}
+}
+
+func TestDigestAtConfinesAndVerifiesDirectoryContent(t *testing.T) {
+	dir := t.TempDir()
+	if exists, _, err := digestAt(filepath.Join(dir, "missing"), "alpha"); exists || err != nil {
+		t.Fatalf("missing root exists=%v err=%v", exists, err)
+	}
+	if exists, _, err := digestAt(dir, "missing"); exists || err != nil {
+		t.Fatalf("missing skill exists=%v err=%v", exists, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if exists, _, err := digestAt(dir, "file"); !exists || !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("file exists=%v err=%v", exists, err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "file"), filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if exists, _, err := digestAt(dir, "link"); !exists || !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("link exists=%v err=%v", exists, err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "alpha"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "alpha", "SKILL.md"), []byte("safe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if exists, digest, err := digestAt(dir, "alpha"); !exists || digest == "" || err != nil {
+		t.Fatalf("directory exists=%v digest=%q err=%v", exists, digest, err)
+	}
+}
+
+func TestRecoverTransactionRejectsUnownedPriorContentAndRetriesFinalization(t *testing.T) {
+	dir := t.TempDir()
+	old := bundle(t, "plugin", "owned-old", "old")
+	if _, err := Sync(context.Background(), config(t, old), Options{Dir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	oldDigest, err := installedDigest(dir, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	txID := transactionPrefix + "owned"
+	if err := os.MkdirAll(filepath.Join(dir, txID, "backup", "alpha"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, txID, "backup", "alpha", "SKILL.md"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, txID, "backup", "alpha", "reference.md"), []byte("reference"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "alpha", "SKILL.md"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newDigest, err := installedDigest(dir, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRecoveryJournal(t, dir, "owned", []recoveryChange{{Name: "alpha", Old: oldDigest, New: newDigest, Existed: true, Phase: "published"}})
+	stateRaw, err := os.ReadFile(statePath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(statePath(dir)); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverTransaction(dir); !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("unowned recovery=%v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "alpha", "SKILL.md")); err != nil || string(data) != "new" {
+		t.Fatalf("target lost=%q err=%v", data, err)
+	}
+	if err := os.WriteFile(statePath(dir), stateRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverTransaction(dir); err != nil {
+		t.Fatalf("owned recovery=%v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "alpha", "SKILL.md")); err != nil || string(data) != "old" {
+		t.Fatalf("target not restored=%q err=%v", data, err)
+	}
+}
+
+func TestPlanningFailureAndUnstartedRollbackPreserveTarget(t *testing.T) {
+	longName := strings.Repeat("a", 300)
+	b := bundleWith(t, "plugin", "too-long-for-target", map[string]string{longName: "body"})
+	for _, dryRun := range []bool{false, true} {
+		t.Run(map[bool]string{false: "apply", true: "dry-run"}[dryRun], func(t *testing.T) {
+			dir := t.TempDir()
+			marker := filepath.Join(dir, "unrelated.txt")
+			if err := os.WriteFile(marker, []byte("keep"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Sync(context.Background(), config(t, b), Options{Dir: dir, DryRun: dryRun}); err == nil {
+				t.Fatal("too-long target component was accepted")
+			}
+			if got, err := os.ReadFile(marker); err != nil || string(got) != "keep" {
+				t.Fatalf("planning failure deleted target content=%q err=%v", got, err)
+			}
+		})
+	}
+
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "unrelated.txt")
+	if err := os.WriteFile(marker, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tx := newTransaction(dir)
+	if err := tx.rollback(); err != nil {
+		t.Fatalf("unstarted rollback=%v", err)
+	}
+	prepared, err := Prepare(context.Background(), config(t, bundle(t, "plugin", "cancel", "body")), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	report := Report{Dir: dir, CLI: prepared.cfg.CLI, CLIVersion: prepared.cfg.CurrentVersion}
+	if _, err := syncLocked(canceled, prepared.cfg, prepared.bundles, Options{Dir: dir}, report); !errors.Is(err, context.Canceled) {
+		t.Fatalf("pre-transaction cancellation=%v", err)
+	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "keep" {
+		t.Fatalf("cancellation deleted target content=%q err=%v", got, err)
+	}
+}
+
+func TestFinalizeJournalRejectsUnownedCleanupPaths(t *testing.T) {
+	dir := t.TempDir()
+	journal := filepath.Join(dir, recoveryFileName)
+	if err := os.WriteFile(journal, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := finalizeJournal(journal, dir); !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("unowned transaction cleanup=%v", err)
+	}
+	if got, err := os.ReadFile(journal); err != nil || string(got) != "keep" {
+		t.Fatalf("unsafe cleanup removed journal=%q err=%v", got, err)
+	}
+}
+
+func writeRecoverySkill(t *testing.T, root, name, body string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, name), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, name, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := installedDigest(root, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
+func TestRecoveryHelpersPropagateFilesystemFaultsWithoutMutation(t *testing.T) {
+	parentFile := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := readRecoveryJournal(parentFile); err == nil {
+		t.Fatal("journal lstat fault accepted")
+	}
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, recoveryFileName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := readRecoveryJournal(dir); err == nil {
+		t.Fatal("journal read fault accepted")
+	}
+	if err := validTransactionDir(filepath.Join(parentFile, "child")); err == nil {
+		t.Fatal("transaction lstat fault accepted")
+	}
+	if err := checkTransactionSubdir(parentFile, "child"); err == nil {
+		t.Fatal("subdir lstat fault accepted")
+	}
+	if _, _, err := digestAt(parentFile, "alpha"); err == nil {
+		t.Fatal("root open fault accepted")
+	}
+	if _, _, err := digestAt(t.TempDir(), strings.Repeat("a", 300)); err == nil {
+		t.Fatal("content lstat fault accepted")
+	}
+	if err := verifyCommittedChange(t.TempDir(), recoveryChange{Name: strings.Repeat("a", 300), New: strings.Repeat("a", 64)}); err == nil {
+		t.Fatal("committed verification accepted invalid filesystem lookup")
+	}
+}
+
+func TestRestoreChangeFailsClosedOnEveryMissingRecoveryProof(t *testing.T) {
+	t.Run("added target needs proof", func(t *testing.T) {
+		dir, tx := t.TempDir(), t.TempDir()
+		newDigest := writeRecoverySkill(t, dir, "alpha", "new")
+		if err := restoreChange(dir, tx, recoveryChange{Name: "alpha", New: newDigest}); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("missing proof=%v", err)
+		}
+		if got, err := os.ReadFile(filepath.Join(dir, "alpha", "SKILL.md")); err != nil || string(got) != "new" {
+			t.Fatalf("target changed=%q err=%v", got, err)
+		}
+	})
+	t.Run("added target must equal proof", func(t *testing.T) {
+		dir, tx := t.TempDir(), t.TempDir()
+		newDigest := writeRecoverySkill(t, dir, "alpha", "new")
+		writeRecoverySkill(t, filepath.Join(tx, "proof"), "alpha", "other")
+		if err := restoreChange(dir, tx, recoveryChange{Name: "alpha", New: newDigest}); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("mismatched proof=%v", err)
+		}
+	})
+	t.Run("original target needs backup", func(t *testing.T) {
+		dir, tx := t.TempDir(), t.TempDir()
+		oldDigest := strings.Repeat("a", 64)
+		if err := restoreChange(dir, tx, recoveryChange{Name: "alpha", Old: oldDigest, New: strings.Repeat("b", 64), Existed: true}); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("missing backup=%v", err)
+		}
+	})
+	t.Run("original target rejects unrelated replacement", func(t *testing.T) {
+		dir, tx := t.TempDir(), t.TempDir()
+		oldDigest := writeRecoverySkill(t, filepath.Join(tx, "backup"), "alpha", "old")
+		writeRecoverySkill(t, dir, "alpha", "unrelated")
+		if err := restoreChange(dir, tx, recoveryChange{Name: "alpha", Old: oldDigest, New: strings.Repeat("b", 64), Existed: true}); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("unrelated target=%v", err)
+		}
+	})
+	t.Run("rename failure retains verified backup", func(t *testing.T) {
+		dir := t.TempDir()
+		tx := filepath.Join(dir, transactionPrefix+"rename")
+		oldDigest := writeRecoverySkill(t, filepath.Join(tx, "backup"), "alpha", "old")
+		renameErr := errors.New("rename")
+		withTransactionOperations(t, func(ops *transactionOperationSet) {
+			ops.rename = func(*os.Root, string, string) error { return renameErr }
+		})
+		if err := restoreChange(dir, tx, recoveryChange{Name: "alpha", Old: oldDigest, New: strings.Repeat("b", 64), Existed: true}); !errors.Is(err, renameErr) {
+			t.Fatalf("rename error=%v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(tx, "backup", "alpha", "SKILL.md")); err != nil {
+			t.Fatalf("backup lost=%v", err)
+		}
+	})
 }

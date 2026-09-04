@@ -205,7 +205,6 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 	var operations []operation
 	for _, rb := range bundles {
 		if err := ctx.Err(); err != nil {
-			_ = tx.rollback()
 			return report, err
 		}
 		key := rb.Bundle.Plugin.String()
@@ -236,7 +235,6 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 				action, reason = Conflict, "requested by multiple plugins"
 			}
 			if err != nil {
-				_ = tx.rollback()
 				return report, err
 			}
 			report.Changes = append(report.Changes, Change{Plugin: rb.Bundle.Plugin, Name: item.Name, Action: action, Reason: reason})
@@ -257,7 +255,6 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 			}
 			action, reason, err := classifyRemoval(opts.Dir, name, oldDigest, owners, key)
 			if err != nil {
-				_ = tx.rollback()
 				return report, err
 			}
 			report.Changes = append(report.Changes, Change{Plugin: rb.Bundle.Plugin, Name: name, Action: action, Reason: reason})
@@ -1057,6 +1054,12 @@ func restoreChange(dir, txDir string, c recoveryChange) error {
 
 func finalizeJournal(path, txDir string) error {
 	root := filepath.Dir(txDir)
+	if path != filepath.Join(root, recoveryFileName) || filepath.Base(txDir) == transactionPrefix || !strings.HasPrefix(filepath.Base(txDir), transactionPrefix) {
+		return fmt.Errorf("%w: recovery cleanup paths are unsafe", ErrStateCorrupt)
+	}
+	if err := validTransactionDir(txDir); err != nil {
+		return err
+	}
 	if err := rootedRemoveAll(root, txDir); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
@@ -1193,6 +1196,12 @@ func (t *transaction) remove(name, old string) error {
 	return t.setPhase(len(t.changes)-1, "backed_up")
 }
 func (t *transaction) rollback() error {
+	// Planning never starts a transaction. In particular, an unstarted
+	// transaction's transactionDir is t.dir, so finalizing it would otherwise
+	// treat the caller's complete target as disposable recovery evidence.
+	if t.id == "" {
+		return nil
+	}
 	var rollbackErr error
 	for i := len(t.changes) - 1; i >= 0; i-- {
 		c := t.changes[i]
