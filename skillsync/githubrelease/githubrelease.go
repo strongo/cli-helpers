@@ -253,8 +253,7 @@ func githubRepository(repository string) (string, string, error) {
 	return parts[1], parts[2], nil
 }
 
-func validSegment(value string) bool  { return value != "" && !strings.ContainsAny(value, "/\\?&#") }
-func versionForTag(tag string) string { return strings.TrimPrefix(tag, "v") }
+func validSegment(value string) bool { return value != "" && !strings.ContainsAny(value, "/\\?&#") }
 func releaseAsset(assets []asset, name string) (asset, bool) {
 	for _, asset := range assets {
 		if asset.Name == name {

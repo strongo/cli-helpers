@@ -55,14 +55,14 @@ func readState(dir string) (state, error) {
 	}
 	owners := map[string]string{}
 	for plugin, entry := range s.Plugins {
-		if plugin == "" || !strings.Contains(plugin, "/") || entry.Skills == nil {
+		if !validIdentityParts(plugin) || entry.Skills == nil {
 			return state{}, fmt.Errorf("%w: invalid plugin state", ErrStateCorrupt)
 		}
 		if entry.Legacy {
 			if entry.Revision != "" || entry.Digest != "" || entry.CLI != "" || entry.Source != (Source{}) || len(entry.Suppliers) != 0 {
 				return state{}, fmt.Errorf("%w: invalid legacy plugin state", ErrStateCorrupt)
 			}
-		} else if !validSource(entry.Source) || entry.Revision != entry.Source.Revision || entry.Digest != entry.Source.Digest {
+		} else if !validIdentityParts(entry.CLI) || !validSource(entry.Source) || entry.Revision != entry.Source.Revision || entry.Digest != entry.Source.Digest {
 			return state{}, fmt.Errorf("%w: invalid plugin provenance", ErrStateCorrupt)
 		}
 		if entry.Suppliers == nil {
@@ -73,12 +73,12 @@ func readState(dir string) (state, error) {
 			s.Plugins[plugin] = entry
 		}
 		for cli, revision := range entry.Suppliers {
-			if !validIdentityParts(cli) || revision == "" {
+			if !validIdentityParts(cli) || !validRevision(revision) {
 				return state{}, fmt.Errorf("%w: invalid supplier", ErrStateCorrupt)
 			}
 		}
 		for name, digest := range entry.Skills {
-			if name == "" || !fs.ValidPath(name) || filepath.Base(name) != name || len(digest) != 64 {
+			if !validSkillName(name) || !validDigest(digest) {
 				return state{}, fmt.Errorf("%w: invalid owned skill", ErrStateCorrupt)
 			}
 			if prior := owners[name]; prior != "" {
@@ -108,7 +108,7 @@ func writeState(dir string, s state) error {
 		return err
 	}
 	name := tmp.Name()
-	defer os.Remove(name)
+	defer func() { _ = os.Remove(name) }()
 	if _, err = tmp.Write(raw); err != nil {
 		_ = tmp.Close()
 		return err

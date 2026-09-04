@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -147,6 +148,245 @@ func TestSyncDoesNotOverwriteUnmanagedOrModifiedSkill(t *testing.T) {
 	}
 }
 
+func TestSyncRemovesRetiredSkillsAsOnePluginRevision(t *testing.T) {
+	dir := t.TempDir()
+	old := bundleWith(t, "plugin", "r1", map[string]string{"alpha": "keep", "beta": "retire"})
+	if _, err := Sync(context.Background(), config(t, old), Options{Dir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	newer := bundleWith(t, "plugin", "r2", map[string]string{"alpha": "updated"})
+	report, err := Sync(context.Background(), config(t, newer), Options{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Changed() || strings.Join(report.Names(Removed), ",") != "beta" {
+		t.Fatalf("report=%#v", report)
+	}
+	for _, change := range report.Changes {
+		if change.Name == "alpha" && (change.Action != Updated || change.Outcome != Applied) {
+			t.Fatalf("alpha change=%#v", change)
+		}
+		if change.Name == "beta" && (change.Action != Removed || change.Outcome != Applied) {
+			t.Fatalf("beta change=%#v", change)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "beta")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("retired skill remains: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "alpha", "SKILL.md")); err != nil || string(data) != "updated" {
+		t.Fatalf("retained skill=%q err=%v", data, err)
+	}
+	installed, err := readState(dir)
+	if err != nil || len(installed.Plugins[old.Plugin.String()].Skills) != 1 || installed.Plugins[old.Plugin.String()].Skills["alpha"] == "" {
+		t.Fatalf("state=%#v err=%v", installed, err)
+	}
+	report, err = Sync(context.Background(), config(t, newer), Options{Dir: dir})
+	if err != nil || report.Changed() || strings.Join(report.Names(Unchanged), ",") != "alpha" {
+		t.Fatalf("noop report=%#v err=%v", report, err)
+	}
+}
+
+func TestSyncPlansRemovalWithoutDryRunMutation(t *testing.T) {
+	dir := t.TempDir()
+	old := bundleWith(t, "plugin", "r1", map[string]string{"alpha": "keep", "beta": "retire"})
+	if _, err := Sync(context.Background(), config(t, old), Options{Dir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	stateBefore, err := os.ReadFile(statePath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := Sync(context.Background(), config(t, bundleWith(t, "plugin", "r2", map[string]string{"alpha": "keep"})), Options{Dir: dir, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Changed() || strings.Join(report.Names(Removed), ",") != "beta" {
+		t.Fatalf("report=%#v", report)
+	}
+	for _, change := range report.Changes {
+		if change.Name == "beta" && change.Outcome != Planned {
+			t.Fatalf("removal=%#v", change)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "beta")); err != nil {
+		t.Fatalf("dry-run removed beta: %v", err)
+	}
+	stateAfter, err := os.ReadFile(statePath(dir))
+	if err != nil || string(stateAfter) != string(stateBefore) {
+		t.Fatalf("dry-run state changed err=%v", err)
+	}
+}
+
+func TestSyncDoesNotPartiallyRemoveWhenAPluginSkillConflicts(t *testing.T) {
+	dir := t.TempDir()
+	old := bundleWith(t, "plugin", "r1", map[string]string{"alpha": "keep", "beta": "retire"})
+	if _, err := Sync(context.Background(), config(t, old), Options{Dir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "beta", "SKILL.md"), []byte("edited"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	report, err := Sync(context.Background(), config(t, bundleWith(t, "plugin", "r2", map[string]string{"alpha": "updated"})), Options{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := report.Names(Conflict); strings.Join(got, ",") != "alpha,beta" {
+		t.Fatalf("conflicts=%v report=%#v", got, report)
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "alpha", "SKILL.md")); err != nil || string(data) != "keep" {
+		t.Fatalf("alpha changed=%q err=%v", data, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "beta", "SKILL.md")); err != nil || string(data) != "edited" {
+		t.Fatalf("beta changed=%q err=%v", data, err)
+	}
+	installed, err := readState(dir)
+	if err != nil || installed.Plugins[old.Plugin.String()].Revision != old.Source.Revision || len(installed.Plugins[old.Plugin.String()].Skills) != 2 {
+		t.Fatalf("state=%#v err=%v", installed, err)
+	}
+}
+
+func TestSyncRemovalFailureRestoresOriginal(t *testing.T) {
+	dir := t.TempDir()
+	old := bundleWith(t, "plugin", "r1", map[string]string{"alpha": "keep", "beta": "retire"})
+	if _, err := Sync(context.Background(), config(t, old), Options{Dir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	withTransactionOperations(t, func(ops *struct {
+		rename    func(*os.Root, string, string) error
+		removeAll func(*os.Root, string) error
+	}) {
+		original := ops.rename
+		ops.rename = func(root *os.Root, from, to string) error {
+			if filepath.Base(from) == "beta" && strings.Contains(filepath.ToSlash(to), "/backup/") {
+				return errors.New("removal backup failed")
+			}
+			return original(root, from, to)
+		}
+	})
+	report, err := Sync(context.Background(), config(t, bundleWith(t, "plugin", "r2", map[string]string{"alpha": "keep"})), Options{Dir: dir})
+	if err == nil {
+		t.Fatal("expected removal failure")
+	}
+	for _, change := range report.Changes {
+		if change.Name == "beta" && change.Outcome != Restored {
+			t.Fatalf("removal outcome=%#v", change)
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "beta", "SKILL.md")); err != nil || string(data) != "retire" {
+		t.Fatalf("original beta=%q err=%v", data, err)
+	}
+}
+
+func TestSyncRetiresAbsentSkillAndRefusesSymlinkedRemoval(t *testing.T) {
+	newer := bundleWith(t, "plugin", "r2", map[string]string{"alpha": "keep"})
+	t.Run("already absent", func(t *testing.T) {
+		dir := t.TempDir()
+		old := bundleWith(t, "plugin", "r1", map[string]string{"alpha": "keep", "beta": "retire"})
+		if _, err := Sync(context.Background(), config(t, old), Options{Dir: dir}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(filepath.Join(dir, "beta")); err != nil {
+			t.Fatal(err)
+		}
+		report, err := Sync(context.Background(), config(t, newer), Options{Dir: dir})
+		if err != nil || strings.Join(report.Names(Removed), ",") != "beta" {
+			t.Fatalf("report=%#v err=%v", report, err)
+		}
+		for _, change := range report.Changes {
+			if change.Name == "beta" && change.Outcome != Applied {
+				t.Fatalf("absent removal=%#v", change)
+			}
+		}
+	})
+	t.Run("symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		old := bundleWith(t, "plugin", "r1", map[string]string{"alpha": "keep", "beta": "retire"})
+		if _, err := Sync(context.Background(), config(t, old), Options{Dir: dir}); err != nil {
+			t.Fatal(err)
+		}
+		outside := filepath.Join(t.TempDir(), "beta")
+		if err := os.Rename(filepath.Join(dir, "beta"), outside); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(dir, "beta")); err != nil {
+			t.Fatal(err)
+		}
+		report, err := Sync(context.Background(), config(t, newer), Options{Dir: dir})
+		if err != nil || strings.Join(report.Names(Conflict), ",") != "alpha,beta" {
+			t.Fatalf("report=%#v err=%v", report, err)
+		}
+		info, err := os.Lstat(filepath.Join(dir, "beta"))
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("symlink changed info=%v err=%v", info, err)
+		}
+	})
+}
+
+func TestSyncRejectsUnsafeBundleAndStateBeforeTargetMutation(t *testing.T) {
+	t.Run("bundle", func(t *testing.T) {
+		parent := t.TempDir()
+		target := filepath.Join(parent, "target")
+		bad := bundleWith(t, "plugin", "r1", map[string]string{transactionPrefix + "reserved": "bad"})
+		_, err := Sync(context.Background(), config(t, bad), Options{Dir: target})
+		if !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("err=%v", err)
+		}
+		if _, err := os.Lstat(target); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("invalid bundle created target: %v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(parent, ".cli-helpers-skills-lock")); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("invalid bundle created lock: %v", err)
+		}
+	})
+	t.Run("state", func(t *testing.T) {
+		parent := t.TempDir()
+		target := filepath.Join(parent, "target")
+		if err := os.Mkdir(target, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		b := bundle(t, "plugin", "r1", "body")
+		entry := pluginState{Revision: b.Source.Revision, Digest: b.Source.Digest, CLI: "strongo/tool", Suppliers: map[string]string{"strongo/tool": b.Source.Revision}, Source: b.Source, Skills: map[string]string{"alpha": b.Source.Digest}}
+		for _, mutate := range []func(*state){
+			func(s *state) {
+				s.Plugins["strongo/"] = s.Plugins["strongo/plugin"]
+				delete(s.Plugins, "strongo/plugin")
+			},
+			func(s *state) {
+				s.Plugins["strongo/plugin"] = pluginState{Revision: entry.Revision, Digest: entry.Digest, CLI: entry.CLI, Suppliers: entry.Suppliers, Source: entry.Source, Skills: map[string]string{transactionPrefix + "reserved": entry.Digest}}
+			},
+			func(s *state) {
+				s.Plugins["strongo/plugin"] = pluginState{Revision: entry.Revision, Digest: entry.Digest, CLI: entry.CLI, Suppliers: entry.Suppliers, Source: entry.Source, Skills: map[string]string{"alpha": strings.Repeat("z", 64)}}
+			},
+			func(s *state) {
+				s.Plugins["strongo/plugin"] = pluginState{Revision: entry.Revision, Digest: entry.Digest, CLI: entry.CLI, Suppliers: map[string]string{"strongo/tool": "short"}, Source: entry.Source, Skills: entry.Skills}
+			},
+		} {
+			t.Run("corrupt", func(t *testing.T) {
+				s := state{Schema: stateSchema, Plugins: map[string]pluginState{"strongo/plugin": entry}}
+				mutate(&s)
+				if err := writeState(target, s); err != nil {
+					t.Fatal(err)
+				}
+				before, err := os.ReadFile(statePath(target))
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = Sync(context.Background(), config(t, b), Options{Dir: target})
+				if !errors.Is(err, ErrStateCorrupt) {
+					t.Fatalf("err=%v", err)
+				}
+				after, err := os.ReadFile(statePath(target))
+				if err != nil || string(after) != string(before) {
+					t.Fatalf("state mutated err=%v", err)
+				}
+				if _, err := os.Lstat(filepath.Join(parent, ".cli-helpers-skills-lock")); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("corrupt state created lock: %v", err)
+				}
+			})
+		}
+	})
+}
+
 func TestEmbeddedBundleRequiresStableSourceAndVersion(t *testing.T) {
 	content := fstest.MapFS{"alpha/SKILL.md": &fstest.MapFile{Data: []byte("x")}}
 	digest, err := Digest(content)
@@ -284,6 +524,201 @@ func TestSourceRejectsInvalidRevisionAndVersion(t *testing.T) {
 		if _, err := Sync(context.Background(), config(t, bad), Options{Dir: t.TempDir()}); !errors.Is(err, ErrInvalidConfig) {
 			t.Fatalf("err = %v", err)
 		}
+	}
+}
+
+func TestSourceAPIsValidateAndDescribeBundles(t *testing.T) {
+	content := fstest.MapFS{
+		"zeta/SKILL.md":  &fstest.MapFile{Data: []byte("z")},
+		"alpha/SKILL.md": &fstest.MapFile{Data: []byte("a")},
+		"missing/README": &fstest.MapFile{Data: []byte("missing skill")},
+		"ignored.txt":    &fstest.MapFile{Data: []byte("ignored")},
+	}
+	discovered, err := Discover(content)
+	if err != nil || len(discovered) != 2 || discovered[0].Name != "alpha" || discovered[1].Name != "zeta" || discovered[0].Digest == "" {
+		t.Fatalf("discover=%#v err=%v", discovered, err)
+	}
+	if _, err := Discover(failingFS{err: errors.New("read root failed")}); err == nil {
+		t.Fatal("expected read directory failure")
+	}
+	if _, err := Discover(fstest.MapFS{"alpha/SKILL.md": &fstest.MapFile{Mode: fs.ModeDir}}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("non-regular descriptor err=%v", err)
+	}
+	if _, err := Discover(fstest.MapFS{transactionPrefix + "reserved/SKILL.md": &fstest.MapFile{Data: []byte("bad")}}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("reserved skill err=%v", err)
+	}
+	if _, err := Discover(fstest.MapFS{"alpha/SKILL.md": &fstest.MapFile{Data: []byte("ok")}, "alpha/link": &fstest.MapFile{Mode: fs.ModeSymlink}}); err == nil {
+		t.Fatal("expected unsafe subtree failure")
+	}
+
+	executable := fstest.MapFS{
+		"alpha/SKILL.md": &fstest.MapFile{Data: []byte("skill")},
+		"alpha/run":      &fstest.MapFile{Data: []byte("run"), Mode: 0o755},
+		"alpha/helper":   &fstest.MapFile{Data: []byte("helper")},
+	}
+	paths, err := NormalizeExecutablePaths(executable, []string{"alpha/helper"})
+	if err != nil || strings.Join(paths, ",") != "alpha/helper,alpha/run" {
+		t.Fatalf("paths=%v err=%v", paths, err)
+	}
+	for _, declared := range [][]string{{"alpha/missing"}, {"alpha/helper", "alpha/helper"}, {"."}} {
+		if _, err := NormalizeExecutablePaths(executable, declared); !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("declared=%v err=%v", declared, err)
+		}
+	}
+
+	b := bundle(t, "plugin", "r1", "body")
+	descriptor := BundleDescriptor{Plugin: b.Plugin, Source: b.Source}
+	if err := ValidateDescriptor(descriptor); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*BundleDescriptor){
+		func(d *BundleDescriptor) { d.Plugin.Name = "" },
+		func(d *BundleDescriptor) { d.Source.Digest = strings.Repeat("z", 64) },
+		func(d *BundleDescriptor) { d.Source.Compatibility.MinCLI = "bad" },
+		func(d *BundleDescriptor) { d.ExecutablePaths = []string{".", "alpha/run"} },
+		func(d *BundleDescriptor) { d.ExecutablePaths = []string{"alpha/run", "alpha/run"} },
+	} {
+		bad := descriptor
+		mutate(&bad)
+		if err := ValidateDescriptor(bad); !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("descriptor=%#v err=%v", bad, err)
+		}
+	}
+	if !Compatible("1.2.3", Compatibility{MinCLI: "1.0.0", MaxCLI: "2.0.0"}) || Compatible("unknown", Compatibility{MinCLI: "1.0.0"}) || Compatible("0.9.0", Compatibility{MinCLI: "1.0.0"}) || Compatible("2.1.0", Compatibility{MaxCLI: "2.0.0"}) {
+		t.Fatal("unexpected compatibility result")
+	}
+	if cmp, err := CompareVersions("v1.2.3", "1.2.2"); err != nil || cmp != 1 {
+		t.Fatalf("comparison=%d err=%v", cmp, err)
+	}
+	if _, err := CompareVersions("bad", "1.2.3"); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("invalid comparison err=%v", err)
+	}
+}
+
+func TestSyncRejectsMalformedProvenanceBeforeWriting(t *testing.T) {
+	for _, mutate := range []func(*Bundle){
+		func(b *Bundle) { b.Plugin.Publisher = "bad/name" },
+		func(b *Bundle) { b.Source.Repository = "" },
+		func(b *Bundle) { b.Source.Path = "../escape" },
+		func(b *Bundle) { b.Source.Revision = strings.Repeat("A", 40) },
+		func(b *Bundle) { b.Source.Version = "1.02.3" },
+		func(b *Bundle) { b.Source.Digest = strings.Repeat("z", 64) },
+		func(b *Bundle) { b.Source.Compatibility.MaxCLI = "bad" },
+	} {
+		parent := t.TempDir()
+		target := filepath.Join(parent, "target")
+		bad := bundle(t, "plugin", "r1", "body")
+		mutate(&bad)
+		_, err := Sync(context.Background(), config(t, bad), Options{Dir: target})
+		if !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("bundle=%#v err=%v", bad, err)
+		}
+		if _, err := os.Lstat(target); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("malformed provenance created target: %v", err)
+		}
+	}
+}
+
+func TestReleaseResolverRejectsMissingInputsAndPropagatesSourceFailure(t *testing.T) {
+	matched := bundle(t, "plugin", "r1", "matched")
+	if _, err := (ReleaseResolver{}).Resolve(context.Background(), matched); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("missing source err=%v", err)
+	}
+	if _, err := (ReleaseResolver{Source: releaseSourceFunc(func(context.Context, Source, string) (BundleDescriptor, fs.FS, error) {
+		return BundleDescriptor{}, nil, nil
+	})}).Resolve(context.Background(), matched); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("missing version err=%v", err)
+	}
+	sourceFailure := errors.New("source unavailable")
+	resolver := ReleaseResolver{CurrentVersion: "1.2.3", Source: releaseSourceFunc(func(context.Context, Source, string) (BundleDescriptor, fs.FS, error) {
+		return BundleDescriptor{}, nil, sourceFailure
+	})}
+	if _, err := resolver.Resolve(context.Background(), matched); !errors.Is(err, sourceFailure) {
+		t.Fatalf("source failure err=%v", err)
+	}
+}
+
+func TestSourceValidationFilesystemFailureBoundaries(t *testing.T) {
+	base := fstest.MapFS{"alpha/SKILL.md": &fstest.MapFile{Data: []byte("skill")}}
+	bundleForFS := func(source fs.FS) Bundle {
+		t.Helper()
+		digest, err := Digest(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := bundle(t, "plugin", "r1", "body")
+		b.FS, b.Source.Digest = source, digest
+		return b
+	}
+
+	withRootFile := fstest.MapFS{"alpha/SKILL.md": &fstest.MapFile{Data: []byte("skill")}, "README.md": &fstest.MapFile{Data: []byte("note")}}
+	if skills, err := validateBundle(bundleForFS(withRootFile), "1.2.3"); err != nil || len(skills) != 1 {
+		t.Fatalf("root-file bundle skills=%#v err=%v", skills, err)
+	}
+	withoutSkill := fstest.MapFS{"alpha/SKILL.md": &fstest.MapFile{Data: []byte("skill")}, "empty/README.md": &fstest.MapFile{Data: []byte("note")}}
+	if skills, err := validateBundle(bundleForFS(withoutSkill), "1.2.3"); err != nil || len(skills) != 1 || skills[0].Name != "alpha" {
+		t.Fatalf("missing-skill bundle skills=%#v err=%v", skills, err)
+	}
+	nonRegular := fstest.MapFS{"alpha/SKILL.md": &fstest.MapFile{Data: []byte("skill")}, "beta/SKILL.md": &fstest.MapFile{Mode: fs.ModeDir}}
+	if _, err := validateBundle(bundleForFS(nonRegular), "1.2.3"); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("non-regular skill err=%v", err)
+	}
+	noSkills := fstest.MapFS{"README.md": &fstest.MapFile{Data: []byte("note")}}
+	if _, err := validateBundle(bundleForFS(noSkills), "1.2.3"); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("no-skills err=%v", err)
+	}
+	unsafe := fstest.MapFS{"alpha/SKILL.md": &fstest.MapFile{Data: []byte("skill")}, "alpha/link": &fstest.MapFile{Mode: fs.ModeSymlink}}
+	b := bundle(t, "plugin", "r1", "body")
+	b.FS, b.Source.Digest = unsafe, strings.Repeat("0", 64)
+	if _, err := validateBundle(b, "1.2.3"); err == nil {
+		t.Fatal("expected unsafe digest failure")
+	}
+
+	for _, failAt := range []int{3, 4, 5, 6} {
+		t.Run(fmt.Sprintf("read-dir-%d", failAt), func(t *testing.T) {
+			flaky := &failAfterReadDirFS{FS: base, failAt: failAt, err: errors.New("read directory failed")}
+			b := bundleForFS(base)
+			b.FS = flaky
+			if _, err := validateBundle(b, "1.2.3"); err == nil {
+				t.Fatal("expected read directory failure")
+			}
+		})
+	}
+	if _, err := executableSet(failingFS{err: errors.New("walk failed")}, nil); err == nil {
+		t.Fatal("expected executable walk failure")
+	}
+	if _, err := executableSet(infoFailureFS{err: errors.New("entry info failed")}, nil); err == nil {
+		t.Fatal("expected executable info failure")
+	}
+	if _, err := DigestWithExecutables(base, []string{"alpha/missing"}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("digest executable error=%v", err)
+	}
+	if _, err := Digest(failingFS{err: errors.New("walk failed")}); err == nil {
+		t.Fatal("expected digest walk failure")
+	}
+	if _, err := Digest(openFailureFS{FS: base, path: "alpha/SKILL.md", err: errors.New("read failed")}); err == nil {
+		t.Fatal("expected digest read failure")
+	}
+	if _, err := Digest(infoFailureFS{err: errors.New("entry info failed")}); err == nil {
+		t.Fatal("expected digest info failure")
+	}
+	if _, err := legacyWBDigest(failingFS{err: errors.New("walk failed")}, "."); err == nil {
+		t.Fatal("expected legacy walk failure")
+	}
+	if _, err := legacyWBDigest(openFailureFS{FS: base, path: "alpha/SKILL.md", err: errors.New("read failed")}, "."); err == nil {
+		t.Fatal("expected legacy read failure")
+	}
+	if _, err := legacyWBDigest(unsafe, "."); err == nil {
+		t.Fatal("expected legacy unsafe-entry failure")
+	}
+
+	for _, version := range []string{"", "unknown", "1.2", "1..2", "1.02.3", "1.x.3", "1.2.18446744073709551616"} {
+		if validVersion(version) {
+			t.Fatalf("invalid version accepted: %q", version)
+		}
+	}
+	if versionCompare("1", "1.0") != 0 || versionCompare("1", "1.0.1") != -1 || versionCompare("1.1", "1") != 1 {
+		t.Fatal("version comparison normalization failed")
 	}
 }
 
@@ -998,6 +1433,57 @@ func TestSyncCrashChild(t *testing.T) {
 	t.Fatalf("child did not exit at %s: %v", boundary, err)
 }
 
+func TestSyncRemovalCrashChild(t *testing.T) {
+	args := os.Args
+	marker := -1
+	for i, arg := range args {
+		if arg == "skillsync-removal-crash" {
+			marker = i
+			break
+		}
+	}
+	if marker < 0 {
+		return
+	}
+	if marker+2 >= len(args) {
+		t.Fatal("missing removal crash child arguments")
+	}
+	boundary, dir := args[marker+1], args[marker+2]
+	transactionBoundary = func(actual string) {
+		if actual == boundary {
+			os.Exit(0)
+		}
+	}
+	_, err := Sync(context.Background(), config(t, bundleWith(t, "plugin", "r2", map[string]string{"alpha": "keep"})), Options{Dir: dir})
+	t.Fatalf("child did not exit at %s: %v", boundary, err)
+}
+
+func TestNewPublicSyncRecoversEveryAbruptRemovalBoundary(t *testing.T) {
+	for _, boundary := range []string{"journal", "backup", "state"} {
+		t.Run(boundary, func(t *testing.T) {
+			dir := t.TempDir()
+			old := bundleWith(t, "plugin", "r1", map[string]string{"alpha": "keep", "beta": "retire"})
+			if _, err := Sync(context.Background(), config(t, old), Options{Dir: dir}); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(os.Args[0], "-test.run=^TestSyncRemovalCrashChild$", "--", "skillsync-removal-crash", boundary, dir)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("crash child: %v\n%s", err, output)
+			}
+			report, err := Sync(context.Background(), config(t, bundleWith(t, "plugin", "r2", map[string]string{"alpha": "keep"})), Options{Dir: dir})
+			if err != nil || (boundary != "state" && strings.Join(report.Names(Removed), ",") != "beta") {
+				t.Fatalf("report=%#v err=%v", report, err)
+			}
+			if _, err := os.Lstat(filepath.Join(dir, "beta")); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("retired skill remains after recovery: %v", err)
+			}
+			if _, err := os.Lstat(filepath.Join(dir, recoveryFileName)); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("recovery journal remains: %v", err)
+			}
+		})
+	}
+}
+
 func TestLegacyUpgradeCrashPersistsRecoverableOwnershipFirst(t *testing.T) {
 	for _, boundary := range []string{"backup", "publish"} {
 		t.Run(boundary, func(t *testing.T) {
@@ -1109,3 +1595,86 @@ func TestNewPublicSyncRecoversEveryAbruptTransactionBoundary(t *testing.T) {
 		})
 	}
 }
+
+type failingFS struct{ err error }
+
+func (f failingFS) Open(string) (fs.File, error) { return nil, f.err }
+
+type failAfterReadDirFS struct {
+	fs.FS
+	failAt, calls int
+	err           error
+}
+
+func (f *failAfterReadDirFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	f.calls++
+	if f.calls == f.failAt {
+		return nil, f.err
+	}
+	return fs.ReadDir(f.FS, name)
+}
+
+type openFailureFS struct {
+	fs.FS
+	path string
+	err  error
+}
+
+func (f openFailureFS) Open(name string) (fs.File, error) {
+	if name == f.path {
+		return nil, f.err
+	}
+	return f.FS.Open(name)
+}
+
+type infoFailureFS struct{ err error }
+
+func (f infoFailureFS) Open(name string) (fs.File, error) {
+	switch name {
+	case ".":
+		return infoFailureFile{}, nil
+	case "broken":
+		return &infoFailureContentFile{Reader: *strings.NewReader("content")}, nil
+	default:
+		return nil, fs.ErrNotExist
+	}
+}
+func (f infoFailureFS) ReadDir(string) ([]fs.DirEntry, error) {
+	return []fs.DirEntry{infoFailureEntry(f)}, nil
+}
+
+type infoFailureFile struct{}
+
+func (infoFailureFile) Stat() (fs.FileInfo, error) { return infoFailureInfo{}, nil }
+func (infoFailureFile) Read([]byte) (int, error)   { return 0, io.EOF }
+func (infoFailureFile) Close() error               { return nil }
+
+type infoFailureContentFile struct{ strings.Reader }
+
+func (f *infoFailureContentFile) Stat() (fs.FileInfo, error) { return infoFailureRegularInfo{}, nil }
+func (*infoFailureContentFile) Close() error                 { return nil }
+
+type infoFailureInfo struct{}
+
+func (infoFailureInfo) Name() string       { return "." }
+func (infoFailureInfo) Size() int64        { return 0 }
+func (infoFailureInfo) Mode() fs.FileMode  { return fs.ModeDir | 0o755 }
+func (infoFailureInfo) ModTime() time.Time { return time.Time{} }
+func (infoFailureInfo) IsDir() bool        { return true }
+func (infoFailureInfo) Sys() any           { return nil }
+
+type infoFailureRegularInfo struct{}
+
+func (infoFailureRegularInfo) Name() string       { return "broken" }
+func (infoFailureRegularInfo) Size() int64        { return int64(len("content")) }
+func (infoFailureRegularInfo) Mode() fs.FileMode  { return 0o644 }
+func (infoFailureRegularInfo) ModTime() time.Time { return time.Time{} }
+func (infoFailureRegularInfo) IsDir() bool        { return false }
+func (infoFailureRegularInfo) Sys() any           { return nil }
+
+type infoFailureEntry struct{ err error }
+
+func (infoFailureEntry) Name() string                 { return "broken" }
+func (infoFailureEntry) IsDir() bool                  { return false }
+func (infoFailureEntry) Type() fs.FileMode            { return 0 }
+func (e infoFailureEntry) Info() (fs.FileInfo, error) { return nil, e.err }

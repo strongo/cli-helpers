@@ -24,6 +24,9 @@ func Discover(source fs.FS) ([]Skill, error) {
 			continue
 		}
 		name := entry.Name()
+		if !validSkillName(name) {
+			return nil, fmt.Errorf("%w: invalid skill name %q", ErrInvalidConfig, name)
+		}
 		info, err := fs.Stat(source, name+"/SKILL.md")
 		if err != nil {
 			continue
@@ -82,7 +85,7 @@ func validateBundle(b Bundle, current string) ([]skill, error) {
 			continue
 		}
 		name := entry.Name()
-		if !fs.ValidPath(name) || name == "." || strings.Contains(name, "/") {
+		if !validSkillName(name) {
 			return nil, fmt.Errorf("%w: invalid skill name %q", ErrInvalidConfig, name)
 		}
 		info, err := fs.Stat(b.FS, name+"/SKILL.md")
@@ -114,7 +117,7 @@ func validRevision(revision string) bool {
 		return false
 	}
 	for _, r := range revision {
-		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
 			return false
 		}
 	}
@@ -212,14 +215,13 @@ func digestTree(source fs.FS, root string, executables map[string]bool) (string,
 		if executables[path] || executables == nil && info.Mode().Perm()&0o111 != 0 {
 			mode = 0o755
 		}
-		if _, err := fmt.Fprintf(h, "%s\x00%04o\x00", rel, mode.Perm()); err != nil {
-			return err
-		}
-		if _, err := h.Write(data); err != nil {
-			return err
-		}
-		_, err = h.Write([]byte{0})
-		return err
+		// hash.Hash.Write never returns an error. Keep the byte format explicit
+		// while avoiding dead error branches that a SHA-256 implementation cannot
+		// take.
+		_, _ = fmt.Fprintf(h, "%s\x00%04o\x00", rel, mode.Perm())
+		_, _ = h.Write(data)
+		_, _ = h.Write([]byte{0})
+		return nil
 	})
 	if err != nil {
 		return "", err
@@ -250,8 +252,8 @@ func legacyWBDigest(source fs.FS, root string) (string, error) {
 		if root != "." {
 			rel = strings.TrimPrefix(path, root+"/")
 		}
-		_, err = fmt.Fprintf(h, "%s\x00%s\x00", rel, data)
-		return err
+		_, _ = fmt.Fprintf(h, "%s\x00%s\x00", rel, data)
+		return nil
 	})
 	if err != nil {
 		return "", err

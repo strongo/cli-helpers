@@ -499,9 +499,6 @@ func TestSmallHelpers(t *testing.T) {
 	if _, ok := releaseAsset(nil, "missing"); ok {
 		t.Fatal("expected absent asset")
 	}
-	if got := versionForTag("v1.2.3"); got != "1.2.3" {
-		t.Fatalf("versionForTag=%q", got)
-	}
 }
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)

@@ -40,6 +40,15 @@ func Sync(ctx context.Context, cfg Config, opts Options) (Report, error) {
 		}
 		return syncLocked(ctx, cfg, bundles, opts, report)
 	}
+	// Reject an existing unsafe marker before lock() creates its parent-level
+	// lock file. syncLocked reads it again after locking, so this preflight does
+	// not weaken the transaction's race protection.
+	if err := validateTargetAncestry(opts.Dir); err != nil {
+		return report, err
+	}
+	if _, err := emptyOrExistingState(opts.Dir); err != nil {
+		return report, err
+	}
 	unlock, err := lock(ctx, opts.Dir, opts.LockTimeout)
 	if err != nil {
 		return report, err
@@ -134,7 +143,7 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 	var operations []operation
 	for _, rb := range bundles {
 		if err := ctx.Err(); err != nil {
-			tx.rollback()
+			_ = tx.rollback()
 			return report, err
 		}
 		key := rb.Bundle.Plugin.String()
@@ -164,7 +173,7 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 				action, reason = Conflict, "requested by multiple plugins"
 			}
 			if err != nil {
-				tx.rollback()
+				_ = tx.rollback()
 				return report, err
 			}
 			report.Changes = append(report.Changes, Change{Plugin: rb.Bundle.Plugin, Name: item.Name, Action: action, Reason: reason})
@@ -185,7 +194,7 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 			}
 			action, reason, err := classifyRemoval(opts.Dir, name, oldDigest, owners, key)
 			if err != nil {
-				tx.rollback()
+				_ = tx.rollback()
 				return report, err
 			}
 			report.Changes = append(report.Changes, Change{Plugin: rb.Bundle.Plugin, Name: name, Action: action, Reason: reason})
@@ -503,7 +512,7 @@ func rootedRename(rootPath, old, new string) error {
 	if err != nil {
 		return err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	oldRel, err := rootRelative(rootPath, old)
 	if err != nil {
 		return err
@@ -520,7 +529,7 @@ func rootedRemoveAll(rootPath, path string) error {
 	if err != nil {
 		return err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	rel, err := rootRelative(rootPath, path)
 	if err != nil {
 		return err
@@ -533,7 +542,7 @@ func syncDirectory(path string) error {
 	if err != nil {
 		return err
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 	return dir.Sync()
 }
 
@@ -564,7 +573,7 @@ func validDigest(digest string) bool {
 		return false
 	}
 	for _, r := range digest {
-		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
 			return false
 		}
 	}
@@ -610,7 +619,7 @@ func (t *transaction) record(c txChange) error {
 func (t *transaction) writeJournal() error {
 	changes := make([]recoveryChange, 0, len(t.changes))
 	for _, change := range t.changes {
-		changes = append(changes, recoveryChange{Name: change.Name, Old: change.Old, New: change.New, Existed: change.Existed, Phase: change.Phase})
+		changes = append(changes, recoveryChange(change))
 	}
 	raw, err := json.Marshal(recoveryJournal{Schema: 2, ID: strings.TrimPrefix(t.id, transactionPrefix), Transaction: t.id, Changes: changes})
 	if err != nil {
@@ -621,7 +630,7 @@ func (t *transaction) writeJournal() error {
 		return err
 	}
 	name := tmp.Name()
-	defer os.Remove(name)
+	defer func() { _ = os.Remove(name) }()
 	if _, err = tmp.Write(raw); err != nil {
 		_ = tmp.Close()
 		return err
@@ -755,7 +764,7 @@ func digestAt(root, name string) (exists bool, digest string, err error) {
 	if err != nil {
 		return false, "", err
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 	info, err := dir.Lstat(name)
 	if errors.Is(err, fs.ErrNotExist) {
 		return false, "", nil
@@ -964,7 +973,7 @@ func (t *transaction) rollback() error {
 	var rollbackErr error
 	for i := len(t.changes) - 1; i >= 0; i-- {
 		c := t.changes[i]
-		if err := restoreChange(t.dir, t.transactionDir(), recoveryChange{Name: c.Name, Old: c.Old, New: c.New, Existed: c.Existed, Phase: c.Phase}); err != nil {
+		if err := restoreChange(t.dir, t.transactionDir(), recoveryChange(c)); err != nil {
 			rollbackErr = errors.Join(rollbackErr, err)
 			continue
 		}
