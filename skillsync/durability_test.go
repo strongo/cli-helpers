@@ -38,6 +38,12 @@ type syncFaultFile struct {
 
 func (f syncFaultFile) Sync() error { return f.err }
 
+type replacementContentFile struct{ durableFile }
+
+func (f replacementContentFile) Write(data []byte) (int, error) {
+	return f.durableFile.Write([]byte(strings.Repeat("x", len(data))))
+}
+
 func withDurableFileOperations(t *testing.T, mutate func(*durableFileOperationSet)) {
 	t.Helper()
 	previous := durableFileOperations
@@ -848,6 +854,126 @@ func TestRemoveFailureBoundariesPreserveTarget(t *testing.T) {
 			t.Fatalf("target=%q err=%v", got, readErr)
 		}
 	})
+}
+
+func TestReplaceAndCopyRemainingFaultPaths(t *testing.T) {
+	source := fstest.MapFS{"alpha/SKILL.md": &fstest.MapFile{Data: []byte("new")}}
+	newDigest, err := subtreeDigest(source, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("replace start failure", func(t *testing.T) {
+		tx := newTransaction(filepath.Join(t.TempDir(), "target"))
+		startErr := errors.New("start")
+		previous := transactionOperations
+		t.Cleanup(func() { transactionOperations = previous })
+		transactionOperations.mkdirAll = func(string, fs.FileMode) error { return startErr }
+		if err := tx.replace(source, nil, "alpha", "", newDigest); !errors.Is(err, startErr) {
+			t.Fatalf("replace=%v", err)
+		}
+	})
+	t.Run("replace rejects unsafe proof and target", func(t *testing.T) {
+		dir := t.TempDir()
+		tx := newTransaction(dir)
+		tx.id = transactionPrefix + "proof"
+		if err := os.Mkdir(filepath.Join(dir, tx.id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, tx.id, "proof"), []byte("unsafe"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.replace(source, nil, "alpha", "", newDigest); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("proof=%v", err)
+		}
+		dir = t.TempDir()
+		if err := os.Symlink(filepath.Join(dir, "outside"), filepath.Join(dir, "alpha")); err != nil {
+			t.Fatal(err)
+		}
+		tx = newTransaction(dir)
+		if err := tx.replace(source, nil, "alpha", "", newDigest); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("target=%v", err)
+		}
+	})
+	t.Run("replace rejects corrupted proof bytes", func(t *testing.T) {
+		tx := newTransaction(t.TempDir())
+		withDurableFileOperations(t, func(ops *durableFileOperationSet) {
+			original, calls := ops.createFile, 0
+			ops.createFile = func(path string, mode fs.FileMode) (durableFile, error) {
+				file, err := original(path, mode)
+				if err != nil {
+					return nil, err
+				}
+				calls++
+				if calls == 2 {
+					return replacementContentFile{durableFile: file}, nil
+				}
+				return file, nil
+			}
+		})
+		if err := tx.replace(source, nil, "alpha", "", newDigest); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("proof=%v", err)
+		}
+	})
+	t.Run("replace rejects unsafe backup", func(t *testing.T) {
+		dir := t.TempDir()
+		old := writeRecoverySkill(t, dir, "alpha", "old")
+		tx := newTransaction(dir)
+		tx.id = transactionPrefix + "backup"
+		if err := os.Mkdir(filepath.Join(dir, tx.id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, tx.id, "backup"), []byte("unsafe"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.replace(source, nil, "alpha", old, newDigest); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("backup=%v", err)
+		}
+	})
+	t.Run("copy mkdir failure", func(t *testing.T) {
+		mkdirErr := errors.New("mkdir")
+		previous := transactionOperations
+		t.Cleanup(func() { transactionOperations = previous })
+		transactionOperations.mkdirAll = func(string, fs.FileMode) error { return mkdirErr }
+		if err := copySkill(source, "alpha", filepath.Join(t.TempDir(), "stage"), nil); !errors.Is(err, mkdirErr) {
+			t.Fatalf("copy=%v", err)
+		}
+	})
+}
+
+func TestMutationBackupDirectoryFaults(t *testing.T) {
+	source := fstest.MapFS{"alpha/SKILL.md": &fstest.MapFile{Data: []byte("new")}}
+	newDigest, err := subtreeDigest(source, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, removal := range []bool{false, true} {
+		t.Run(map[bool]string{false: "replace", true: "remove"}[removal], func(t *testing.T) {
+			dir := t.TempDir()
+			old := writeRecoverySkill(t, dir, "alpha", "old")
+			tx := newTransaction(dir)
+			mkdirErr := errors.New("backup mkdir")
+			previous := transactionOperations
+			t.Cleanup(func() { transactionOperations = previous })
+			transactionOperations.mkdirAll = func(path string, mode fs.FileMode) error {
+				if filepath.Base(path) == "backup" {
+					return mkdirErr
+				}
+				return previous.mkdirAll(path, mode)
+			}
+			var got error
+			if removal {
+				got = tx.remove("alpha", old)
+			} else {
+				got = tx.replace(source, nil, "alpha", old, newDigest)
+			}
+			if !errors.Is(got, mkdirErr) {
+				t.Fatalf("mutation=%v", got)
+			}
+			if data, readErr := os.ReadFile(filepath.Join(dir, "alpha", "SKILL.md")); readErr != nil || string(data) != "old" {
+				t.Fatalf("target=%q err=%v", data, readErr)
+			}
+		})
+	}
 }
 
 func TestRecoveryRetriesDirectorySyncBeforeDiscardingEvidence(t *testing.T) {
