@@ -129,6 +129,25 @@ embedded descriptor and digest before a caller can sync it. The same producer
 MUST also emit an embed-ready directory; local, embedded, archived, and
 installed content reproduce the same mode-aware digest.
 
+### REQ: reusable-committed-snapshot-producer
+
+`skillsync/producer` and `cmd/skillsbundle` MUST let any CLI or publishable
+plugin CI produce `skillsync-bundle.tar`, `skillsync-bundle.json`, and
+`embed/{bundle.json,content/...}` from one captured image. Input requires
+plugin identity, repository, safe source path, full immutable commit SHA,
+plugin version, compatibility bounds, and an optional precomputed digest. CI
+resolves branches and tags before invocation; the producer performs no network
+fetch. It MUST read only the declared committed Git tree, reject untracked
+checkout state, symlinks, gitlinks, special entries, unsafe paths, and
+non-regular modes, preserve tracked dotfiles and executable modes, calculate or
+verify the digest with the shared mode-aware implementation, and validate the
+descriptor against captured bytes before publication. A fresh output directory
+is required. Every Git invocation MUST disable local replacement objects,
+separate bounded stderr from blob stdout, and bound tree/blob/archive bytes and
+file count to the default archive-consumer limits before publication. If an origin exists, the declared repository MUST agree with it;
+an originless local repository verifies commit/tree provenance but cannot
+independently attest its repository identity.
+
 ### REQ: explicit-newer-compatible-release
 
 Only explicit newer-compatible selection MAY use the GitHub Releases API. It
@@ -235,6 +254,18 @@ incompatible, corrupt, and compatible archive assets, when a user explicitly
 selects newer-compatible sync, then the adapter reads bounded release and asset
 responses, skips ineligible entries, validates the selected archive before
 sync, and retains the matched bundle when no compatible newer release exists.
+
+### AC: canonical-producer-parity
+
+Given a local plugin repository with two commits, dirty checkout files,
+tracked dotfiles, and an executable resource, when CI invokes `skillsbundle`
+with the first full commit SHA, then archive, companion descriptor, embed tree,
+and a synced installation reproduce the same verified digest, bytes, and
+executable mode from that first commit. Repeated builds are byte-identical;
+stale metadata, short SHAs, unsafe committed tree entries, origin disagreement,
+local Git replacement objects, consumer-limit overflow, an existing output path,
+and output failures are reported without completed
+publication.
 
 ## Open Questions
 

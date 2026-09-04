@@ -69,6 +69,51 @@ Historical `github.com/strongo/selfupdate` tags remain available at their
 published versions. New `github.com/strongo/cli-helpers` releases use the new
 module path, so consumers must not request the old path at `@latest`.
 
+## Build a publishable skills snapshot
+
+`cmd/skillsbundle` is the shared, offline producer for every Strongo CLI and
+skills plugin. CI resolves a branch or tag to its full commit SHA first, checks
+out the plugin repository locally, and invokes the producer against that exact
+committed tree. It never reads uncommitted or ignored checkout files, fetches
+the network, or accepts a short SHA.
+
+Create a descriptor with plugin identity, repository, source path, full
+revision, plugin version, and optional CLI compatibility bounds. `digest` may
+be omitted; if supplied it must match the committed content. `source.version`
+is the plugin's own version, independent of any CLI release tag.
+
+```json
+{"plugin":{"publisher":"strongo","name":"example-skills"},"source":{"repository":"github.com/strongo/example-skills","path":"skills","revision":"0123456789012345678901234567890123456789","version":"1.2.3"}}
+```
+
+Run it from a colocated CLI repository or from a separately checked-out plugin
+repository:
+
+```sh
+go run github.com/strongo/cli-helpers/cmd/skillsbundle \
+  --descriptor ci/skills-bundle.json --repo "$GITHUB_WORKSPACE" --out dist/skills
+```
+
+The fresh output directory contains `skillsync-bundle.tar`,
+`skillsync-bundle.json`, and `embed/{bundle.json,content/...}`. All come from
+one captured committed snapshot, preserving tracked dotfiles and executable
+modes. If `origin` exists, its normalized repository identity must agree with
+the descriptor; without one, the tool verifies local Git commit/tree provenance
+but cannot independently attest the repository name. It never overwrites an
+existing output path and returns an error rather than claiming publication on a
+partial failure.
+
+Use `all:` when embedding the generated directory so tracked dotfiles remain
+available to the embedded snapshot. The descriptor retains executable paths,
+because `embed.FS` does not preserve executable modes.
+
+```go
+import "embed"
+
+//go:embed all:generated/skills/embed
+var generatedSkills embed.FS
+```
+
 ## Wiring example
 
 A minimal CLI wires one `Config` and builds a Cobra command from it:
