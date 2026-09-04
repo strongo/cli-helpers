@@ -62,7 +62,7 @@ func validateBundle(b Bundle, current string) ([]skill, error) {
 	if err != nil {
 		return nil, err
 	}
-	if (b.Source.Compatibility.MinCLI != "" && !validVersion(b.Source.Compatibility.MinCLI)) || (b.Source.Compatibility.MaxCLI != "" && !validVersion(b.Source.Compatibility.MaxCLI)) {
+	if !validCompatibility(b.Source.Compatibility) {
 		return nil, fmt.Errorf("%w: invalid CLI compatibility bounds", ErrInvalidConfig)
 	}
 	if current != "" && !compatible(current, b.Source.Compatibility) {
@@ -109,7 +109,7 @@ func validateBundle(b Bundle, current string) ([]skill, error) {
 }
 
 func validSource(s Source) bool {
-	return s.Repository != "" && s.Path != "" && validRevision(s.Revision) && validVersion(s.Version) && validDigest(s.Digest) && fs.ValidPath(s.Path)
+	return s.Repository != "" && s.Path != "" && validRevision(s.Revision) && validVersion(s.Version) && validDigest(s.Digest) && fs.ValidPath(s.Path) && validCompatibility(s.Compatibility)
 }
 
 func validRevision(revision string) bool {
@@ -262,13 +262,20 @@ func legacyWBDigest(source fs.FS, root string) (string, error) {
 }
 
 func compatible(current string, c Compatibility) bool {
-	if (c.MinCLI != "" || c.MaxCLI != "") && !validVersion(current) {
+	if !validCompatibility(c) || (c.MinCLI != "" || c.MaxCLI != "") && !validVersion(current) {
 		return false
 	}
 	if c.MinCLI != "" && versionCompare(current, c.MinCLI) < 0 {
 		return false
 	}
 	return c.MaxCLI == "" || versionCompare(current, c.MaxCLI) <= 0
+}
+
+func validCompatibility(c Compatibility) bool {
+	if c.MinCLI != "" && !validVersion(c.MinCLI) || c.MaxCLI != "" && !validVersion(c.MaxCLI) {
+		return false
+	}
+	return c.MinCLI == "" || c.MaxCLI == "" || versionCompare(c.MinCLI, c.MaxCLI) <= 0
 }
 
 // Compatible reports whether a semantic CLI version satisfies compatibility.
@@ -307,6 +314,13 @@ func validVersion(v string) bool {
 		}
 	}
 	return true
+}
+
+// validCurrentCLIVersion accepts the stable semantic versions used for
+// compatibility plus the deliberate development-build labels Go CLIs expose.
+// Source and release versions remain stricter: they use validVersion.
+func validCurrentCLIVersion(v string) bool {
+	return validVersion(v) || v == "(devel)" || v == "unknown" || v == "dev"
 }
 func versionCompare(a, b string) int {
 	a = strings.TrimPrefix(a, "v")

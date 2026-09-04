@@ -24,7 +24,10 @@ var (
 
 // Identity identifies the CLI that supplied a bundle. It is recorded as
 // provenance only; plugin ownership always uses PluginIdentity.
-type Identity struct{ Publisher, Name string }
+type Identity struct {
+	Publisher string `json:"publisher"`
+	Name      string `json:"name"`
+}
 
 func (i Identity) String() string {
 	return i.Publisher + "/" + i.Name
@@ -32,7 +35,10 @@ func (i Identity) String() string {
 
 // PluginIdentity is globally stable and deliberately separate from a skill
 // directory name, which avoids flat-directory collisions between products.
-type PluginIdentity struct{ Publisher, Name string }
+type PluginIdentity struct {
+	Publisher string `json:"publisher"`
+	Name      string `json:"name"`
+}
 
 func (p PluginIdentity) String() string {
 	return p.Publisher + "/" + p.Name
@@ -41,7 +47,10 @@ func (p PluginIdentity) String() string {
 // Compatibility limits the CLI versions a bundle can be installed by. Empty
 // bounds are open; values use numeric dot-separated versions, optionally with
 // a leading "v". Pre-release selection is intentionally host policy.
-type Compatibility struct{ MinCLI, MaxCLI string }
+type Compatibility struct {
+	MinCLI string `json:"min_cli,omitempty"`
+	MaxCLI string `json:"max_cli,omitempty"`
+}
 
 // Source is reproducible bundle provenance. Repository, Path, Revision, and
 // Digest identify exact bytes; Version names the plugin release for people
@@ -69,9 +78,9 @@ type Bundle struct {
 // common loader for go:embed snapshots, so hosts need not duplicate fs.Sub,
 // source-provenance validation, or digest checks.
 type BundleDescriptor struct {
-	Plugin          PluginIdentity
-	Source          Source
-	ExecutablePaths []string
+	Plugin          PluginIdentity `json:"plugin"`
+	Source          Source         `json:"source"`
+	ExecutablePaths []string       `json:"executable_paths,omitempty"`
 }
 
 // EmbeddedBundle binds one canonical embedded tree to its immutable metadata.
@@ -90,7 +99,7 @@ func ValidateDescriptor(d BundleDescriptor) error {
 	if !validPlugin(d.Plugin) || !validSource(d.Source) {
 		return fmt.Errorf("%w: descriptor requires plugin and source", ErrInvalidConfig)
 	}
-	if (d.Source.Compatibility.MinCLI != "" && !validVersion(d.Source.Compatibility.MinCLI)) || (d.Source.Compatibility.MaxCLI != "" && !validVersion(d.Source.Compatibility.MaxCLI)) {
+	if !validCompatibility(d.Source.Compatibility) {
 		return fmt.Errorf("%w: invalid CLI compatibility bounds", ErrInvalidConfig)
 	}
 	seen := map[string]bool{}
@@ -210,32 +219,55 @@ const (
 // Skill is one valid skill directory in a bundle.
 type Skill struct{ Name, Digest string }
 type Report struct {
-	Dir     string           `json:"dir"`
-	CLI     Identity         `json:"cli"`
-	DryRun  bool             `json:"dry_run"`
-	Bundles []ResolvedBundle `json:"bundles"`
-	Changes []Change         `json:"changes"`
+	Dir        string           `json:"dir"`
+	CLI        Identity         `json:"cli"`
+	CLIVersion string           `json:"cli_version"`
+	DryRun     bool             `json:"dry_run"`
+	Bundles    []ResolvedBundle `json:"bundles"`
+	Changes    []Change         `json:"changes"`
 }
 type ResolvedBundle struct {
-	Plugin PluginIdentity `json:"plugin"`
-	Source Source         `json:"source"`
+	Plugin          PluginIdentity `json:"plugin"`
+	Source          Source         `json:"source"`
+	PriorCLIVersion string         `json:"prior_cli_version,omitempty"`
 }
 
 // Status is the marker-only query hosts use for drift banners; it never walks
 // installed skill trees or contacts a release source.
 type Status struct {
-	Installed bool
-	Plugins   map[string]Source
+	Installed           bool                         `json:"installed"`
+	Plugins             map[string]Source            `json:"plugins"`
+	SupplierCLIVersions map[string]map[string]string `json:"supplier_cli_versions,omitempty"`
 }
 
 func (r Report) Names(a Action) []string {
-	var names []string
+	return r.NamesFor(a)
+}
+
+// ChangesFor returns action-matched changes, optionally limited to exact
+// mutation outcomes. It keeps renderers from mistaking restored work for a
+// completed update.
+func (r Report) ChangesFor(a Action, outcomes ...Outcome) []Change {
+	accepted := map[Outcome]bool{}
+	for _, outcome := range outcomes {
+		accepted[outcome] = true
+	}
+	changes := make([]Change, 0)
 	for _, c := range r.Changes {
-		if c.Action == a {
-			names = append(names, c.Name)
+		if c.Action == a && (len(accepted) == 0 || accepted[c.Outcome]) {
+			changes = append(changes, c)
 		}
 	}
-	sort.Strings(names)
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Name < changes[j].Name })
+	return changes
+}
+
+// NamesFor returns names from ChangesFor in deterministic order.
+func (r Report) NamesFor(a Action, outcomes ...Outcome) []string {
+	var names []string
+	for _, c := range r.ChangesFor(a, outcomes...) {
+		names = append(names, c.Name)
+	}
 	return names
 }
 func (r Report) Changed() bool {
