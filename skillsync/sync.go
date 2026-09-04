@@ -640,15 +640,6 @@ func rootedRemoveAll(rootPath, path string) error {
 	return transactionOperations.removeAll(root, rel)
 }
 
-func syncDirectory(path string) error {
-	dir, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = dir.Close() }()
-	return dir.Sync()
-}
-
 func syncTransactionDirectories(paths ...string) error {
 	seen := map[string]bool{}
 	for _, path := range paths {
