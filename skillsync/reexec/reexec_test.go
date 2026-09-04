@@ -90,6 +90,9 @@ func TestRunnerValidationFailuresPreserveFilesystemCause(t *testing.T) {
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("missing error = %v; want fs.ErrNotExist", err)
 	}
+	if !strings.Contains(err.Error(), `arguments ["skills" "sync"]`) {
+		t.Fatalf("missing executable retry omits effective default arguments: %v", err)
+	}
 	var pathErr *fs.PathError
 	if !errors.As(err, &pathErr) {
 		t.Fatalf("missing error = %T; want *fs.PathError", err)

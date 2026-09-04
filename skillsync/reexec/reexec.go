@@ -23,16 +23,16 @@ func (r Runner) Run(ctx context.Context, executable string) error {
 	if !filepath.IsAbs(executable) {
 		return fmt.Errorf("skills refresh executable must be absolute: %q", executable)
 	}
-	info, err := os.Stat(executable)
-	if err != nil {
-		return refreshError(executable, r.Args, fmt.Errorf("stat executable: %w", err))
-	}
-	if !info.Mode().IsRegular() {
-		return refreshError(executable, r.Args, fmt.Errorf("executable is not a regular file"))
-	}
 	args := r.Args
 	if len(args) == 0 {
 		args = []string{"skills", "sync"}
+	}
+	info, err := os.Stat(executable)
+	if err != nil {
+		return refreshError(executable, args, fmt.Errorf("stat executable: %w", err))
+	}
+	if !info.Mode().IsRegular() {
+		return refreshError(executable, args, fmt.Errorf("executable is not a regular file"))
 	}
 	timeout := r.Timeout
 	if timeout <= 0 {
