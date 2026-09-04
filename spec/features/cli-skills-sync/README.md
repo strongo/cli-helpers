@@ -117,6 +117,14 @@ only when that snapshot has no compatibility bounds. The former WB marker's
 path-and-bytes hash is accepted only to verify one migration; the new marker
 records the mode-aware digest before any legacy-content replacement can begin.
 
+The canonical descriptor, archive, embedding, public `Digest` APIs, and source
+authentication remain mode-aware on every platform. Windows cannot retain
+POSIX execute bits on installed regular files, so its private installed-target,
+transaction-stage, proof, backup, recovery, and ownership digests normalize
+only executable bits for both expected and observed copies. A mode-only source
+revision still changes canonical source metadata and requires a newly verified
+bundle; Windows does not claim to preserve that physical execute-bit change.
+
 ### REQ: reproducible-bundle-artifact
 
 The provider MUST produce one bounded archive format containing a complete
@@ -247,6 +255,15 @@ isolated installed location, then all declared entrypoints, assets, and
 executable permissions work without a checkout-relative path. Their content and
 mode manifests reproduce the same digest.
 
+### AC: windows-executable-resource
+
+Given a bundle with a declared executable resource, when Windows installs it,
+repeats sync, updates its bytes, recovers an interrupted publication, removes
+the skill, or detects a local byte edit, then each installed-target and recovery
+comparison ignores only unavailable execute bits, preserves byte conflicts, and
+never weakens canonical descriptor, archive, embedding, or source mode
+authentication.
+
 ### AC: published-newer-compatible-bundle
 
 Given paginated GitHub Release responses containing draft, prerelease,
@@ -266,6 +283,16 @@ stale metadata, short SHAs, unsafe committed tree entries, origin disagreement,
 local Git replacement objects, consumer-limit overflow, an existing output path,
 and output failures are reported without completed
 publication.
+
+### AC: refreshed-bundle-after-successful-binary-update
+
+Given a CLI has replaced its binary successfully, when its self-update
+integration starts the skills refresh callback, then it executes the resolved
+new executable directly with a structured `skills sync` argv and installs that
+new binary's matched embedded bundle. A refresh failure is a non-fatal
+self-update warning that names a direct retry using the executable and argv;
+the completed binary update and the existing skills remain distinguishable.
+Check, dry-run, declined, and checksum-failed updates do not start a refresh.
 
 ## Open Questions
 

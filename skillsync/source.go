@@ -5,12 +5,19 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 )
 
 type skill struct{ Name, Digest string }
+
+// installedDigestNormalizesExecutableModes reflects filesystems that cannot
+// preserve POSIX execute bits. It affects only the private digest used to
+// prove installed targets and transaction copies; BundleDescriptor.Source and
+// the public Digest APIs remain mode-aware on every platform.
+var installedDigestNormalizesExecutableModes = runtime.GOOS == "windows"
 
 // Discover lists valid skill directories and their deterministic digests.
 func Discover(source fs.FS) ([]Skill, error) {
@@ -62,9 +69,6 @@ func validateBundle(b Bundle, current string) ([]skill, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !validCompatibility(b.Source.Compatibility) {
-		return nil, fmt.Errorf("%w: invalid CLI compatibility bounds", ErrInvalidConfig)
-	}
 	if current != "" && !compatible(current, b.Source.Compatibility) {
 		return nil, fmt.Errorf("%w: %s is incompatible with CLI %s", ErrInvalidConfig, b.Plugin.String(), current)
 	}
@@ -95,7 +99,7 @@ func validateBundle(b Bundle, current string) ([]skill, error) {
 		if !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("%w: %s/SKILL.md is not a regular file", ErrInvalidConfig, name)
 		}
-		h, err := digestTree(b.FS, name, executables)
+		h, err := installedSubtreeDigest(b.FS, name, executables)
 		if err != nil {
 			return nil, fmt.Errorf("digest skill %s: %w", name, err)
 		}
@@ -187,7 +191,16 @@ func DigestWithExecutables(source fs.FS, executablePaths []string) (string, erro
 func subtreeDigest(source fs.FS, root string) (string, error) {
 	return digestTree(source, root, nil)
 }
+
+func installedSubtreeDigest(source fs.FS, root string, executables map[string]bool) (string, error) {
+	return digestTreeWithMode(source, root, executables, installedDigestNormalizesExecutableModes)
+}
+
 func digestTree(source fs.FS, root string, executables map[string]bool) (string, error) {
+	return digestTreeWithMode(source, root, executables, false)
+}
+
+func digestTreeWithMode(source fs.FS, root string, executables map[string]bool, normalizeExecutableModes bool) (string, error) {
 	h := sha256.New()
 	err := fs.WalkDir(source, root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -212,7 +225,7 @@ func digestTree(source fs.FS, root string, executables map[string]bool) (string,
 			return err
 		}
 		mode := fs.FileMode(0o644)
-		if executables[path] || executables == nil && info.Mode().Perm()&0o111 != 0 {
+		if !normalizeExecutableModes && (executables[path] || executables == nil && info.Mode().Perm()&0o111 != 0) {
 			mode = 0o755
 		}
 		// hash.Hash.Write never returns an error. Keep the byte format explicit

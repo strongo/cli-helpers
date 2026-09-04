@@ -48,6 +48,11 @@ func (e statePublishedError) Unwrap() error { return e.err }
 
 var stateDirectorySync = syncDirectory
 
+// installedSkillDigest is an internal failure boundary for legacy-marker
+// migration. It models a source tree that disappears after its legacy digest
+// has been checked but before the modern ownership digest is recorded.
+var installedSkillDigest = installedDigest
+
 // durableFileOperations keeps failure injection private to the package tests.
 // Production callers always use the os-backed defaults below.
 type durableFile interface {
@@ -267,7 +272,7 @@ func importLegacy(dir string, legacy LegacyImport, suppliedCLI ...Identity) (plu
 		if actual != expected {
 			return pluginState{}, fmt.Errorf("%w: legacy %s content differs", ErrStateCorrupt, name)
 		}
-		modern, err := installedDigest(dir, name)
+		modern, err := installedSkillDigest(dir, name)
 		if err != nil {
 			return pluginState{}, fmt.Errorf("%w: digest legacy %s: %v", ErrStateCorrupt, name, err)
 		}
