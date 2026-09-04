@@ -205,7 +205,6 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 	var operations []operation
 	for _, rb := range bundles {
 		if err := ctx.Err(); err != nil {
-			_ = tx.rollback()
 			return report, err
 		}
 		key := rb.Bundle.Plugin.String()
@@ -236,7 +235,6 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 				action, reason = Conflict, "requested by multiple plugins"
 			}
 			if err != nil {
-				_ = tx.rollback()
 				return report, err
 			}
 			report.Changes = append(report.Changes, Change{Plugin: rb.Bundle.Plugin, Name: item.Name, Action: action, Reason: reason})
@@ -257,7 +255,6 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 			}
 			action, reason, err := classifyRemoval(opts.Dir, name, oldDigest, owners, key)
 			if err != nil {
-				_ = tx.rollback()
 				return report, err
 			}
 			report.Changes = append(report.Changes, Change{Plugin: rb.Bundle.Plugin, Name: name, Action: action, Reason: reason})
@@ -367,6 +364,9 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 	}
 	if statesEqual(current, next) {
 		if err := tx.commit(); err != nil {
+			if errors.Is(err, ErrStateCorrupt) {
+				markOutcomes(&report, operations, tx, Restored, Incomplete)
+			}
 			return report, fmt.Errorf("finalize skills transaction: %w", err)
 		}
 		return report, nil
@@ -391,6 +391,9 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 	}
 	transactionBoundary("state")
 	if err := tx.commit(); err != nil {
+		if errors.Is(err, ErrStateCorrupt) {
+			markOutcomes(&report, operations, tx, Restored, Incomplete)
+		}
 		return report, fmt.Errorf("finalize skills transaction: %w", err)
 	}
 	return report, nil
@@ -828,6 +831,9 @@ func recoverTransaction(dir string) error {
 			if err := verifyCommittedChange(dir, c); err != nil {
 				return err
 			}
+			if err := verifyBackupChange(txDir, c); err != nil {
+				return err
+			}
 		}
 		if err := stateDirectorySync(dir); err != nil {
 			return fmt.Errorf("persist committed skills ownership: %w", err)
@@ -980,6 +986,27 @@ func verifyCommittedChange(dir string, c recoveryChange) error {
 	return nil
 }
 
+// verifyBackupChange preserves a copy captured after classification until the
+// transaction is conclusively finalized. A target can change in the small
+// interval between its last digest check and the rename into backup; accepting
+// that different backup would silently discard user content during cleanup.
+func verifyBackupChange(txDir string, c recoveryChange) error {
+	if !c.Existed {
+		return nil
+	}
+	if err := checkTransactionSubdir(txDir, "backup"); err != nil {
+		return err
+	}
+	exists, digest, err := digestAt(filepath.Join(txDir, "backup"), c.Name)
+	if err != nil {
+		return err
+	}
+	if exists && digest != c.Old {
+		return fmt.Errorf("%w: backup %s changed after capture", ErrStateCorrupt, c.Name)
+	}
+	return nil
+}
+
 func restoreChange(dir, txDir string, c recoveryChange) error {
 	targetExists, targetDigest, err := digestAt(dir, c.Name)
 	if err != nil {
@@ -1048,6 +1075,12 @@ func restoreChange(dir, txDir string, c recoveryChange) error {
 
 func finalizeJournal(path, txDir string) error {
 	root := filepath.Dir(txDir)
+	if path != filepath.Join(root, recoveryFileName) || filepath.Base(txDir) == transactionPrefix || !strings.HasPrefix(filepath.Base(txDir), transactionPrefix) {
+		return fmt.Errorf("%w: recovery cleanup paths are unsafe", ErrStateCorrupt)
+	}
+	if err := validTransactionDir(txDir); err != nil {
+		return err
+	}
 	if err := rootedRemoveAll(root, txDir); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
@@ -1131,6 +1164,9 @@ func (t *transaction) replace(source fs.FS, executablePaths []string, name, old,
 		if err := t.syncRenameParents(target, backup); err != nil {
 			return err
 		}
+		if err := verifyBackupChange(t.transactionDir(), recoveryChange(c)); err != nil {
+			return err
+		}
 		transactionBoundary("backup")
 		if err := t.setPhase(index, "backed_up"); err != nil {
 			return err
@@ -1180,10 +1216,19 @@ func (t *transaction) remove(name, old string) error {
 	if err := t.syncRenameParents(filepath.Join(t.dir, name), backup); err != nil {
 		return err
 	}
+	if err := verifyBackupChange(t.transactionDir(), recoveryChange(c)); err != nil {
+		return err
+	}
 	transactionBoundary("backup")
 	return t.setPhase(len(t.changes)-1, "backed_up")
 }
 func (t *transaction) rollback() error {
+	// Planning never starts a transaction. In particular, an unstarted
+	// transaction's transactionDir is t.dir, so finalizing it would otherwise
+	// treat the caller's complete target as disposable recovery evidence.
+	if t.id == "" {
+		return nil
+	}
 	var rollbackErr error
 	for i := len(t.changes) - 1; i >= 0; i-- {
 		c := t.changes[i]
@@ -1202,6 +1247,11 @@ func (t *transaction) restored(name string) bool { return t.restoredNames[name] 
 func (t *transaction) commit() error {
 	if t.id == "" {
 		return nil
+	}
+	for _, change := range t.changes {
+		if err := verifyBackupChange(t.transactionDir(), recoveryChange(change)); err != nil {
+			return err
+		}
 	}
 	return finalizeJournal(filepath.Join(t.dir, recoveryFileName), t.transactionDir())
 }
