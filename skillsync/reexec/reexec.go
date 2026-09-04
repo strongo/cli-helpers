@@ -23,16 +23,16 @@ func (r Runner) Run(ctx context.Context, executable string) error {
 	if !filepath.IsAbs(executable) {
 		return fmt.Errorf("skills refresh executable must be absolute: %q", executable)
 	}
-	info, err := os.Stat(executable)
-	if err != nil {
-		return fmt.Errorf("stat skills refresh executable: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("skills refresh executable is not a regular file: %s", executable)
-	}
 	args := r.Args
 	if len(args) == 0 {
 		args = []string{"skills", "sync"}
+	}
+	info, err := os.Stat(executable)
+	if err != nil {
+		return refreshError(executable, args, fmt.Errorf("stat executable: %w", err))
+	}
+	if !info.Mode().IsRegular() {
+		return refreshError(executable, args, fmt.Errorf("executable is not a regular file"))
 	}
 	timeout := r.Timeout
 	if timeout <= 0 {
@@ -45,9 +45,18 @@ func (r Runner) Run(ctx context.Context, executable string) error {
 	cmd.Stderr = r.Stderr
 	if err := cmd.Run(); err != nil {
 		if runCtx.Err() != nil {
-			return fmt.Errorf("skills refresh: %w", runCtx.Err())
+			return refreshError(executable, args, runCtx.Err())
 		}
-		return fmt.Errorf("skills refresh: %w", err)
+		return refreshError(executable, args, err)
 	}
 	return nil
+}
+
+func refreshError(executable string, args []string, cause error) error {
+	return fmt.Errorf(
+		"skills refresh failed for executable %q with arguments %q; retry with direct execution using the same executable and arguments: %w",
+		executable,
+		args,
+		cause,
+	)
 }
