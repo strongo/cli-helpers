@@ -117,6 +117,14 @@ only when that snapshot has no compatibility bounds. The former WB marker's
 path-and-bytes hash is accepted only to verify one migration; the new marker
 records the mode-aware digest before any legacy-content replacement can begin.
 
+The canonical descriptor, archive, embedding, public `Digest` APIs, and source
+authentication remain mode-aware on every platform. Windows cannot retain
+POSIX execute bits on installed regular files, so its private installed-target,
+transaction-stage, proof, backup, recovery, and ownership digests normalize
+only executable bits for both expected and observed copies. A mode-only source
+revision still changes canonical source metadata and requires a newly verified
+bundle; Windows does not claim to preserve that physical execute-bit change.
+
 ### REQ: reproducible-bundle-artifact
 
 The provider MUST produce one bounded archive format containing a complete
@@ -246,6 +254,15 @@ revision, when each declared skill and its references are resolved from an
 isolated installed location, then all declared entrypoints, assets, and
 executable permissions work without a checkout-relative path. Their content and
 mode manifests reproduce the same digest.
+
+### AC: windows-executable-resource
+
+Given a bundle with a declared executable resource, when Windows installs it,
+repeats sync, updates its bytes, recovers an interrupted publication, removes
+the skill, or detects a local byte edit, then each installed-target and recovery
+comparison ignores only unavailable execute bits, preserves byte conflicts, and
+never weakens canonical descriptor, archive, embedding, or source mode
+authentication.
 
 ### AC: published-newer-compatible-bundle
 

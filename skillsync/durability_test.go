@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -567,8 +568,11 @@ func TestCopySkillAndLockFailClosed(t *testing.T) {
 			t.Fatal(err)
 		}
 		info, err := os.Stat(filepath.Join(stage, "alpha", "SKILL.md"))
-		if err != nil || info.Mode().Perm() != 0o755 {
+		if err != nil {
 			t.Fatalf("mode=%v err=%v", info.Mode(), err)
+		}
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
+			t.Fatalf("mode=%v", info.Mode())
 		}
 	})
 	for _, tc := range []struct {
