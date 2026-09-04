@@ -1,26 +1,37 @@
-// Package cobracmd exposes the optional Cobra wiring for skillsync. The core
-// package deliberately contains no command-framework imports.
+// Package cobracmd exposes optional Cobra wiring for skillsync. It owns
+// command input, target selection, aggregation, and host error mapping; the
+// core package remains command-framework free.
 package cobracmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
+
 	"github.com/strongo/cli-helpers/skillsync"
 	"github.com/strongo/cli-helpers/skillsync/cliui"
 )
 
-// ErrorMapper lets each host retain its existing usage/failure/findings exit
-// conventions. The adapter itself never chooses an exit code.
+// UsageError identifies invalid Cobra input before source preparation or any
+// target write. It preserves its cause for hosts using errors.Is/As.
+type UsageError struct{ Err error }
+
+func (e *UsageError) Error() string { return e.Err.Error() }
+func (e *UsageError) Unwrap() error { return e.Err }
+
+// ErrorMapper lets a host retain its own exit-code and error convention.
 type ErrorMapper interface {
 	Failure(error) error
 	Conflict(skillsync.Report) error
 }
 
-// Harness describes a supported Agent Skills discovery location.
+// Harness describes one Agent Skills configuration root.
 type Harness struct {
 	ID        string
 	Aliases   []string
@@ -31,19 +42,37 @@ type Harness struct {
 func (h Harness) SkillsDir(home string, getenv func(string) string) string {
 	root := filepath.Join(home, h.ConfigRel)
 	if h.ConfigEnv != "" {
-		if v := strings.TrimSpace(getenv(h.ConfigEnv)); v != "" {
-			root = v
+		if value := strings.TrimSpace(getenv(h.ConfigEnv)); value != "" {
+			root = value
 		}
 	}
 	return filepath.Join(root, "skills")
 }
+
 func (h Harness) Present(home string, getenv func(string) string) bool {
 	info, err := os.Stat(filepath.Dir(h.SkillsDir(home, getenv)))
 	return err == nil && info.IsDir()
 }
 
-// DefaultHarnesses preserves WB's Claude, Cursor, and Codex target semantics.
-var DefaultHarnesses = []Harness{{ID: "claude", Aliases: []string{"claude-code"}, ConfigRel: ".claude", ConfigEnv: "CLAUDE_CONFIG_DIR"}, {ID: "cursor", ConfigRel: ".cursor"}, {ID: "codex", ConfigRel: ".codex", ConfigEnv: "CODEX_HOME"}}
+// DefaultHarnesses preserves WB's Claude, Cursor, and Codex conventions.
+var DefaultHarnesses = []Harness{
+	{ID: "claude", Aliases: []string{"claude-code"}, ConfigRel: ".claude", ConfigEnv: "CLAUDE_CONFIG_DIR"},
+	{ID: "cursor", ConfigRel: ".cursor"},
+	{ID: "codex", ConfigRel: ".codex", ConfigEnv: "CODEX_HOME"},
+}
+
+// TargetResult retains both an attempted target's complete core report and its
+// error. A host renderer can preserve a legacy JSON contract without
+// reimplementing selection or synchronization.
+type TargetResult struct {
+	Harness string
+	Dir     string
+	Report  skillsync.Report
+	Err     error
+}
+
+// Renderer receives all completed target outcomes after attempts finish.
+type Renderer func(io.Writer, []TargetResult, string) error
 
 type CommandOptions struct {
 	Use, Short string
@@ -52,9 +81,10 @@ type CommandOptions struct {
 	Getenv     func(string) string
 	Errors     ErrorMapper
 	Resolver   skillsync.Resolver
+	Renderer   Renderer
 }
 
-// New builds a `skills` parent with the reusable `sync` child.
+// New builds a convenience `skills` parent containing NewSync.
 func New(cfg skillsync.Config, opts CommandOptions) *cobra.Command {
 	use := opts.Use
 	if use == "" {
@@ -64,92 +94,129 @@ func New(cfg skillsync.Config, opts CommandOptions) *cobra.Command {
 	if short == "" {
 		short = "Install CLI-matched Agent Skills"
 	}
-	harnesses := opts.Harnesses
-	if len(harnesses) == 0 {
-		harnesses = DefaultHarnesses
-	}
-	home := opts.Home
-	if home == nil {
-		home = os.UserHomeDir
-	}
-	getenv := opts.Getenv
-	if getenv == nil {
-		getenv = os.Getenv
-	}
-	root := &cobra.Command{Use: use, Short: short, Args: cobra.NoArgs}
+	root := &cobra.Command{Use: use, Short: short, Args: noArgs(opts)}
+	root.AddCommand(NewSync(cfg, opts))
+	return root
+}
+
+// NewSync builds only the reusable sync leaf, allowing a host such as WB to
+// retain its existing `skills` parent and sibling hook command.
+func NewSync(cfg skillsync.Config, opts CommandOptions) *cobra.Command {
 	var dir, format string
-	var harness []string
+	var harnesses []string
 	var dryRun, newer bool
-	sync := &cobra.Command{Use: "sync", Short: "Install or update CLI-matched Agent Skills", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		if format != "text" && format != "json" {
-			return mapFailure(opts, fmt.Errorf("invalid --format %q: want text or json", format))
-		}
-		targets, err := resolveTargets(dir, harness, harnesses, home, getenv)
-		if err != nil {
-			return mapFailure(opts, err)
-		}
-		reports := make([]skillsync.Report, 0, len(targets))
-		for _, target := range targets {
-			report, err := skillsync.Sync(cmd.Context(), cfg, skillsync.Options{Dir: target.Dir, DryRun: dryRun, PreferNewerCompatible: newer, Resolver: opts.Resolver})
+	cmd := &cobra.Command{
+		Use: "sync", Short: "Install or update CLI-matched Agent Skills", Args: noArgs(opts), SilenceUsage: true, SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if format != "text" && format != "json" {
+				return mapFailure(opts, &UsageError{Err: fmt.Errorf("invalid --format %q: expected text or json", format)})
+			}
+			targets, err := resolveTargets(dir, harnesses, configuredHarnesses(opts), homeFunc(opts), getenvFunc(opts))
 			if err != nil {
 				return mapFailure(opts, err)
 			}
-			reports = append(reports, report)
-		}
-		var conflict error
-		if opts.Errors != nil {
-			for _, report := range reports {
-				if len(report.Names(skillsync.Conflict)) > 0 {
-					conflict = opts.Errors.Conflict(report)
-					break
-				}
+			prepared, err := skillsync.Prepare(cmd.Context(), cfg, skillsync.Options{PreferNewerCompatible: newer, Resolver: opts.Resolver})
+			if err != nil {
+				return mapFailure(opts, err)
 			}
-		}
-		if format == "json" {
-			if err := cliui.WriteJSON(cmd.OutOrStdout(), reports); err != nil {
-				return err
+			results, canceled := syncTargets(cmd.Context(), prepared, targets, dryRun)
+			renderer := opts.Renderer
+			if renderer == nil {
+				renderer = renderDefault
 			}
-			return conflict
-		}
-		for _, report := range reports {
-			if err := cliui.WriteText(cmd.OutOrStdout(), report); err != nil {
-				return err
+			if err := renderer(cmd.OutOrStdout(), results, format); err != nil {
+				return mapFailure(opts, err)
 			}
+			if canceled != nil {
+				return mapFailure(opts, canceled)
+			}
+			return resultsError(opts, results)
+		},
+	}
+	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return mapFailure(opts, &UsageError{Err: err}) })
+	cmd.Flags().StringVar(&dir, "dir", "", "explicit harness skills directory (mutually exclusive with --harness)")
+	cmd.Flags().StringArrayVar(&harnesses, "harness", nil, "harness: claude, cursor, codex, or all (repeatable)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report changes without writing")
+	cmd.Flags().BoolVar(&newer, "newer-compatible", false, "explicitly select a newer compatible plugin release")
+	cmd.Flags().StringVar(&format, "format", "text", "output format: text|json")
+	return cmd
+}
+
+func noArgs(opts CommandOptions) cobra.PositionalArgs {
+	return func(_ *cobra.Command, args []string) error {
+		if len(args) != 0 {
+			return mapFailure(opts, &UsageError{Err: errors.New("accepts no positional arguments")})
 		}
-		return conflict
-	}}
-	sync.Flags().StringVar(&dir, "dir", "", "explicit harness skills directory (mutually exclusive with --harness)")
-	sync.Flags().StringArrayVar(&harness, "harness", nil, "harness: claude, cursor, codex, or all (repeatable)")
-	sync.Flags().BoolVar(&dryRun, "dry-run", false, "report changes without writing")
-	sync.Flags().BoolVar(&newer, "newer-compatible", false, "explicitly select a newer compatible plugin release")
-	sync.Flags().StringVar(&format, "format", "text", "output format: text|json")
-	root.AddCommand(sync)
-	return root
+		return nil
+	}
 }
 
 type target struct{ Harness, Dir string }
 
+var (
+	absolutePath = filepath.Abs
+	syncPrepared = func(ctx context.Context, prepared skillsync.Prepared, opts skillsync.Options) (skillsync.Report, error) {
+		return prepared.Sync(ctx, opts)
+	}
+)
+
+func configuredHarnesses(opts CommandOptions) []Harness {
+	if len(opts.Harnesses) != 0 {
+		return opts.Harnesses
+	}
+	return DefaultHarnesses
+}
+func homeFunc(opts CommandOptions) func() (string, error) {
+	if opts.Home != nil {
+		return opts.Home
+	}
+	return os.UserHomeDir
+}
+func getenvFunc(opts CommandOptions) func(string) string {
+	if opts.Getenv != nil {
+		return opts.Getenv
+	}
+	return os.Getenv
+}
+
+// resolveTargets preserves explicit request order. Every requested alias is
+// checked before equivalent physical directories are deduplicated.
 func resolveTargets(dir string, names []string, harnesses []Harness, home func() (string, error), getenv func(string) string) ([]target, error) {
 	if strings.TrimSpace(dir) != "" && len(names) > 0 {
-		return nil, fmt.Errorf("--dir and --harness cannot be used together")
+		return nil, &UsageError{Err: errors.New("--dir and --harness cannot be used together")}
 	}
 	if strings.TrimSpace(dir) != "" {
-		return []target{{Dir: dir}}, nil
+		path, err := normalizedTarget(dir)
+		if err != nil {
+			return nil, &UsageError{Err: err}
+		}
+		return []target{{Dir: path}}, nil
 	}
-	h, err := home()
+	homeDir, err := home()
 	if err != nil {
 		return nil, fmt.Errorf("resolve home directory: %w", err)
 	}
 	byName := map[string]Harness{}
-	for _, x := range harnesses {
-		byName[x.ID] = x
-		for _, a := range x.Aliases {
-			byName[a] = x
+	for _, harness := range harnesses {
+		if harness.ID == "" {
+			return nil, &UsageError{Err: errors.New("configured skills harness has an empty ID")}
+		}
+		byName[strings.ToLower(harness.ID)] = harness
+		for _, alias := range harness.Aliases {
+			byName[strings.ToLower(strings.TrimSpace(alias))] = harness
 		}
 	}
-	selected := map[string]bool{}
-	add := func(x Harness) { selected[x.ID] = true }
-	if len(names) > 0 {
+	requested := make([]Harness, 0, len(names))
+	if len(names) == 0 {
+		for _, harness := range harnesses {
+			if harness.Present(homeDir, getenv) {
+				requested = append(requested, harness)
+			}
+		}
+		if len(requested) == 0 && len(harnesses) > 0 {
+			requested = append(requested, harnesses[0])
+		}
+	} else {
 		for _, raw := range names {
 			for _, name := range strings.Split(raw, ",") {
 				name = strings.ToLower(strings.TrimSpace(name))
@@ -157,45 +224,133 @@ func resolveTargets(dir string, names []string, harnesses []Harness, home func()
 					continue
 				}
 				if name == "all" {
-					for _, x := range harnesses {
-						add(x)
-					}
+					requested = append(requested, harnesses...)
 					continue
 				}
-				x, ok := byName[name]
+				harness, ok := byName[name]
 				if !ok {
-					return nil, fmt.Errorf("unknown skills harness %q", name)
+					return nil, &UsageError{Err: fmt.Errorf("unknown skills harness %q", name)}
 				}
-				add(x)
+				requested = append(requested, harness)
 			}
 		}
-	} else {
-		for _, x := range harnesses {
-			if x.Present(h, getenv) {
-				add(x)
+	}
+	if len(requested) == 0 {
+		return nil, &UsageError{Err: errors.New("at least one --harness value is required")}
+	}
+	all := make([]target, 0, len(requested))
+	for _, harness := range requested {
+		path, err := normalizedTarget(harness.SkillsDir(homeDir, getenv))
+		if err != nil {
+			return nil, &UsageError{Err: fmt.Errorf("invalid %s harness target: %w", harness.ID, err)}
+		}
+		all = append(all, target{Harness: harness.ID, Dir: path})
+	}
+	unique := make([]target, 0, len(all))
+	for _, candidate := range all {
+		equivalent := false
+		for _, prior := range unique {
+			if sameTarget(prior.Dir, candidate.Dir) {
+				equivalent = true
+				break
 			}
 		}
-		if len(selected) == 0 && len(harnesses) > 0 {
-			add(harnesses[0])
+		if !equivalent {
+			unique = append(unique, candidate)
 		}
 	}
-	if len(selected) == 0 {
-		return nil, fmt.Errorf("no skills harnesses configured")
+	return unique, nil
+}
+
+func normalizedTarget(dir string) (string, error) {
+	path, err := absolutePath(filepath.Clean(dir))
+	if err != nil {
+		return "", err
 	}
-	var result []target
-	seen := map[string]bool{}
-	for _, x := range harnesses {
-		if !selected[x.ID] {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("skills directory %s is a symlink", path)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("skills directory %s is not a directory", path)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	return path, nil
+}
+func sameTarget(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ai, aErr := os.Stat(a)
+	bi, bErr := os.Stat(b)
+	return aErr == nil && bErr == nil && os.SameFile(ai, bi)
+}
+
+func syncTargets(ctx context.Context, prepared skillsync.Prepared, targets []target, dryRun bool) ([]TargetResult, error) {
+	results := make([]TargetResult, 0, len(targets))
+	for _, target := range targets {
+		if err := ctx.Err(); err != nil {
+			return results, err
+		}
+		report, err := syncPrepared(ctx, prepared, skillsync.Options{Dir: target.Dir, DryRun: dryRun})
+		results = append(results, TargetResult{Harness: target.Harness, Dir: target.Dir, Report: report, Err: err})
+		if err != nil && errors.Is(err, context.Canceled) {
+			return results, err
+		}
+	}
+	return results, nil
+}
+
+// AggregateError exposes every target error through errors.Is/As.
+type AggregateError struct{ Results []TargetResult }
+
+func (e *AggregateError) Error() string { return "one or more skills targets failed" }
+func (e *AggregateError) Unwrap() []error {
+	errs := make([]error, 0, len(e.Results))
+	for _, result := range e.Results {
+		if result.Err != nil {
+			errs = append(errs, result.Err)
+		}
+	}
+	return errs
+}
+
+// ConflictError is returned even with no ErrorMapper, so conflicts do not
+// accidentally become a successful command.
+type ConflictError struct{ Report skillsync.Report }
+
+func (e *ConflictError) Error() string { return "skills sync found conflicts" }
+
+func resultsError(opts CommandOptions, results []TargetResult) error {
+	for _, result := range results {
+		if result.Err != nil {
+			return mapFailure(opts, &AggregateError{Results: results})
+		}
+	}
+	for _, result := range results {
+		if len(result.Report.Names(skillsync.Conflict)) == 0 {
 			continue
 		}
-		d := filepath.Clean(x.SkillsDir(h, getenv))
-		if seen[d] {
-			continue
+		if opts.Errors != nil {
+			if err := opts.Errors.Conflict(result.Report); err != nil {
+				return err
+			}
 		}
-		seen[d] = true
-		result = append(result, target{Harness: x.ID, Dir: d})
+		return mapFailure(opts, &ConflictError{Report: result.Report})
 	}
-	return result, nil
+	return nil
+}
+func renderDefault(out io.Writer, results []TargetResult, format string) error {
+	items := make([]cliui.TargetReport, 0, len(results))
+	for _, result := range results {
+		items = append(items, cliui.TargetReport{Harness: result.Harness, Dir: result.Dir, Report: result.Report, Err: result.Err})
+	}
+	if format == "json" {
+		return cliui.WriteTargetJSON(out, items)
+	}
+	return cliui.WriteTargetText(out, items)
 }
 func mapFailure(opts CommandOptions, err error) error {
 	if opts.Errors != nil {

@@ -27,9 +27,14 @@ type pluginState struct {
 	CLI       string            `json:"cli"`
 	Legacy    bool              `json:"legacy,omitempty"`
 	Suppliers map[string]string `json:"suppliers,omitempty"`
-	Source    Source            `json:"source"`
-	Skills    map[string]string `json:"skills"`
-	SyncedAt  time.Time         `json:"synced_at"`
+	// SupplierCLIVersions records each successful supplier's running CLI
+	// version separately from Source, which remains the sole bundle source.
+	// Missing entries are intentionally unknown for markers written before this
+	// provenance field existed.
+	SupplierCLIVersions map[string]string `json:"supplier_cli_versions,omitempty"`
+	Source              Source            `json:"source"`
+	Skills              map[string]string `json:"skills"`
+	SyncedAt            time.Time         `json:"synced_at"`
 }
 
 // statePublishedError reports a failure after the replacement marker has
@@ -85,6 +90,14 @@ func readState(dir string) (state, error) {
 		for cli, revision := range entry.Suppliers {
 			if !validIdentityParts(cli) || !validRevision(revision) || revision != entry.Source.Revision {
 				return state{}, fmt.Errorf("%w: invalid supplier", ErrStateCorrupt)
+			}
+		}
+		for cli, version := range entry.SupplierCLIVersions {
+			if !validIdentityParts(cli) || !validVersion(version) {
+				return state{}, fmt.Errorf("%w: invalid supplier CLI version", ErrStateCorrupt)
+			}
+			if !entry.Legacy && entry.Suppliers[cli] == "" {
+				return state{}, fmt.Errorf("%w: supplier CLI version has no supplier", ErrStateCorrupt)
 			}
 		}
 		for name, digest := range entry.Skills {
@@ -156,14 +169,21 @@ func ReadStatus(dir string) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	status := Status{Installed: true, Plugins: map[string]Source{}}
+	status := Status{Installed: true, Plugins: map[string]Source{}, SupplierCLIVersions: map[string]map[string]string{}}
 	for plugin, entry := range s.Plugins {
 		status.Plugins[plugin] = entry.Source
+		versions := map[string]string{}
+		for cli, version := range entry.SupplierCLIVersions {
+			versions[cli] = version
+		}
+		if len(versions) > 0 {
+			status.SupplierCLIVersions[plugin] = versions
+		}
 	}
 	return status, nil
 }
 
-func importLegacy(dir string, legacy LegacyImport) (pluginState, error) {
+func importLegacy(dir string, legacy LegacyImport, suppliedCLI ...Identity) (pluginState, error) {
 	if legacy.MarkerFile == "" || filepath.Base(legacy.MarkerFile) != legacy.MarkerFile || !validPlugin(legacy.Plugin) {
 		return pluginState{}, fmt.Errorf("%w: invalid legacy import", ErrInvalidConfig)
 	}
@@ -178,6 +198,7 @@ func importLegacy(dir string, legacy LegacyImport) (pluginState, error) {
 	var marker struct {
 		SchemaVersion int               `json:"schema_version"`
 		Skills        map[string]string `json:"skills"`
+		WBVersion     string            `json:"wb_version"`
 	}
 	if err := json.Unmarshal(raw, &marker); err != nil {
 		return pluginState{}, fmt.Errorf("%w: parse legacy marker: %v", ErrStateCorrupt, err)
@@ -202,5 +223,17 @@ func importLegacy(dir string, legacy LegacyImport) (pluginState, error) {
 		}
 		marker.Skills[name] = modern
 	}
-	return pluginState{Legacy: true, Skills: marker.Skills}, nil
+	versions := map[string]string{}
+	if marker.WBVersion != "" {
+		if !validVersion(marker.WBVersion) {
+			return pluginState{}, fmt.Errorf("%w: invalid legacy wb_version", ErrStateCorrupt)
+		}
+		if len(suppliedCLI) > 0 {
+			if !validIdentity(suppliedCLI[0]) {
+				return pluginState{}, fmt.Errorf("%w: invalid legacy CLI", ErrStateCorrupt)
+			}
+			versions[suppliedCLI[0].String()] = marker.WBVersion
+		}
+	}
+	return pluginState{Legacy: true, Skills: marker.Skills, SupplierCLIVersions: versions}, nil
 }

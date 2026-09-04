@@ -130,6 +130,43 @@ matched embedded bundle. Authenticity is limited to HTTPS transport to the
 configured GitHub endpoint plus the descriptor digest's artifact-integrity
 check; this Feature does not claim signatures it has not verified.
 
+### REQ: reusable-cobra-sync-command
+
+`skillsync/cobracmd.NewSync` MUST provide a reusable Cobra leaf and `New`
+MUST provide a convenience parent without assuming a product's command tree or
+exit codes. Hosts supply their CLI identity, matched bundles, target layout,
+error mapper, and renderer. Argument, flag, format, target-selection, and
+explicit-newer configuration errors MUST be mapped as typed usage/config
+errors before a target is written; home and filesystem failures remain runtime
+failures. `--dir` bypasses home discovery and cannot be combined with
+`--harness`; named targets preserve caller order, support aliases, comma and
+repeated values, `all`, and configured home overrides, then deduplicate only
+equivalent directories after each requested alias is validated.
+
+The adapter MUST resolve and validate the selected source set once before it
+starts target writes, then verify it again at each write. It MUST attempt
+independent targets after an ordinary target failure, stop before later targets
+after cancellation, retain every completed target report with its
+harness/directory identity and runtime error, render the complete result, and
+then return an aggregate typed failure. JSON stdout is exclusively JSON. Hosts
+may replace rendering to preserve a legacy payload shape.
+
+### REQ: cli-version-marker-provenance
+
+The marker and public `Sync` report MUST record the generic current CLI version
+and each resolved bundle's prior supplying CLI version without duplicating
+bundle `Source`. A marker-only public status query MUST expose these values for
+host drift banners. Legacy WB marker metadata, including an available
+`wb_version`, MUST survive import. A changed successful supplier CLI version
+MAY update marker provenance alone; a conflict MUST NOT advance it.
+
+### REQ: compact-terminal-reporting
+
+The shared terminal renderer MUST group target results by harness, summarize
+unchanged counts, name changed and conflicted skills, distinguish planned,
+applied, restored, and incomplete changes, and call dry runs previews. It MUST
+never present a restored or incomplete mutation as a successful sync.
+
 ## Acceptance Criteria
 
 ### AC: matched-offline-sync

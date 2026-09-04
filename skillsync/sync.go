@@ -20,11 +20,47 @@ import (
 // snapshots supplied in Config and never contacts a Resolver unless the
 // caller explicitly selected PreferNewerCompatible.
 func Sync(ctx context.Context, cfg Config, opts Options) (Report, error) {
-	report := Report{Dir: opts.Dir, CLI: cfg.CLI, DryRun: opts.DryRun}
-	if !validIdentity(cfg.CLI) || cfg.CurrentVersion == "" || opts.Dir == "" || len(cfg.Bundles) == 0 {
-		return report, fmt.Errorf("%w: CLI, current version, target directory, and bundles are required", ErrInvalidConfig)
+	prepared, err := Prepare(ctx, cfg, opts)
+	if err != nil {
+		return Report{Dir: opts.Dir, CLI: cfg.CLI, CLIVersion: cfg.CurrentVersion, DryRun: opts.DryRun}, err
+	}
+	return prepared.Sync(ctx, opts)
+}
+
+// Prepared is one validated, immutable source selection. A host that syncs
+// multiple harnesses prepares it once, then uses Sync for every target so an
+// explicit newer-compatible resolver cannot select different releases midway
+// through a command.
+type Prepared struct {
+	cfg     Config
+	bundles []resolvedBundle
+}
+
+// Prepare validates the host configuration and resolves any explicitly
+// requested newer-compatible bundles once. It performs no target I/O.
+func Prepare(ctx context.Context, cfg Config, opts Options) (Prepared, error) {
+	if !validIdentity(cfg.CLI) || cfg.CurrentVersion == "" || len(cfg.Bundles) == 0 {
+		return Prepared{}, fmt.Errorf("%w: CLI, current version, and bundles are required", ErrInvalidConfig)
 	}
 	bundles, err := resolvedBundles(ctx, cfg, opts)
+	if err != nil {
+		return Prepared{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return Prepared{}, err
+	}
+	return Prepared{cfg: cfg, bundles: bundles}, nil
+}
+
+// Sync applies this already-prepared source set to one target. Bundle content
+// is revalidated before target classification and mutation, so preparation is
+// a consistency boundary rather than a trust bypass.
+func (p Prepared) Sync(ctx context.Context, opts Options) (Report, error) {
+	report := Report{Dir: opts.Dir, CLI: p.cfg.CLI, CLIVersion: p.cfg.CurrentVersion, DryRun: opts.DryRun}
+	if opts.Dir == "" || len(p.bundles) == 0 {
+		return report, fmt.Errorf("%w: target directory and prepared bundles are required", ErrInvalidConfig)
+	}
+	bundles, err := revalidatePrepared(p.cfg, p.bundles)
 	if err != nil {
 		return report, err
 	}
@@ -41,7 +77,7 @@ func Sync(ctx context.Context, cfg Config, opts Options) (Report, error) {
 		if err := recoveryPending(opts.Dir); err != nil {
 			return report, err
 		}
-		return syncLocked(ctx, cfg, bundles, opts, report)
+		return syncLocked(ctx, p.cfg, bundles, opts, report)
 	}
 	// Reject an existing unsafe marker before lock() creates its parent-level
 	// lock file. syncLocked reads it again after locking, so this preflight does
@@ -57,7 +93,7 @@ func Sync(ctx context.Context, cfg Config, opts Options) (Report, error) {
 		return report, err
 	}
 	defer unlock()
-	return syncLocked(ctx, cfg, bundles, opts, report)
+	return syncLocked(ctx, p.cfg, bundles, opts, report)
 }
 
 type resolvedBundle struct {
@@ -83,10 +119,11 @@ func resolvedBundles(ctx context.Context, cfg Config, opts Options) ([]resolvedB
 			if opts.Resolver == nil {
 				return nil, fmt.Errorf("%w: newer-compatible selection requires a resolver", ErrInvalidConfig)
 			}
+			plugin := b.Plugin
 			var err error
 			b, err = opts.Resolver.Resolve(ctx, b)
 			if err != nil {
-				return nil, fmt.Errorf("resolve newer %s: %w", b.Plugin.String(), err)
+				return nil, fmt.Errorf("resolve newer %s: %w", plugin.String(), err)
 			}
 		}
 		key := b.Plugin.String()
@@ -99,6 +136,18 @@ func resolvedBundles(ctx context.Context, cfg Config, opts Options) ([]resolvedB
 			return nil, err
 		}
 		result = append(result, resolvedBundle{b, skills})
+	}
+	return result, nil
+}
+
+func revalidatePrepared(cfg Config, prepared []resolvedBundle) ([]resolvedBundle, error) {
+	result := make([]resolvedBundle, 0, len(prepared))
+	for _, item := range prepared {
+		skills, err := validateBundle(item.Bundle, cfg.CurrentVersion)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, resolvedBundle{Bundle: item.Bundle, Skills: skills})
 	}
 	return result, nil
 }
@@ -116,9 +165,14 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 	if err != nil {
 		return report, err
 	}
+	for i := range report.Bundles {
+		if prior, ok := current.Plugins[report.Bundles[i].Plugin.String()]; ok {
+			report.Bundles[i].PriorCLIVersion = prior.SupplierCLIVersions[cfg.CLI.String()]
+		}
+	}
 	legacyImported := false
 	if opts.Legacy.MarkerFile != "" && current.Plugins[opts.Legacy.Plugin.String()].Skills == nil {
-		legacy, err := importLegacy(opts.Dir, opts.Legacy)
+		legacy, err := importLegacy(opts.Dir, opts.Legacy, cfg.CLI)
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return report, err
 		}
@@ -129,6 +183,11 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 				}
 			}
 			current.Plugins[opts.Legacy.Plugin.String()] = legacy
+			for i := range report.Bundles {
+				if report.Bundles[i].Plugin == opts.Legacy.Plugin {
+					report.Bundles[i].PriorCLIVersion = legacy.SupplierCLIVersions[cfg.CLI.String()]
+				}
+			}
 			legacyImported = true
 		}
 	}
@@ -247,7 +306,12 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 				suppliers[cli] = revision
 			}
 			suppliers[cfg.CLI.String()] = rb.Bundle.Source.Revision
-			next.Plugins[key] = pluginState{Revision: rb.Bundle.Source.Revision, Digest: rb.Bundle.Source.Digest, CLI: cfg.CLI.String(), Suppliers: suppliers, Source: rb.Bundle.Source, Skills: owned, SyncedAt: time.Now().UTC()}
+			supplierVersions := map[string]string{}
+			for cli, version := range prior.SupplierCLIVersions {
+				supplierVersions[cli] = version
+			}
+			supplierVersions[cfg.CLI.String()] = cfg.CurrentVersion
+			next.Plugins[key] = pluginState{Revision: rb.Bundle.Source.Revision, Digest: rb.Bundle.Source.Digest, CLI: cfg.CLI.String(), Suppliers: suppliers, SupplierCLIVersions: supplierVersions, Source: rb.Bundle.Source, Skills: owned, SyncedAt: time.Now().UTC()}
 		}
 	}
 	sort.Slice(report.Changes, func(i, j int) bool {
@@ -375,6 +439,11 @@ func cloneState(s state) state {
 			suppliers[cli] = revision
 		}
 		v.Suppliers = suppliers
+		supplierVersions := map[string]string{}
+		for cli, version := range v.SupplierCLIVersions {
+			supplierVersions[cli] = version
+		}
+		v.SupplierCLIVersions = supplierVersions
 		n.Plugins[k] = v
 	}
 	return n
@@ -385,7 +454,7 @@ func statesEqual(a, b state) bool {
 	}
 	for k, x := range a.Plugins {
 		y, ok := b.Plugins[k]
-		if !ok || x.Revision != y.Revision || x.Digest != y.Digest || x.CLI != y.CLI || x.Legacy != y.Legacy || x.Source != y.Source || len(x.Skills) != len(y.Skills) || len(x.Suppliers) != len(y.Suppliers) {
+		if !ok || x.Revision != y.Revision || x.Digest != y.Digest || x.CLI != y.CLI || x.Legacy != y.Legacy || x.Source != y.Source || len(x.Skills) != len(y.Skills) || len(x.Suppliers) != len(y.Suppliers) || len(x.SupplierCLIVersions) != len(y.SupplierCLIVersions) {
 			return false
 		}
 		for n, h := range x.Skills {
@@ -395,6 +464,11 @@ func statesEqual(a, b state) bool {
 		}
 		for cli, revision := range x.Suppliers {
 			if y.Suppliers[cli] != revision {
+				return false
+			}
+		}
+		for cli, version := range x.SupplierCLIVersions {
+			if y.SupplierCLIVersions[cli] != version {
 				return false
 			}
 		}
