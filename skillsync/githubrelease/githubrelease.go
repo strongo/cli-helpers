@@ -124,7 +124,8 @@ func (s Source) NewerCompatible(ctx context.Context, matched skillsync.Source, c
 		cmp, _ := skillsync.CompareVersions(candidates[i].descriptor.Source.Version, candidates[j].descriptor.Source.Version)
 		return cmp > 0
 	})
-	for _, candidate := range candidates {
+	if len(candidates) > 0 {
+		candidate := candidates[0]
 		if candidate.archive.Size < 0 || candidate.archive.Size > s.MaxAssetBytes {
 			return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: release asset exceeds size limit", skillsync.ErrInvalidConfig)
 		}
@@ -209,7 +210,7 @@ func (s Source) get(ctx context.Context, target string, limit int64) ([]byte, ht
 		}
 		return nil, nil, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.Request == nil || response.Request.URL.Scheme != "https" {
 		return nil, nil, fmt.Errorf("%w: GitHub request left HTTPS", skillsync.ErrInvalidConfig)
 	}
