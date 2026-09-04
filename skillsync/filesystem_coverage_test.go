@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,14 @@ func (l *coverageLock) TryLock() (bool, error) { return l.locked, l.err }
 func (*coverageLock) Unlock() error            { return nil }
 func (*coverageLock) Close() error             { return nil }
 
+func coverageAbsolutePath(parts ...string) string {
+	return filepath.Join(append([]string{string(filepath.Separator), "skillsync-coverage"}, parts...)...)
+}
+
+func coverageAliasPath(alias string) string {
+	return alias + string(filepath.Separator) + "skillsync-coverage"
+}
+
 func TestFilesystemOperationFailureBoundaries(t *testing.T) {
 	original := filesystemOperations
 	originalLock := newSkillsLock
@@ -44,28 +53,33 @@ func TestFilesystemOperationFailureBoundaries(t *testing.T) {
 	}
 	filesystemOperations = original
 	filesystemOperations.lstat = func(string) (fs.FileInfo, error) { return nil, failure }
-	if _, err := canonicalSystemAlias("/tmp/x"); !errors.Is(err, failure) {
+	aliasPath := coverageAliasPath("/tmp")
+	if _, err := canonicalSystemAlias(aliasPath); !errors.Is(err, failure) {
 		t.Fatalf("alias lstat=%v", err)
 	}
-	if err := validateExistingAncestry("/Users/x"); !errors.Is(err, failure) {
+	if err := validateExistingAncestry(coverageAbsolutePath("x")); !errors.Is(err, failure) {
 		t.Fatalf("ancestry lstat=%v", err)
 	}
-	if _, err := lock(context.Background(), "/tmp/x", time.Second); !errors.Is(err, failure) {
+	if _, err := lock(context.Background(), aliasPath, time.Second); !errors.Is(err, failure) {
 		t.Fatalf("lock lstat=%v", err)
 	}
 	filesystemOperations = original
 	filesystemOperations.lstat = func(string) (fs.FileInfo, error) { return coverageInfo{mode: 0o755}, nil }
-	if got, err := canonicalSystemAlias("/tmp/x"); err != nil || got != "/tmp/x" {
+	if got, err := canonicalSystemAlias(aliasPath); err != nil || got != aliasPath {
 		t.Fatalf("non-link=%q err=%v", got, err)
 	}
 	filesystemOperations.lstat = func(string) (fs.FileInfo, error) { return coverageInfo{mode: os.ModeSymlink}, nil }
 	filesystemOperations.eval = func(string) (string, error) { return "", failure }
-	if _, err := canonicalSystemAlias("/tmp/x"); !errors.Is(err, failure) {
+	if _, err := canonicalSystemAlias(aliasPath); !errors.Is(err, failure) {
 		t.Fatalf("eval=%v", err)
 	}
 	filesystemOperations.eval = func(string) (string, error) { return "/wrong", nil }
-	if _, err := canonicalSystemAlias("/tmp/x"); err == nil {
+	if _, err := canonicalSystemAlias(aliasPath); err == nil {
 		t.Fatal("wrong alias accepted")
+	}
+	filesystemOperations.eval = func(string) (string, error) { return "/private/tmp", nil }
+	if got, err := canonicalSystemAlias(aliasPath); err != nil || got != filepath.Join("/private/tmp", "skillsync-coverage") {
+		t.Fatalf("verified alias=%q err=%v", got, err)
 	}
 	filesystemOperations = original
 	filesystemOperations.mkdir = func(string, fs.FileMode) error { return failure }
@@ -78,7 +92,8 @@ func TestFilesystemOperationFailureBoundaries(t *testing.T) {
 		t.Fatalf("sync=%v", err)
 	}
 	filesystemOperations = original
-	filesystemOperations.abs = func(string) (string, error) { return "/Users/x", nil }
+	lockTarget := coverageAbsolutePath("x")
+	filesystemOperations.abs = func(string) (string, error) { return lockTarget, nil }
 	filesystemOperations.lstat = func(name string) (fs.FileInfo, error) {
 		if strings.HasSuffix(name, ".cli-helpers-skills-lock") {
 			return nil, failure
@@ -99,13 +114,14 @@ func TestFilesystemOperationFailureBoundaries(t *testing.T) {
 		t.Fatalf("root ancestry=%v", err)
 	}
 	filesystemOperations = original
-	filesystemOperations.abs = func(string) (string, error) { return "/tmp/x", nil }
+	filesystemOperations.abs = func(string) (string, error) { return aliasPath, nil }
 	filesystemOperations.lstat = func(string) (fs.FileInfo, error) { return nil, failure }
 	if _, err := ValidateTarget("x"); !errors.Is(err, failure) {
 		t.Fatalf("target alias=%v", err)
 	}
 	filesystemOperations = original
-	filesystemOperations.abs = func(string) (string, error) { return "/Users/x", nil }
+	fileAncestor := coverageAbsolutePath("file")
+	filesystemOperations.abs = func(string) (string, error) { return fileAncestor, nil }
 	filesystemOperations.lstat = func(string) (fs.FileInfo, error) { return coverageInfo{mode: os.ModeSymlink}, nil }
 	if _, err := lock(context.Background(), "x", time.Second); err == nil {
 		t.Fatal("lock symlink ancestry accepted")
@@ -114,12 +130,12 @@ func TestFilesystemOperationFailureBoundaries(t *testing.T) {
 		t.Fatalf("root ancestry=%v", err)
 	}
 	filesystemOperations.lstat = func(name string) (fs.FileInfo, error) {
-		if name == "/Users/file" {
+		if name == fileAncestor {
 			return coverageInfo{mode: 0o644}, nil
 		}
 		return coverageInfo{mode: fs.ModeDir}, nil
 	}
-	if err := validateExistingAncestry("/Users/file/child"); err == nil {
+	if err := validateExistingAncestry(filepath.Join(fileAncestor, "child")); err == nil {
 		t.Fatal("file ancestor accepted")
 	}
 }
@@ -169,23 +185,26 @@ func TestFilesystemAncestryAndTargetConfinement(t *testing.T) {
 	if _, err := ValidateTarget(filepath.Join(base, "link", "child")); err == nil {
 		t.Fatal("symlink ancestor accepted")
 	}
-	if err := validateExistingAncestry(filepath.Join("/Users", "shared", "missing", "child")); err != nil {
+	if err := validateExistingAncestry(coverageAbsolutePath("missing", "child")); err != nil {
 		t.Fatalf("missing ancestry rejected: %v", err)
 	}
 }
 
 func TestSystemAliasesAndRootConfinement(t *testing.T) {
-	for _, alias := range []string{"/tmp", "/var"} {
-		got, err := canonicalSystemAlias(filepath.Join(alias, "cli-helpers-skills-test"))
-		if err != nil {
-			t.Fatalf("%s: %v", alias, err)
-		}
-		want := "/private" + alias + "/cli-helpers-skills-test"
-		if got != want {
-			t.Fatalf("%s alias=%q want %q", alias, got, want)
+	if runtime.GOOS == "darwin" {
+		for alias, resolved := range map[string]string{"/tmp": "/private/tmp", "/var": "/private/var"} {
+			path := coverageAliasPath(alias)
+			got, err := canonicalSystemAlias(path)
+			if err != nil {
+				t.Fatalf("%s: %v", alias, err)
+			}
+			want := filepath.Join(resolved, "skillsync-coverage")
+			if got != want {
+				t.Fatalf("%s alias=%q want %q", alias, got, want)
+			}
 		}
 	}
-	plain := filepath.Join("/Users", "shared", "plain")
+	plain := coverageAbsolutePath("plain")
 	if got, err := canonicalSystemAlias(plain); err != nil || got != plain {
 		t.Fatalf("plain=%q err=%v", got, err)
 	}

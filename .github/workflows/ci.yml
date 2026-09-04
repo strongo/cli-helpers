@@ -29,6 +29,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
+          go test ./skillsync/reexec ./skillsync/selfupdate
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
           $coverage = go tool cover -func=coverage-windows.out
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
