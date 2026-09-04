@@ -243,6 +243,141 @@ func TestSyncBackupPersistenceFailureRestoresOriginalAndRetries(t *testing.T) {
 	}
 }
 
+func TestSyncPreservesEditsCapturedBetweenDigestAndBackupRename(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		initial     Bundle
+		replacement Bundle
+		skill       string
+	}{
+		{
+			name:        "update",
+			initial:     bundle(t, "plugin", "window-update-old", "old"),
+			replacement: bundle(t, "plugin", "window-update-new", "new"),
+			skill:       "alpha",
+		},
+		{
+			name:        "removal",
+			initial:     bundleWith(t, "plugin", "window-remove-old", map[string]string{"alpha": "keep", "beta": "old"}),
+			replacement: bundleWith(t, "plugin", "window-remove-new", map[string]string{"alpha": "keep"}),
+			skill:       "beta",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if _, err := Sync(context.Background(), config(t, tc.initial), Options{Dir: dir}); err != nil {
+				t.Fatal(err)
+			}
+			withTransactionOperations(t, func(ops *transactionOperationSet) {
+				original := ops.rename
+				ops.rename = func(root *os.Root, from, to string) error {
+					if from == tc.skill && strings.Contains(to, "/backup/"+tc.skill) {
+						if err := os.WriteFile(filepath.Join(dir, tc.skill, "SKILL.md"), []byte("user edit made after digest check"), 0o644); err != nil {
+							return err
+						}
+					}
+					return original(root, from, to)
+				}
+			})
+			report, err := Sync(context.Background(), config(t, tc.replacement), Options{Dir: dir})
+			if !errors.Is(err, ErrStateCorrupt) {
+				t.Fatalf("sync error=%v report=%#v", err, report)
+			}
+			var found Change
+			for _, change := range report.Changes {
+				if change.Name == tc.skill {
+					found = change
+				}
+			}
+			if found.Outcome != Incomplete {
+				t.Fatalf("foreign backup reported as %q: %#v", found.Outcome, report)
+			}
+			backups, globErr := filepath.Glob(filepath.Join(dir, transactionPrefix+"*", "backup", tc.skill, "SKILL.md"))
+			if globErr != nil || len(backups) != 1 {
+				t.Fatalf("backups=%v err=%v", backups, globErr)
+			}
+			if got, readErr := os.ReadFile(backups[0]); readErr != nil || string(got) != "user edit made after digest check" {
+				t.Fatalf("foreign backup lost=%q err=%v", got, readErr)
+			}
+			if _, statErr := os.Lstat(filepath.Join(dir, recoveryFileName)); statErr != nil {
+				t.Fatalf("journal missing: %v", statErr)
+			}
+			if _, retryErr := Sync(context.Background(), config(t, tc.replacement), Options{Dir: dir}); !errors.Is(retryErr, ErrStateCorrupt) {
+				t.Fatalf("retry=%v", retryErr)
+			}
+			if got, readErr := os.ReadFile(backups[0]); readErr != nil || string(got) != "user edit made after digest check" {
+				t.Fatalf("retry lost foreign backup=%q err=%v", got, readErr)
+			}
+		})
+	}
+}
+
+func TestSyncFinalizationNeverDiscardsBackupChangedAfterCapture(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		initial     Bundle
+		replacement Bundle
+		skill       string
+		phase       string
+	}{
+		{
+			name:        "update",
+			initial:     bundle(t, "plugin", "final-update-old", "old"),
+			replacement: bundle(t, "plugin", "final-update-new", "new"),
+			skill:       "alpha",
+			phase:       "publish",
+		},
+		{
+			name:        "removal",
+			initial:     bundleWith(t, "plugin", "final-remove-old", map[string]string{"alpha": "keep", "beta": "old"}),
+			replacement: bundleWith(t, "plugin", "final-remove-new", map[string]string{"alpha": "keep"}),
+			skill:       "beta",
+			phase:       "backup",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if _, err := Sync(context.Background(), config(t, tc.initial), Options{Dir: dir}); err != nil {
+				t.Fatal(err)
+			}
+			previous := transactionBoundary
+			t.Cleanup(func() { transactionBoundary = previous })
+			transactionBoundary = func(phase string) {
+				if phase != tc.phase {
+					return
+				}
+				backups, _ := filepath.Glob(filepath.Join(dir, transactionPrefix+"*", "backup", tc.skill, "SKILL.md"))
+				if len(backups) == 1 {
+					_ = os.WriteFile(backups[0], []byte("foreign after capture"), 0o644)
+				}
+			}
+			report, err := Sync(context.Background(), config(t, tc.replacement), Options{Dir: dir})
+			if !errors.Is(err, ErrStateCorrupt) {
+				t.Fatalf("sync=%v report=%#v", err, report)
+			}
+			for _, change := range report.Changes {
+				if change.Name == tc.skill && change.Outcome != Incomplete {
+					t.Fatalf("change=%#v report=%#v", change, report)
+				}
+			}
+			backups, globErr := filepath.Glob(filepath.Join(dir, transactionPrefix+"*", "backup", tc.skill, "SKILL.md"))
+			if globErr != nil || len(backups) != 1 {
+				t.Fatalf("backups=%v err=%v", backups, globErr)
+			}
+			if got, readErr := os.ReadFile(backups[0]); readErr != nil || string(got) != "foreign after capture" {
+				t.Fatalf("foreign backup=%q err=%v", got, readErr)
+			}
+			transactionBoundary = previous
+			if _, retryErr := Sync(context.Background(), config(t, tc.replacement), Options{Dir: dir}); !errors.Is(retryErr, ErrStateCorrupt) {
+				t.Fatalf("retry=%v", retryErr)
+			}
+			if got, readErr := os.ReadFile(backups[0]); readErr != nil || string(got) != "foreign after capture" {
+				t.Fatalf("retry deleted backup=%q err=%v", got, readErr)
+			}
+		})
+	}
+}
+
 func TestRecoveryRetriesDirectorySyncBeforeDiscardingEvidence(t *testing.T) {
 	dir := t.TempDir()
 	old := bundle(t, "plugin", "retry-old", "old")
@@ -685,6 +820,16 @@ func TestRecoveryHelpersPropagateFilesystemFaultsWithoutMutation(t *testing.T) {
 	if _, _, err := digestAt(t.TempDir(), strings.Repeat("a", 300)); err == nil {
 		t.Fatal("content lstat fault accepted")
 	}
+	unsafeTree := t.TempDir()
+	if err := os.Mkdir(filepath.Join(unsafeTree, "alpha"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(parentFile, filepath.Join(unsafeTree, "alpha", "unsafe")); err != nil {
+		t.Fatal(err)
+	}
+	if exists, _, err := digestAt(unsafeTree, "alpha"); !exists || !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("unsafe tree exists=%v err=%v", exists, err)
+	}
 	if err := verifyCommittedChange(t.TempDir(), recoveryChange{Name: strings.Repeat("a", 300), New: strings.Repeat("a", 64)}); err == nil {
 		t.Fatal("committed verification accepted invalid filesystem lookup")
 	}
@@ -739,4 +884,189 @@ func TestRestoreChangeFailsClosedOnEveryMissingRecoveryProof(t *testing.T) {
 			t.Fatalf("backup lost=%v", err)
 		}
 	})
+}
+
+func TestRestoreChangeCoversVerifiedRecoveryFaults(t *testing.T) {
+	t.Run("target digest read failure", func(t *testing.T) {
+		if err := restoreChange(t.TempDir(), t.TempDir(), recoveryChange{Name: strings.Repeat("a", 300)}); err == nil {
+			t.Fatal("target digest lookup failure accepted")
+		}
+	})
+	t.Run("unsafe proof directory", func(t *testing.T) {
+		dir := t.TempDir()
+		tx := filepath.Join(dir, transactionPrefix+"proof-dir")
+		newDigest := writeRecoverySkill(t, dir, "alpha", "new")
+		if err := os.MkdirAll(tx, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tx, "proof"), []byte("not a directory"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := restoreChange(dir, tx, recoveryChange{Name: "alpha", New: newDigest}); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("unsafe proof directory=%v", err)
+		}
+	})
+	t.Run("unsafe proof content", func(t *testing.T) {
+		dir := t.TempDir()
+		tx := filepath.Join(dir, transactionPrefix+"proof-content")
+		newDigest := writeRecoverySkill(t, dir, "alpha", "new")
+		if err := os.MkdirAll(filepath.Join(tx, "proof"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(dir, "alpha"), filepath.Join(tx, "proof", "alpha")); err != nil {
+			t.Fatal(err)
+		}
+		if err := restoreChange(dir, tx, recoveryChange{Name: "alpha", New: newDigest}); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("unsafe proof content=%v", err)
+		}
+	})
+	t.Run("target differs from verified proof", func(t *testing.T) {
+		dir := t.TempDir()
+		tx := filepath.Join(dir, transactionPrefix+"proof-mismatch")
+		writeRecoverySkill(t, dir, "alpha", "target")
+		newDigest := writeRecoverySkill(t, filepath.Join(tx, "proof"), "alpha", "proof")
+		if err := restoreChange(dir, tx, recoveryChange{Name: "alpha", New: newDigest}); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("target differs=%v", err)
+		}
+	})
+	t.Run("remove failure retains added target", func(t *testing.T) {
+		dir := t.TempDir()
+		tx := filepath.Join(dir, transactionPrefix+"remove-added")
+		newDigest := writeRecoverySkill(t, dir, "alpha", "new")
+		writeRecoverySkill(t, filepath.Join(tx, "proof"), "alpha", "new")
+		removeErr := errors.New("remove added")
+		withTransactionOperations(t, func(ops *transactionOperationSet) { ops.removeAll = func(*os.Root, string) error { return removeErr } })
+		if err := restoreChange(dir, tx, recoveryChange{Name: "alpha", New: newDigest}); !errors.Is(err, removeErr) {
+			t.Fatalf("remove added=%v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "alpha", "SKILL.md")); err != nil {
+			t.Fatalf("target lost=%v", err)
+		}
+	})
+	t.Run("unsafe backup directory", func(t *testing.T) {
+		dir := t.TempDir()
+		tx := filepath.Join(dir, transactionPrefix+"backup-dir")
+		if err := os.MkdirAll(tx, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tx, "backup"), []byte("not a directory"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := restoreChange(dir, tx, recoveryChange{Name: "alpha", Old: strings.Repeat("a", 64), New: strings.Repeat("b", 64), Existed: true}); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("unsafe backup directory=%v", err)
+		}
+	})
+	t.Run("unsafe backup content", func(t *testing.T) {
+		dir := t.TempDir()
+		tx := filepath.Join(dir, transactionPrefix+"backup-content")
+		if err := os.MkdirAll(filepath.Join(tx, "backup"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(dir, filepath.Join(tx, "backup", "alpha")); err != nil {
+			t.Fatal(err)
+		}
+		if err := restoreChange(dir, tx, recoveryChange{Name: "alpha", Old: strings.Repeat("a", 64), New: strings.Repeat("b", 64), Existed: true}); !errors.Is(err, ErrStateCorrupt) {
+			t.Fatalf("unsafe backup content=%v", err)
+		}
+	})
+	t.Run("already restored target is durable", func(t *testing.T) {
+		dir := t.TempDir()
+		tx := filepath.Join(dir, transactionPrefix+"already-restored")
+		oldDigest := writeRecoverySkill(t, dir, "alpha", "old")
+		if err := restoreChange(dir, tx, recoveryChange{Name: "alpha", Old: oldDigest, New: strings.Repeat("b", 64), Existed: true}); err != nil {
+			t.Fatalf("already restored=%v", err)
+		}
+	})
+	t.Run("existing old target is durable without backup", func(t *testing.T) {
+		dir := t.TempDir()
+		tx := filepath.Join(dir, transactionPrefix+"old")
+		oldDigest := writeRecoverySkill(t, filepath.Join(tx, "backup"), "alpha", "old")
+		writeRecoverySkill(t, dir, "alpha", "old")
+		if err := restoreChange(dir, tx, recoveryChange{Name: "alpha", Old: oldDigest, New: strings.Repeat("b", 64), Existed: true}); err != nil {
+			t.Fatalf("existing old target=%v", err)
+		}
+	})
+	t.Run("remove old published target failure retains backup", func(t *testing.T) {
+		dir := t.TempDir()
+		tx := filepath.Join(dir, transactionPrefix+"remove-old")
+		oldDigest := writeRecoverySkill(t, filepath.Join(tx, "backup"), "alpha", "old")
+		newDigest := writeRecoverySkill(t, dir, "alpha", "new")
+		removeErr := errors.New("remove old")
+		withTransactionOperations(t, func(ops *transactionOperationSet) { ops.removeAll = func(*os.Root, string) error { return removeErr } })
+		if err := restoreChange(dir, tx, recoveryChange{Name: "alpha", Old: oldDigest, New: newDigest, Existed: true}); !errors.Is(err, removeErr) {
+			t.Fatalf("remove old=%v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(tx, "backup", "alpha", "SKILL.md")); err != nil {
+			t.Fatalf("backup lost=%v", err)
+		}
+	})
+	t.Run("mkdir failure retains backup", func(t *testing.T) {
+		dir := t.TempDir()
+		tx := filepath.Join(dir, transactionPrefix+"mkdir")
+		oldDigest := writeRecoverySkill(t, filepath.Join(tx, "backup"), "alpha", "old")
+		mkdirErr := errors.New("mkdir")
+		withTransactionOperations(t, func(ops *transactionOperationSet) { ops.mkdirAll = func(string, fs.FileMode) error { return mkdirErr } })
+		if err := restoreChange(dir, tx, recoveryChange{Name: "alpha", Old: oldDigest, New: strings.Repeat("b", 64), Existed: true}); !errors.Is(err, mkdirErr) {
+			t.Fatalf("mkdir=%v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(tx, "backup", "alpha", "SKILL.md")); err != nil {
+			t.Fatalf("backup lost=%v", err)
+		}
+	})
+}
+
+func TestRecoverCommittedMismatchAndFinalizePersistenceFaults(t *testing.T) {
+	dir := t.TempDir()
+	digest := writeRecoverySkill(t, dir, "alpha", "stable")
+	state := state{RecoveryID: "committed", Plugins: map[string]pluginState{"strongo/plugin": {Legacy: true, Skills: map[string]string{"alpha": digest}}}}
+	if err := writeState(dir, state); err != nil {
+		t.Fatal(err)
+	}
+	writeRecoveryJournal(t, dir, "committed", []recoveryChange{{Name: "alpha", New: strings.Repeat("a", 64), Phase: "published"}})
+	if err := recoverTransaction(dir); !errors.Is(err, ErrStateCorrupt) {
+		t.Fatalf("committed mismatch=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, recoveryFileName)); err != nil {
+		t.Fatalf("journal removed=%v", err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, dir, tx, journal string)
+	}{
+		{name: "unsafe transaction", setup: func(t *testing.T, dir, tx, _ string) {
+			if err := os.Symlink(dir, tx); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "sync after transaction cleanup", setup: func(t *testing.T, _ string, tx, _ string) {
+			if err := os.Mkdir(tx, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			tx := filepath.Join(root, transactionPrefix+"finalize")
+			journal := filepath.Join(root, recoveryFileName)
+			if err := os.WriteFile(journal, []byte("evidence"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(t, root, tx, journal)
+			if tc.name == "sync after transaction cleanup" {
+				syncErr := errors.New("sync cleanup")
+				withTransactionOperations(t, func(ops *transactionOperationSet) { ops.syncDirectory = func(string) error { return syncErr } })
+				if err := finalizeJournal(journal, tx); !errors.Is(err, syncErr) {
+					t.Fatalf("sync cleanup=%v", err)
+				}
+				if _, err := os.Lstat(journal); err != nil {
+					t.Fatalf("journal removed before persistence=%v", err)
+				}
+				return
+			}
+			if err := finalizeJournal(journal, tx); !errors.Is(err, ErrStateCorrupt) {
+				t.Fatalf("unsafe transaction=%v", err)
+			}
+		})
+	}
 }
