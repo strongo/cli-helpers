@@ -222,6 +222,16 @@ selects newer-compatible sync, then the adapter reads bounded release and asset
 responses, skips ineligible entries, validates the selected archive before
 sync, and retains the matched bundle when no compatible newer release exists.
 
+### AC: refreshed-bundle-after-successful-binary-update
+
+Given a CLI has replaced its binary successfully, when its self-update
+integration starts the skills refresh callback, then it executes the resolved
+new executable directly with a structured `skills sync` argv and installs that
+new binary's matched embedded bundle. A refresh failure is a non-fatal
+self-update warning that names a direct retry using the executable and argv;
+the completed binary update and the existing skills remain distinguishable.
+Check, dry-run, declined, and checksum-failed updates do not start a refresh.
+
 ## Open Questions
 
 None at this time.
