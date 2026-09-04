@@ -99,9 +99,6 @@ func ValidateDescriptor(d BundleDescriptor) error {
 	if !validPlugin(d.Plugin) || !validSource(d.Source) {
 		return fmt.Errorf("%w: descriptor requires plugin and source", ErrInvalidConfig)
 	}
-	if !validCompatibility(d.Source.Compatibility) {
-		return fmt.Errorf("%w: invalid CLI compatibility bounds", ErrInvalidConfig)
-	}
 	seen := map[string]bool{}
 	for _, path := range d.ExecutablePaths {
 		if path == "." || !fs.ValidPath(path) || seen[path] {

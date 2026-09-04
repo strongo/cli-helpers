@@ -246,7 +246,11 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 				report.Changes[len(report.Changes)-1].Outcome = Planned
 			}
 			if action == Added || action == Updated {
-				operations = append(operations, operation{source: rb.Bundle.FS, executables: rb.Bundle.ExecutablePaths, plugin: rb.Bundle.Plugin, name: item.Name, old: prior.Skills[item.Name], new: item.Digest})
+				old := ""
+				if action == Updated {
+					old = prior.Skills[item.Name]
+				}
+				operations = append(operations, operation{source: rb.Bundle.FS, executables: rb.Bundle.ExecutablePaths, plugin: rb.Bundle.Plugin, name: item.Name, old: old, new: item.Digest})
 			}
 		}
 		for name, oldDigest := range prior.Skills {

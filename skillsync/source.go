@@ -69,9 +69,6 @@ func validateBundle(b Bundle, current string) ([]skill, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !validCompatibility(b.Source.Compatibility) {
-		return nil, fmt.Errorf("%w: invalid CLI compatibility bounds", ErrInvalidConfig)
-	}
 	if current != "" && !compatible(current, b.Source.Compatibility) {
 		return nil, fmt.Errorf("%w: %s is incompatible with CLI %s", ErrInvalidConfig, b.Plugin.String(), current)
 	}
