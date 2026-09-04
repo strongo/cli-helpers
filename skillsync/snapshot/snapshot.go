@@ -190,6 +190,11 @@ func Unpack(artifact []byte, limits Limits) (skillsync.BundleDescriptor, fs.FS, 
 			return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: unknown archive entry %q", skillsync.ErrInvalidConfig, head.Name)
 		}
 		name := strings.TrimPrefix(head.Name, contentPrefix)
+		for existing := range files {
+			if strings.HasPrefix(name, existing+"/") || strings.HasPrefix(existing, name+"/") {
+				return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: file-directory archive collision", skillsync.ErrInvalidConfig)
+			}
+		}
 		mode := fs.FileMode(0o644)
 		if head.Mode&0o111 != 0 {
 			mode = 0o755

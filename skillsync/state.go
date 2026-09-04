@@ -154,7 +154,11 @@ func importLegacy(dir string, legacy LegacyImport) (pluginState, error) {
 	if legacy.MarkerFile == "" || filepath.Base(legacy.MarkerFile) != legacy.MarkerFile || !validPlugin(legacy.Plugin) {
 		return pluginState{}, fmt.Errorf("%w: invalid legacy import", ErrInvalidConfig)
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, legacy.MarkerFile))
+	markerPath := filepath.Join(dir, legacy.MarkerFile)
+	if info, err := os.Lstat(markerPath); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return pluginState{}, fmt.Errorf("%w: legacy marker is a symlink", ErrStateCorrupt)
+	}
+	raw, err := os.ReadFile(markerPath)
 	if err != nil {
 		return pluginState{}, err
 	}
@@ -169,7 +173,7 @@ func importLegacy(dir string, legacy LegacyImport) (pluginState, error) {
 		return pluginState{}, fmt.Errorf("%w: invalid legacy marker", ErrStateCorrupt)
 	}
 	for name, expected := range marker.Skills {
-		if name == "" || !fs.ValidPath(name) || filepath.Base(name) != name || expected == "" {
+		if !validSkillName(name) || expected == "" {
 			return pluginState{}, fmt.Errorf("%w: invalid legacy skill", ErrStateCorrupt)
 		}
 		actual, err := legacyWBDigest(os.DirFS(dir), name)

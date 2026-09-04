@@ -172,7 +172,7 @@ func TestSourceRejectsInvalidReleaseMetadataAndUntrustedAssetURLs(t *testing.T) 
 	if !errors.Is(err, skillsync.ErrInvalidConfig) {
 		t.Fatalf("err = %v", err)
 	}
-	if _, err := (Source{BaseURL: "https://api.github.example", Client: client, MaxAssetBytes: 1}).download(context.Background(), "http://untrusted.invalid/asset"); !errors.Is(err, skillsync.ErrInvalidConfig) {
+	if _, err := (Source{BaseURL: "https://api.github.example", Client: client, MaxAssetBytes: 1}).download(context.Background(), "http://untrusted.invalid/asset", 1); !errors.Is(err, skillsync.ErrInvalidConfig) {
 		t.Fatalf("insecure asset error = %v", err)
 	}
 }

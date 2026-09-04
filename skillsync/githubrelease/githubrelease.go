@@ -4,6 +4,7 @@
 package githubrelease
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -94,7 +95,7 @@ func (s Source) NewerCompatible(ctx context.Context, matched skillsync.Source, c
 			if descriptorAsset.Size < 0 || descriptorAsset.Size > s.MaxMetadataBytes {
 				return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: release descriptor exceeds size limit", skillsync.ErrInvalidConfig)
 			}
-			raw, err := s.download(ctx, descriptorAsset.URL)
+			raw, err := s.download(ctx, descriptorAsset.URL, s.MaxMetadataBytes)
 			if err != nil {
 				return skillsync.BundleDescriptor{}, nil, err
 			}
@@ -127,7 +128,7 @@ func (s Source) NewerCompatible(ctx context.Context, matched skillsync.Source, c
 		if candidate.archive.Size < 0 || candidate.archive.Size > s.MaxAssetBytes {
 			return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: release asset exceeds size limit", skillsync.ErrInvalidConfig)
 		}
-		raw, err := s.download(ctx, candidate.archive.URL)
+		raw, err := s.download(ctx, candidate.archive.URL, s.MaxAssetBytes)
 		if err != nil {
 			return skillsync.BundleDescriptor{}, nil, err
 		}
@@ -169,13 +170,13 @@ func (s Source) list(ctx context.Context, owner, repository string, page int) ([
 	return releases, hasNextPage(headers.Get("Link")), nil
 }
 
-func (s Source) download(ctx context.Context, rawURL string) ([]byte, error) {
+func (s Source) download(ctx context.Context, rawURL string, limit int64) ([]byte, error) {
 	parsed, err := url.Parse(rawURL)
 	base, baseErr := url.Parse(s.BaseURL)
 	if err != nil || baseErr != nil || base.Scheme != "https" || base.Host == "" || parsed.Scheme != "https" || parsed.Host == "" {
 		return nil, fmt.Errorf("%w: invalid release asset URL", skillsync.ErrInvalidConfig)
 	}
-	raw, _, err := s.get(ctx, rawURL, s.MaxAssetBytes)
+	raw, _, err := s.get(ctx, rawURL, limit)
 	return raw, err
 }
 
@@ -195,6 +196,9 @@ func (s Source) get(ctx context.Context, target string, limit int64) ([]byte, ht
 		}
 		if previousRedirect != nil {
 			return previousRedirect(next, via)
+		}
+		if len(via) >= 10 {
+			return fmt.Errorf("stopped after 10 redirects")
 		}
 		return nil
 	}
@@ -224,9 +228,12 @@ func (s Source) get(ctx context.Context, target string, limit int64) ([]byte, ht
 
 func decodeDescriptor(raw []byte) (skillsync.BundleDescriptor, error) {
 	var descriptor skillsync.BundleDescriptor
-	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&descriptor); err != nil {
+		return skillsync.BundleDescriptor{}, fmt.Errorf("%w: invalid release descriptor", skillsync.ErrInvalidConfig)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return skillsync.BundleDescriptor{}, fmt.Errorf("%w: invalid release descriptor", skillsync.ErrInvalidConfig)
 	}
 	if err := skillsync.ValidateDescriptor(descriptor); err != nil {

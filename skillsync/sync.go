@@ -103,12 +103,17 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 		return report, err
 	}
 	legacyImported := false
-	if len(current.Plugins) == 0 && opts.Legacy.MarkerFile != "" {
+	if opts.Legacy.MarkerFile != "" && current.Plugins[opts.Legacy.Plugin.String()].Skills == nil {
 		legacy, err := importLegacy(opts.Dir, opts.Legacy)
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return report, err
 		}
 		if err == nil {
+			for name := range legacy.Skills {
+				if owner := ownersOf(current)[name]; owner != "" && owner != opts.Legacy.Plugin.String() {
+					return report, fmt.Errorf("%w: legacy skill %s is already owned by %s", ErrStateCorrupt, name, owner)
+				}
+			}
 			current.Plugins[opts.Legacy.Plugin.String()] = legacy
 			legacyImported = true
 		}
@@ -1009,12 +1014,28 @@ func lock(ctx context.Context, dir string, timeout time.Duration) (func(), error
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	parent := filepath.Dir(filepath.Clean(dir))
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	abs, err = canonicalSystemAlias(abs)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateExistingAncestry(abs); err != nil {
+		return nil, err
+	}
+	parent := filepath.Dir(abs)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return nil, err
 	}
-	sum := sha256.Sum256([]byte(filepath.Clean(dir)))
+	sum := sha256.Sum256([]byte(abs))
 	path := filepath.Join(parent, fmt.Sprintf(".cli-helpers-skills-lock-%x", sum[:8]))
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("refuse symlinked skills lock %s", path)
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
 	file := flock.New(path)
 	deadline := time.Now().Add(timeout)
 	for {
@@ -1037,4 +1058,55 @@ func lock(ctx context.Context, dir string, timeout time.Duration) (func(), error
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
+}
+
+// macOS exposes /tmp and /var as system aliases. Canonicalize only those
+// platform-owned aliases before enforcing the no-user-symlink target rule.
+func canonicalSystemAlias(path string) (string, error) {
+	for alias, expected := range map[string]string{"/tmp": "/private/tmp", "/var": "/private/var"} {
+		if path != alias && !strings.HasPrefix(path, alias+string(filepath.Separator)) {
+			continue
+		}
+		info, err := os.Lstat(alias)
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			return path, nil
+		}
+		resolved, err := filepath.EvalSymlinks(alias)
+		if err != nil {
+			return "", err
+		}
+		if resolved != expected {
+			return "", fmt.Errorf("refuse non-system symlinked skills target ancestor %s", alias)
+		}
+		return filepath.Join(resolved, strings.TrimPrefix(path, alias+string(filepath.Separator))), nil
+	}
+	return path, nil
+}
+
+func validateExistingAncestry(path string) error {
+	volume := filepath.VolumeName(path)
+	current := volume + string(filepath.Separator)
+	for _, part := range strings.Split(strings.TrimPrefix(path, current), string(filepath.Separator)) {
+		if part == "" {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refuse symlinked skills target ancestor %s", current)
+		}
+		if current != path && !info.IsDir() {
+			return fmt.Errorf("skills target ancestor %s is not a directory", current)
+		}
+	}
+	return nil
 }
