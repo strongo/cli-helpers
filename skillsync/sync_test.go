@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -503,8 +504,11 @@ func TestSyncRestoresEmbeddedExecutableMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(filepath.Join(dir, "alpha", "run"))
-	if err != nil || info.Mode().Perm() != 0o755 {
+	if err != nil {
 		t.Fatalf("installed mode = %v, %v", info.Mode(), err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
+		t.Fatalf("installed mode = %v", info.Mode())
 	}
 }
 

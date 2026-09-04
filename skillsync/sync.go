@@ -566,7 +566,7 @@ func rejectSymlink(path string) error {
 }
 func installedDigest(dir, name string) (string, error) {
 	hfs := os.DirFS(dir)
-	return subtreeDigest(hfs, name)
+	return installedSubtreeDigest(hfs, name, nil)
 }
 
 type transaction struct {
@@ -978,7 +978,7 @@ func digestAt(root, name string) (exists bool, digest string, err error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return true, "", fmt.Errorf("%w: unsafe transaction content", ErrStateCorrupt)
 	}
-	digest, err = subtreeDigest(dir.FS(), name)
+	digest, err = installedSubtreeDigest(dir.FS(), name, nil)
 	if err != nil {
 		return true, "", fmt.Errorf("%w: digest transaction content: %v", ErrStateCorrupt, err)
 	}
