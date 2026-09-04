@@ -605,6 +605,22 @@ var transactionOperations = transactionOperationSet{
 
 var transactionBoundary = func(string) {}
 
+var filesystemOperations = struct {
+	abs   func(string) (string, error)
+	lstat func(string) (fs.FileInfo, error)
+	eval  func(string) (string, error)
+	mkdir func(string, fs.FileMode) error
+	sync  func(string) error
+}{filepath.Abs, os.Lstat, filepath.EvalSymlinks, os.Mkdir, syncDirectory}
+
+type skillsLock interface {
+	TryLock() (bool, error)
+	Unlock() error
+	Close() error
+}
+
+var newSkillsLock = func(path string) skillsLock { return flock.New(path) }
+
 func rootRelative(root, path string) (string, error) {
 	rel, err := filepath.Rel(root, path)
 	if err != nil || rel == "." || !filepath.IsLocal(rel) {
@@ -679,7 +695,7 @@ func syncDirectoryChain(path, stop string) error {
 func ensureDirectoryAncestry(path string, mkdir func(string, fs.FileMode) error) ([]string, error) {
 	var missing []string
 	for current := path; ; current = filepath.Dir(current) {
-		info, err := os.Lstat(current)
+		info, err := filesystemOperations.lstat(current)
 		if err == nil {
 			if !info.IsDir() {
 				return nil, fmt.Errorf("directory ancestor %s is not a directory", current)
@@ -1313,7 +1329,7 @@ func lock(ctx context.Context, dir string, timeout time.Duration) (func(), error
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	abs, err := filepath.Abs(dir)
+	abs, err := filesystemOperations.abs(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -1325,23 +1341,23 @@ func lock(ctx context.Context, dir string, timeout time.Duration) (func(), error
 		return nil, err
 	}
 	parent := filepath.Dir(abs)
-	created, err := ensureDirectoryAncestry(parent, func(path string, mode fs.FileMode) error { return os.Mkdir(path, mode) })
+	created, err := ensureDirectoryAncestry(parent, filesystemOperations.mkdir)
 	if err != nil {
 		return nil, err
 	}
-	if err := syncCreatedDirectoryAncestry(created, syncDirectory); err != nil {
+	if err := syncCreatedDirectoryAncestry(created, filesystemOperations.sync); err != nil {
 		return nil, err
 	}
 	// One parent-level lock deliberately trades sibling parallelism for a stable
 	// identity across relative, absolute, symlink-normalized, and case-folded
 	// spellings of the same filesystem target.
 	path := filepath.Join(parent, ".cli-helpers-skills-lock")
-	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+	if info, err := filesystemOperations.lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("refuse symlinked skills lock %s", path)
 	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
-	file := flock.New(path)
+	file := newSkillsLock(path)
 	deadline := time.Now().Add(timeout)
 	for {
 		locked, err := file.TryLock()
@@ -1372,14 +1388,14 @@ func canonicalSystemAlias(path string) (string, error) {
 		if path != alias && !strings.HasPrefix(path, alias+string(filepath.Separator)) {
 			continue
 		}
-		info, err := os.Lstat(alias)
+		info, err := filesystemOperations.lstat(alias)
 		if err != nil {
 			return "", err
 		}
 		if info.Mode()&os.ModeSymlink == 0 {
 			return path, nil
 		}
-		resolved, err := filepath.EvalSymlinks(alias)
+		resolved, err := filesystemOperations.eval(alias)
 		if err != nil {
 			return "", err
 		}
@@ -1401,7 +1417,7 @@ func validateTargetAncestry(dir string) error {
 // /var system aliases, returning their canonical path for callers that must
 // deduplicate targets before writing them.
 func ValidateTarget(dir string) (string, error) {
-	abs, err := filepath.Abs(dir)
+	abs, err := filesystemOperations.abs(dir)
 	if err != nil {
 		return "", err
 	}
@@ -1423,7 +1439,7 @@ func validateExistingAncestry(path string) error {
 			continue
 		}
 		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
+		info, err := filesystemOperations.lstat(current)
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
