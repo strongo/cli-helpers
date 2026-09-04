@@ -1,4 +1,4 @@
-module github.com/strongo/selfupdate
+module github.com/strongo/cli-helpers
 
 go 1.26.0
 

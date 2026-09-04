@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/strongo/selfupdate"
+	"github.com/strongo/cli-helpers/selfupdate"
 )
 
 // checkJSON is the --format json shape for a Check/--check result.
@@ -28,15 +28,16 @@ type checkJSON struct {
 // "only meaningful for some actions" contract documented on
 // selfupdate.Outcome.
 type outcomeJSON struct {
-	Action     string `json:"action"`
-	Manager    string `json:"manager,omitempty"`
-	Command    string `json:"command,omitempty"`
-	Current    string `json:"current,omitempty"`
-	Latest     string `json:"latest,omitempty"`
-	Target     string `json:"target,omitempty"`
-	Downgrade  bool   `json:"downgrade,omitempty"`
-	PlannedURL string `json:"planned_url,omitempty"`
-	Warning    string `json:"warning,omitempty"`
+	Action             string `json:"action"`
+	Manager            string `json:"manager,omitempty"`
+	Command            string `json:"command,omitempty"`
+	Current            string `json:"current,omitempty"`
+	Latest             string `json:"latest,omitempty"`
+	Target             string `json:"target,omitempty"`
+	Downgrade          bool   `json:"downgrade,omitempty"`
+	PlannedURL         string `json:"planned_url,omitempty"`
+	Warning            string `json:"warning,omitempty"`
+	AfterUpdateWarning string `json:"after_update_warning,omitempty"`
 }
 
 // WriteOutcomeJSON writes outcome's --format json shape to out.
@@ -61,9 +62,12 @@ func WriteOutcomeJSON(out io.Writer, outcome selfupdate.Outcome) error {
 				oj.Command = outcome.PlannedCommand
 			}
 		}
-		if outcome.PostSwapWarning != nil {
-			oj.Warning = outcome.PostSwapWarning.Error()
-		}
+	}
+	if outcome.PostSwapWarning != nil {
+		oj.Warning = outcome.PostSwapWarning.Error()
+	}
+	if outcome.AfterUpdateWarning != nil {
+		oj.AfterUpdateWarning = outcome.AfterUpdateWarning.Error()
 	}
 	return json.NewEncoder(out).Encode(oj)
 }
@@ -106,6 +110,9 @@ func WriteOutcome(out, errOut io.Writer, cfg selfupdate.Config, outcome selfupda
 	}
 	if outcome.PostSwapWarning != nil {
 		fmt.Fprintf(errOut, "self-update: warning: %v\n", outcome.PostSwapWarning) //nolint:errcheck
+	}
+	if outcome.AfterUpdateWarning != nil {
+		fmt.Fprintf(errOut, "self-update: post-update warning: %v\n", outcome.AfterUpdateWarning) //nolint:errcheck
 	}
 }
 

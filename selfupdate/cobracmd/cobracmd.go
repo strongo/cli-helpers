@@ -24,11 +24,12 @@ package cobracmd
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/spf13/cobra"
 
-	"github.com/strongo/selfupdate"
-	"github.com/strongo/selfupdate/cliui"
+	"github.com/strongo/cli-helpers/selfupdate"
+	"github.com/strongo/cli-helpers/selfupdate/cliui"
 )
 
 // Test seams: overridable indirections over selfupdate.Config's own methods,
@@ -49,14 +50,22 @@ var (
 	}
 )
 
+// UsageError identifies invalid command input before any update work begins.
+// Hosts may use errors.As to distinguish it from operational failures.
+type UsageError struct{ Err error }
+
+func (e *UsageError) Error() string { return e.Err.Error() }
+func (e *UsageError) Unwrap() error { return e.Err }
+
 // ErrorMapper translates this package's typed outcomes into the host CLI's
 // own error type/exit-code convention. Both methods may return the error
 // unchanged (or nil) — the mapper exists for hosts that need to wrap or
 // reclassify, not because every host must.
 type ErrorMapper interface {
-	// Failure maps a non-nil error from Config.Update or Config.Check —
-	// ordinarily a *selfupdate.Failure, unwrap-able via
-	// selfupdate.KindOf(err) — into the host's own error type.
+	// Failure maps a non-nil command error into the host's own error type.
+	// Invalid output formats return *UsageError; update and check failures
+	// ordinarily return *selfupdate.Failure. Output writer errors are also
+	// mapped so hosts can preserve their operational-failure exit codes.
 	Failure(err error) error
 	// UpdateAvailable is called after a successful --check whose verdict is
 	// not UpToDate — that covers both selfupdate.UpdateAvailable and
@@ -95,6 +104,11 @@ type CommandOptions struct {
 	// makes the confirmation-prompt and non-interactive-refusal paths
 	// exercisable without a real TTY.
 	Interactive func() bool
+	// AfterUpdate runs after a successful update outcome. It is passed through
+	// to selfupdate.Options so non-Cobra and Cobra consumers share the same
+	// post-update contract. Its errors are warnings on the returned Outcome,
+	// never command failures after the binary update completed.
+	AfterUpdate selfupdate.AfterUpdateFunc
 }
 
 // New builds the "self-update" command for cfg. It registers --check,
@@ -126,6 +140,9 @@ func New(cfg selfupdate.Config, opts CommandOptions) *cobra.Command {
 			format := "text"
 			if opts.JSONFormat {
 				format, _ = cmd.Flags().GetString("format")
+				if format != "text" && format != "json" {
+					return mapFailure(opts, &UsageError{Err: fmt.Errorf("invalid --format %q: expected text or json", format)})
+				}
 			}
 
 			if check, _ := cmd.Flags().GetBool("check"); check {
@@ -177,6 +194,7 @@ func runUpdate(cmd *cobra.Command, cfg selfupdate.Config, opts CommandOptions, f
 		Confirm:        confirm,
 		RunManaged:     cliui.ManagedCommandRunner(cmd.InOrStdin(), interactionOut, cmd.ErrOrStderr()),
 		VerifyManaged:  cliui.VerifyManagedBinary,
+		AfterUpdate:    opts.AfterUpdate,
 	})
 	if err != nil {
 		if selfupdate.KindOf(err) == selfupdate.KindAmbiguous {
@@ -186,7 +204,10 @@ func runUpdate(cmd *cobra.Command, cfg selfupdate.Config, opts CommandOptions, f
 	}
 
 	if format == "json" {
-		return cliui.WriteOutcomeJSON(out, outcome)
+		if err := cliui.WriteOutcomeJSON(out, outcome); err != nil {
+			return mapFailure(opts, err)
+		}
+		return nil
 	}
 	cliui.WriteOutcome(out, cmd.ErrOrStderr(), cfg, outcome)
 	return nil
@@ -215,7 +236,7 @@ func runCheck(cmd *cobra.Command, cfg selfupdate.Config, opts CommandOptions, fo
 	out := cmd.OutOrStdout()
 	if format == "json" {
 		if err := cliui.WriteCheckJSON(out, cfg, result, detection); err != nil {
-			return err
+			return mapFailure(opts, err)
 		}
 	} else {
 		cliui.WriteCheck(out, cfg, result)

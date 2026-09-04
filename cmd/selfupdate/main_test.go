@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/strongo/selfupdate"
+	"github.com/strongo/cli-helpers/selfupdate"
 )
 
 // These tests exercise this CLI's own wiring — config construction, command
@@ -24,8 +24,8 @@ func TestBuildConfig_SelfHostingIdentity(t *testing.T) {
 	if cfg.BinaryName != "selfupdate" {
 		t.Errorf("BinaryName = %q, want selfupdate", cfg.BinaryName)
 	}
-	if cfg.Repository != "strongo/selfupdate" {
-		t.Errorf("Repository = %q, want strongo/selfupdate", cfg.Repository)
+	if cfg.Repository != "strongo/cli-helpers" {
+		t.Errorf("Repository = %q, want strongo/cli-helpers", cfg.Repository)
 	}
 	if cfg.CurrentVersion != info.Version {
 		t.Errorf("CurrentVersion = %q, want the package-level buildinfo info.Version %q", cfg.CurrentVersion, info.Version)

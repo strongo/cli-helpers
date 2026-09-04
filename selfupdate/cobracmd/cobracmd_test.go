@@ -12,7 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/strongo/selfupdate"
+	"github.com/strongo/cli-helpers/selfupdate"
 )
 
 // exitCoder is the convention a host CLI's top-level runner checks to turn
@@ -136,6 +136,65 @@ func TestNew_RejectsExtraArgs(t *testing.T) {
 	_, _, err := runCmd(t, cmd, "extra-positional", "--check")
 	if err == nil {
 		t.Fatal("expected error for extra positional argument")
+	}
+}
+
+func TestNew_RejectsInvalidFormatBeforeSideEffects(t *testing.T) {
+	previousCheck, previousUpdate, previousDetect := checkFunc, updateFunc, detectFunc
+	t.Cleanup(func() { checkFunc, updateFunc, detectFunc = previousCheck, previousUpdate, previousDetect })
+	checkFunc = func(selfupdate.Config, context.Context) (selfupdate.CheckResult, error) {
+		t.Fatal("invalid format must not check releases")
+		return selfupdate.CheckResult{}, nil
+	}
+	updateFunc = func(selfupdate.Config, context.Context, selfupdate.Options) (selfupdate.Outcome, error) {
+		t.Fatal("invalid format must not update the binary")
+		return selfupdate.Outcome{}, nil
+	}
+	detectFunc = func(selfupdate.Config) (selfupdate.Detection, error) {
+		t.Fatal("invalid format must not inspect the installed binary")
+		return selfupdate.Detection{}, nil
+	}
+	for _, format := range []string{"xml", "", "JSON", " text"} {
+		for _, mode := range []string{"--check", "--yes"} {
+			t.Run(format+mode, func(t *testing.T) {
+				cmd := New(testConfig(), CommandOptions{JSONFormat: true, Errors: specscoreStyleErrors{}})
+				_, _, err := runCmd(t, cmd, mode, "--format="+format)
+				var usage *UsageError
+				if !errors.As(err, &usage) {
+					t.Fatalf("error = %v, want wrapped UsageError", err)
+				}
+				if !strings.Contains(usage.Error(), "expected text or json") || !errors.Is(err, usage.Unwrap()) {
+					t.Fatalf("usage error does not preserve its cause: %v", err)
+				}
+				var coded exitError
+				if !errors.As(err, &coded) || coded.code != 4 {
+					t.Fatalf("usage error did not pass through host mapper: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestJSONWriterErrorsUseHostMapper(t *testing.T) {
+	for _, mode := range []string{"--check", "--yes"} {
+		t.Run(mode, func(t *testing.T) {
+			withStubCheck(t, selfupdate.CheckResult{Verdict: selfupdate.UpdateAvailable}, nil)
+			withStubUpdate(t, nil, selfupdate.Outcome{Action: selfupdate.ActionAlreadyCurrent}, nil)
+			writeErr := errors.New("closed output pipe")
+			var availableCalls int
+			cmd := New(testConfig(), CommandOptions{JSONFormat: true, Errors: specscoreStyleErrors{updateAvailableCalls: &availableCalls}})
+			cmd.SetOut(errWriter{err: writeErr})
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs([]string{mode, "--format=json"})
+			err := cmd.Execute()
+			var coded exitError
+			if !errors.As(err, &coded) || coded.code != 4 || !errors.Is(err, writeErr) {
+				t.Fatalf("error = %v, want mapped writer error preserving cause", err)
+			}
+			if availableCalls != 0 {
+				t.Fatal("writer failure must precede update-available mapping")
+			}
+		})
 	}
 }
 
@@ -383,6 +442,44 @@ func TestUpdate_FlagsMapToOptions(t *testing.T) {
 	}
 	if captured.VerifyManaged == nil {
 		t.Fatal("VerifyManaged is nil; the Cobra adapter must supply the post-update probe")
+	}
+}
+
+func TestUpdate_AfterUpdateIsPassedThrough(t *testing.T) {
+	var captured selfupdate.Options
+	withStubUpdate(t, &captured, selfupdate.Outcome{Action: selfupdate.ActionUpdated}, nil)
+	called := false
+	afterUpdate := func(_ context.Context, update selfupdate.AfterUpdate) error {
+		called = update.Executable.Path == "/tmp/new-tool"
+		return nil
+	}
+	cmd := New(testConfig(), CommandOptions{AfterUpdate: afterUpdate})
+	if _, _, err := runCmd(t, cmd, "--yes"); err != nil {
+		t.Fatalf("command error = %v", err)
+	}
+	if captured.AfterUpdate == nil {
+		t.Fatal("Options.AfterUpdate is nil; Cobra adapter did not pass it through")
+	}
+	if err := captured.AfterUpdate(context.Background(), selfupdate.AfterUpdate{Executable: selfupdate.ExecutableIdentity{Path: "/tmp/new-tool"}}); err != nil {
+		t.Fatalf("captured callback error = %v", err)
+	}
+	if !called {
+		t.Error("captured callback did not retain the CommandOptions callback")
+	}
+}
+
+func TestCheck_NeverCallsAfterUpdate(t *testing.T) {
+	withStubCheck(t, selfupdate.CheckResult{Current: "1.0.0", Latest: "1.0.0", Verdict: selfupdate.UpToDate}, nil)
+	called := false
+	cmd := New(testConfig(), CommandOptions{AfterUpdate: func(context.Context, selfupdate.AfterUpdate) error {
+		called = true
+		return nil
+	}})
+	if _, _, err := runCmd(t, cmd, "--check"); err != nil {
+		t.Fatalf("check error = %v", err)
+	}
+	if called {
+		t.Error("AfterUpdate ran for --check")
 	}
 }
 

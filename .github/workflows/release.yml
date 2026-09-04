@@ -14,7 +14,7 @@ name: Release
 # `permissions: contents: write` is sufficient for GoReleaser to create the
 # release itself.
 #
-# selfupdate is pre-1.0: allow_major_version_bump stays false, so a stray
+# cli-helpers is pre-1.0: allow_major_version_bump stays false, so a stray
 # `feat!:` is capped to a minor bump instead of jumping to v1.0.0.
 
 on:

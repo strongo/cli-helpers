@@ -23,7 +23,7 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/strongo/selfupdate"
+	"github.com/strongo/cli-helpers/selfupdate"
 )
 
 // IsTerminal reports whether stdin is a real terminal.

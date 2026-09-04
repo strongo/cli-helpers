@@ -5,13 +5,13 @@ status: Stable
 
 # Feature: Self-Update Library
 
-> [SpecScore.**Studio**](https://specscore.studio): | [Explore](https://specscore.studio/app/github.com/strongo/selfupdate/spec/features/self-update?op=explore) | [Edit](https://specscore.studio/app/github.com/strongo/selfupdate/spec/features/self-update?op=edit) | [Ask question](https://specscore.studio/app/github.com/strongo/selfupdate/spec/features/self-update?op=ask) | [Request change](https://specscore.studio/app/github.com/strongo/selfupdate/spec/features/self-update?op=request-change) |
+> [SpecScore.**Studio**](https://specscore.studio): | [Explore](https://specscore.studio/app/github.com/strongo/cli-helpers/spec/features/self-update?op=explore) | [Edit](https://specscore.studio/app/github.com/strongo/cli-helpers/spec/features/self-update?op=edit) | [Ask question](https://specscore.studio/app/github.com/strongo/cli-helpers/spec/features/self-update?op=ask) | [Request change](https://specscore.studio/app/github.com/strongo/cli-helpers/spec/features/self-update?op=request-change) |
 **Status:** Stable
 **Source Ideas:** —
 
 ## Summary
 
-`github.com/strongo/selfupdate` lets any Go CLI update its own binary in place.
+`github.com/strongo/cli-helpers/selfupdate` lets any Go CLI update its own binary in place.
 It decides how the running binary was installed: a package-manager-owned install
 is never overwritten directly — the caller is told the exact upgrade command by
 default, or may explicitly opt in to run that manager command as structured argv
@@ -201,6 +201,26 @@ the expected version, using the version-probe arguments the consumer configured.
 Because the swap has already succeeded, a failed confirmation is reported, not
 treated as a failed update.
 
+#### REQ: after-update-integration
+
+`Options` and the optional Cobra command adapter MUST accept the same typed,
+optional after-update callback. The callback MUST run only for a completed
+manual replacement, an already-current result, or a completed executable
+package-manager update; it MUST NOT run for a check, dry run, declined update,
+redirected manager, or failed update. It MUST receive the completed outcome and
+an absolute executable identity suitable for reexecution. For a
+package-manager update, the identity MUST be looked up from the configured
+binary name after the manager exits and then resolved through symlinks, so a
+manager-owned version-directory or shim change cannot reuse the stale path.
+
+#### REQ: after-update-integration-nonfatal
+
+Failure to resolve the installed executable or an error returned by the
+after-update callback MUST be retained as a distinct outcome warning. It MUST
+NOT turn a completed binary update into a failed update. The framework-neutral
+and Cobra output adapters MUST keep machine-readable stdout valid and expose the
+warning separately in text stderr and JSON.
+
 #### REQ: unsupported-platform
 
 When the host platform is one the consumer publishes no asset for, the package
@@ -372,7 +392,7 @@ behavior above is inherited, not restated.
 
 ### AC: only-verified-bytes-are-installed
 
-**Requirements:** self-update#req:latest-release-source, self-update#req:multi-product-repository, self-update#req:download-matching-asset, self-update#req:checksum-before-extract, self-update#req:atomic-replace, self-update#req:post-swap-version-check, self-update#req:no-op-when-current
+**Requirements:** self-update#req:latest-release-source, self-update#req:multi-product-repository, self-update#req:download-matching-asset, self-update#req:checksum-before-extract, self-update#req:atomic-replace, self-update#req:post-swap-version-check, self-update#req:after-update-integration, self-update#req:after-update-integration-nonfatal, self-update#req:no-op-when-current
 
 **Given** a manual install older than the latest stable release, where drafts and prereleases exist alongside it
 **When** the update runs

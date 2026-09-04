@@ -1082,3 +1082,280 @@ func TestUpdate_ConfiguredUndeterminedPlaceholder(t *testing.T) {
 		t.Errorf("Current = %q, want the placeholder reported as-is", outcome.Result.Current)
 	}
 }
+
+func TestUpdate_AfterUpdateRunsOnlyForSuccessfulManualOutcomes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake binary not portable to windows")
+	}
+
+	t.Run("updated", func(t *testing.T) {
+		h := newUpdateHarness(t, "bin/wb", "old binary")
+		h.setReleases(stableReleaseJSON("v1.1.0"))
+		h.addAsset("v1.1.0", "1.1.0", "#!/bin/sh\necho \"wb version 1.1.0\"\n")
+		var got AfterUpdate
+		outcome, err := h.cfg.Update(context.Background(), Options{
+			Confirm: func(string) (bool, error) { return true, nil },
+			AfterUpdate: func(_ context.Context, update AfterUpdate) error {
+				got = update
+				return nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("Update() error = %v", err)
+		}
+		if outcome.Action != ActionUpdated || got.Outcome.Action != ActionUpdated {
+			t.Fatalf("outcomes = %s / %s, want updated", outcome.Action, got.Outcome.Action)
+		}
+		if got.Executable.Path != h.target || got.Executable.ResolvedPath != h.target {
+			t.Errorf("executable = %+v, want both paths %q", got.Executable, h.target)
+		}
+	})
+
+	t.Run("already current", func(t *testing.T) {
+		h := newUpdateHarness(t, "bin/wb", "old binary")
+		h.setReleases(stableReleaseJSON("v1.0.0"))
+		called := false
+		outcome, err := h.cfg.Update(context.Background(), Options{AfterUpdate: func(_ context.Context, update AfterUpdate) error {
+			called = update.Outcome.Action == ActionAlreadyCurrent
+			return nil
+		}})
+		if err != nil {
+			t.Fatalf("Update() error = %v", err)
+		}
+		if outcome.Action != ActionAlreadyCurrent || !called {
+			t.Errorf("action = %s, callback called = %v; want already current callback", outcome.Action, called)
+		}
+	})
+
+	t.Run("already current dry run", func(t *testing.T) {
+		h := newUpdateHarness(t, "bin/wb", "old binary")
+		h.setReleases(stableReleaseJSON("v1.0.0"))
+		called := false
+		outcome, err := h.cfg.Update(context.Background(), Options{
+			DryRun: true,
+			AfterUpdate: func(context.Context, AfterUpdate) error {
+				called = true
+				return nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("Update() error = %v", err)
+		}
+		if outcome.Action != ActionAlreadyCurrent {
+			t.Errorf("Action = %s, want already_current", outcome.Action)
+		}
+		if called {
+			t.Error("AfterUpdate ran for an already-current dry run")
+		}
+	})
+
+	for _, tc := range []struct {
+		name       string
+		wantAction Action
+		wantErr    bool
+		run        func(t *testing.T, h *updateHarness, opts Options) (Outcome, error)
+	}{
+		{
+			name:       "dry run",
+			wantAction: ActionPlanned,
+			run: func(_ *testing.T, h *updateHarness, opts Options) (Outcome, error) {
+				h.setReleases(stableReleaseJSON("v1.1.0"))
+				return h.cfg.Update(context.Background(), opts)
+			},
+		},
+		{
+			name:       "declined",
+			wantAction: ActionAborted,
+			run: func(_ *testing.T, h *updateHarness, opts Options) (Outcome, error) {
+				h.setReleases(stableReleaseJSON("v1.1.0"))
+				opts.Confirm = func(string) (bool, error) { return false, nil }
+				return h.cfg.Update(context.Background(), opts)
+			},
+		},
+		{
+			name:       "redirected",
+			wantAction: ActionRedirected,
+			run: func(_ *testing.T, h *updateHarness, opts Options) (Outcome, error) {
+				h.cfg.Managers = []Manager{Homebrew("brew upgrade --cask wb")}
+				osExecutable = func() (string, error) {
+					return filepath.Join(h.dir, "Cellar", "wb", "1.0.0", "bin", "wb"), nil
+				}
+				return h.cfg.Update(context.Background(), opts)
+			},
+		},
+		{
+			name:    "failure",
+			wantErr: true,
+			run: func(_ *testing.T, h *updateHarness, opts Options) (Outcome, error) {
+				h.target = filepath.Join(h.dir, "unknown", "wb")
+				osExecutable = func() (string, error) { return h.target, nil }
+				return h.cfg.Update(context.Background(), opts)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newUpdateHarness(t, "bin/wb", "old binary")
+			calls := 0
+			opts := Options{DryRun: tc.name == "dry run", AfterUpdate: func(context.Context, AfterUpdate) error {
+				calls++
+				return nil
+			}}
+			outcome, err := tc.run(t, h, opts)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("Update() error = nil, want failure")
+				}
+			} else if err != nil {
+				t.Fatalf("Update() error = %v", err)
+			} else if outcome.Action != tc.wantAction {
+				t.Errorf("Action = %s, want %s", outcome.Action, tc.wantAction)
+			}
+			if calls != 0 {
+				t.Errorf("AfterUpdate calls = %d, want 0 for %s", calls, tc.name)
+			}
+		})
+	}
+}
+
+func TestUpdate_AfterUpdateManagerResolvesNewExecutableAndKeepsCancellationNonfatal(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.Managers = []Manager{
+		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
+	}
+	newPath := filepath.Join(h.dir, "bin", "wb")
+	if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newPath, []byte("new binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	origLookPath, origEval := execLookPath, evalSymlinksFunc
+	execLookPath = func(binary string) (string, error) {
+		if binary != "wb" {
+			t.Fatalf("LookPath binary = %q, want wb", binary)
+		}
+		return newPath, nil
+	}
+	evalSymlinksFunc = func(path string) (string, error) {
+		if path == newPath {
+			return filepath.Join(h.dir, "Cellar", "wb", "1.1.0", "bin", "wb"), nil
+		}
+		return path, nil
+	}
+	t.Cleanup(func() { execLookPath, evalSymlinksFunc = origLookPath, origEval })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var got AfterUpdate
+	outcome, err := h.cfg.Update(ctx, Options{
+		RunManaged: func(context.Context, string, []string) error {
+			cancel()
+			return nil
+		},
+		VerifyManaged: func(context.Context, string, []string) error { return nil },
+		AfterUpdate: func(gotCtx context.Context, update AfterUpdate) error {
+			got = update
+			return gotCtx.Err()
+		},
+	})
+	if err != nil {
+		t.Fatalf("successful manager update must remain successful after callback cancellation: %v", err)
+	}
+	if outcome.Action != ActionManagerExecuted {
+		t.Fatalf("Action = %s, want manager_executed", outcome.Action)
+	}
+	if got.Executable.Path != newPath || got.Executable.ResolvedPath != filepath.Join(h.dir, "Cellar", "wb", "1.1.0", "bin", "wb") {
+		t.Errorf("callback executable = %+v, want new manager paths", got.Executable)
+	}
+	if !errors.Is(outcome.AfterUpdateWarning, context.Canceled) {
+		t.Errorf("AfterUpdateWarning = %v, want context canceled", outcome.AfterUpdateWarning)
+	}
+}
+
+func TestInstalledExecutableIdentityResolution(t *testing.T) {
+	cfg := Config{BinaryName: "wb"}
+	origLookPath, origEval, origAbs := execLookPath, evalSymlinksFunc, absPath
+	t.Cleanup(func() { execLookPath, evalSymlinksFunc, absPath = origLookPath, origEval, origAbs })
+
+	t.Run("manager lookup failure", func(t *testing.T) {
+		execLookPath = func(string) (string, error) { return "", errors.New("not on PATH") }
+		_, err := cfg.installedExecutable(&Outcome{Action: ActionManagerExecuted})
+		if err == nil || !strings.Contains(err.Error(), "not on PATH") {
+			t.Errorf("installedExecutable() error = %v, want lookup failure", err)
+		}
+	})
+
+	t.Run("relative manual path resolves installed identity", func(t *testing.T) {
+		evalSymlinksFunc = func(path string) (string, error) { return path + ".installed", nil }
+		absPath = func(path string) (string, error) {
+			if path != "bin/wb" {
+				t.Fatalf("Abs path = %q, want bin/wb", path)
+			}
+			return "/tmp/bin/wb", nil
+		}
+		identity, err := cfg.installedExecutable(&Outcome{Action: ActionUpdated, Detection: Detection{Path: "bin/wb"}})
+		if err != nil {
+			t.Fatalf("installedExecutable() error = %v", err)
+		}
+		if identity.Path != "/tmp/bin/wb" || identity.ResolvedPath != "/tmp/bin/wb.installed" {
+			t.Errorf("identity = %+v, want absolute invocation and resolved installed path", identity)
+		}
+	})
+
+	t.Run("unresolvable executable skips callback with nonfatal warning", func(t *testing.T) {
+		missing := errors.New("missing installed symlink target")
+		evalSymlinksFunc = func(string) (string, error) { return "", missing }
+		called := false
+		outcome := Outcome{Action: ActionManagerExecuted, Detection: Detection{Path: "/tmp/old/wb"}}
+		execLookPath = func(string) (string, error) { return "/tmp/new/wb", nil }
+		cfg.runAfterUpdate(context.Background(), Options{AfterUpdate: func(context.Context, AfterUpdate) error {
+			called = true
+			return nil
+		}}, &outcome)
+		if called || !errors.Is(outcome.AfterUpdateWarning, missing) {
+			t.Fatalf("callback called = %v, warning = %v; want skipped callback and resolution warning", called, outcome.AfterUpdateWarning)
+		}
+		if outcome.Action != ActionManagerExecuted {
+			t.Fatalf("completed update action changed to %s", outcome.Action)
+		}
+	})
+
+	t.Run("absolute path resolution failure", func(t *testing.T) {
+		absPath = func(string) (string, error) { return "", errors.New("cannot make absolute") }
+		_, err := cfg.installedExecutable(&Outcome{Action: ActionUpdated, Detection: Detection{Path: "bin/wb"}})
+		if err == nil || !strings.Contains(err.Error(), "cannot make absolute") {
+			t.Errorf("installedExecutable() error = %v, want absolute-path failure", err)
+		}
+	})
+}
+
+func TestRunAfterUpdateResolutionFailureIsNonfatalAndSkippedWhenIneligible(t *testing.T) {
+	cfg := Config{}
+	origAbs := absPath
+	absPath = func(string) (string, error) { return "", errors.New("cannot make absolute") }
+	t.Cleanup(func() { absPath = origAbs })
+
+	called := false
+	outcome := Outcome{Action: ActionUpdated, Detection: Detection{Path: "bin/wb"}}
+	cfg.runAfterUpdate(context.Background(), Options{AfterUpdate: func(context.Context, AfterUpdate) error {
+		called = true
+		return nil
+	}}, &outcome)
+	if called {
+		t.Error("AfterUpdate callback ran despite executable-resolution failure")
+	}
+	if outcome.AfterUpdateWarning == nil || !strings.Contains(outcome.AfterUpdateWarning.Error(), "cannot make absolute") {
+		t.Errorf("AfterUpdateWarning = %v, want executable-resolution failure", outcome.AfterUpdateWarning)
+	}
+
+	called = false
+	ineligible := Outcome{Action: ActionPlanned}
+	cfg.runAfterUpdate(context.Background(), Options{AfterUpdate: func(context.Context, AfterUpdate) error {
+		called = true
+		return nil
+	}}, &ineligible)
+	if called || ineligible.AfterUpdateWarning != nil {
+		t.Errorf("planned outcome callback state = called %v, warning %v; want no callback or warning", called, ineligible.AfterUpdateWarning)
+	}
+}
