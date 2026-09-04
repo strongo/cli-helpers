@@ -976,6 +976,79 @@ func TestMutationBackupDirectoryFaults(t *testing.T) {
 	}
 }
 
+func TestRemainingMutationDurabilityFaults(t *testing.T) {
+	source := fstest.MapFS{"alpha/SKILL.md": &fstest.MapFile{Data: []byte("new")}}
+	newDigest, err := subtreeDigest(source, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name     string
+		removal  bool
+		failAt   int
+		failPath func(dir string, path string) bool
+	}{
+		{name: "backup directory sync", failPath: func(_ string, path string) bool { return filepath.Base(path) == "backup" }},
+		{name: "backup phase journal", failAt: 4, failPath: func(dir, path string) bool { return path == dir }},
+		{name: "publish parent sync", failAt: 5, failPath: func(dir, path string) bool { return path == dir }},
+		{name: "remove journal", removal: true, failAt: 2, failPath: func(dir, path string) bool { return path == dir }},
+		{name: "remove backup sync", removal: true, failPath: func(_ string, path string) bool { return filepath.Base(path) == "backup" }},
+		{name: "remove rename parent", removal: true, failAt: 3, failPath: func(dir, path string) bool { return path == dir }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			old := writeRecoverySkill(t, dir, "alpha", "old")
+			tx := newTransaction(dir)
+			syncErr := errors.New(tc.name)
+			previous := transactionOperations
+			t.Cleanup(func() { transactionOperations = previous })
+			calls := 0
+			transactionOperations.syncDirectory = func(path string) error {
+				if tc.failPath(dir, path) {
+					calls++
+					if tc.failAt == 0 || calls == tc.failAt {
+						return syncErr
+					}
+				}
+				return previous.syncDirectory(path)
+			}
+			var got error
+			if tc.removal {
+				got = tx.remove("alpha", old)
+			} else {
+				got = tx.replace(source, nil, "alpha", old, newDigest)
+			}
+			if !errors.Is(got, syncErr) {
+				t.Fatalf("mutation=%v calls=%d", got, calls)
+			}
+		})
+	}
+	t.Run("copy parent mkdir and sorting", func(t *testing.T) {
+		parentErr := errors.New("parent mkdir")
+		previous := transactionOperations
+		t.Cleanup(func() { transactionOperations = previous })
+		calls := 0
+		transactionOperations.mkdirAll = func(path string, mode fs.FileMode) error {
+			calls++
+			if calls == 2 {
+				return parentErr
+			}
+			return previous.mkdirAll(path, mode)
+		}
+		if err := copySkill(source, "alpha", filepath.Join(t.TempDir(), "stage"), nil); !errors.Is(err, parentErr) {
+			t.Fatalf("parent mkdir=%v", err)
+		}
+		transactionOperations = previous
+		nested := fstest.MapFS{
+			"alpha/a/SKILL.md": &fstest.MapFile{Data: []byte("nested")},
+			"alpha/SKILL.md":   &fstest.MapFile{Data: []byte("root")},
+		}
+		if err := copySkill(nested, "alpha", filepath.Join(t.TempDir(), "stage"), nil); err != nil {
+			t.Fatalf("sorted copy=%v", err)
+		}
+	})
+}
+
 func TestRecoveryRetriesDirectorySyncBeforeDiscardingEvidence(t *testing.T) {
 	dir := t.TempDir()
 	old := bundle(t, "plugin", "retry-old", "old")
