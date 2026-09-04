@@ -39,19 +39,50 @@ type Result struct {
 }
 
 type gitRunner interface {
-	run(string, ...string) ([]byte, error)
+	run(string, int64, ...string) ([]byte, error)
 }
 
 type systemGit struct{}
 
-func (systemGit) run(dir string, args ...string) ([]byte, error) {
-	command := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+func (systemGit) run(dir string, limit int64, args ...string) ([]byte, error) {
+	if limit <= 0 {
+		return nil, errors.New("git output limit must be positive")
 	}
-	return output, nil
+	command := exec.Command("git", append([]string{"--no-replace-objects", "-C", dir}, args...)...)
+	stdout := &limitedBuffer{limit: limit}
+	stderr := &limitedBuffer{limit: 4096, truncate: true}
+	command.Stdout = stdout
+	command.Stderr = stderr
+	err := command.Run()
+	if err != nil {
+		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
 }
+
+type limitedBuffer struct {
+	data     []byte
+	limit    int64
+	truncate bool
+}
+
+func (b *limitedBuffer) Write(data []byte) (int, error) {
+	remaining := b.limit - int64(len(b.data))
+	if int64(len(data)) <= remaining {
+		b.data = append(b.data, data...)
+		return len(data), nil
+	}
+	if remaining > 0 {
+		b.data = append(b.data, data[:remaining]...)
+	}
+	if b.truncate {
+		return len(data), nil
+	}
+	return 0, fmt.Errorf("git output exceeds %d-byte bound", b.limit)
+}
+
+func (b *limitedBuffer) Bytes() []byte  { return b.data }
+func (b *limitedBuffer) String() string { return string(b.data) }
 
 type outputFS struct {
 	lstat      func(string) (fs.FileInfo, error)
@@ -65,11 +96,12 @@ type outputFS struct {
 type snapshotOps struct {
 	capture    func(fs.FS) (snapshot.Captured, error)
 	pack       func(snapshot.Captured, skillsync.BundleDescriptor) ([]byte, error)
+	validate   func([]byte) error
 	descriptor func(snapshot.Captured, skillsync.BundleDescriptor) ([]byte, error)
 }
 
 func defaultSnapshotOps() snapshotOps {
-	return snapshotOps{capture: snapshot.Capture, pack: func(c snapshot.Captured, d skillsync.BundleDescriptor) ([]byte, error) { return c.Pack(d) }, descriptor: func(c snapshot.Captured, d skillsync.BundleDescriptor) ([]byte, error) { return c.DescriptorJSON(d) }}
+	return snapshotOps{capture: snapshot.Capture, pack: func(c snapshot.Captured, d skillsync.BundleDescriptor) ([]byte, error) { return c.Pack(d) }, validate: func(archive []byte) error { _, _, err := snapshot.Unpack(archive, snapshot.Limits{}); return err }, descriptor: func(c snapshot.Captured, d skillsync.BundleDescriptor) ([]byte, error) { return c.DescriptorJSON(d) }}
 }
 
 var fullSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -114,6 +146,9 @@ func produceWith(config Config, git gitRunner, output outputFS, snapshots snapsh
 	if err != nil {
 		return Result{}, fmt.Errorf("pack snapshot: %w", err)
 	}
+	if err := snapshots.validate(archive); err != nil {
+		return Result{}, fmt.Errorf("validate bounded snapshot: %w", err)
+	}
 	rawDescriptor, err := snapshots.descriptor(captured, descriptor)
 	if err != nil {
 		return Result{}, fmt.Errorf("encode descriptor: %w", err)
@@ -133,18 +168,18 @@ func validateInput(config Config) error {
 }
 
 func verifyRepository(git gitRunner, repository string, source skillsync.Source) error {
-	inside, err := git.run(repository, "rev-parse", "--is-inside-work-tree")
+	inside, err := git.run(repository, 1024, "rev-parse", "--is-inside-work-tree")
 	if err != nil || strings.TrimSpace(string(inside)) != "true" {
 		return fmt.Errorf("%w: source repository is not a Git work tree", skillsync.ErrInvalidConfig)
 	}
-	resolved, err := git.run(repository, "rev-parse", source.Revision+"^{commit}")
+	resolved, err := git.run(repository, 1024, "rev-parse", source.Revision+"^{commit}")
 	if err != nil || strings.TrimSpace(string(resolved)) != source.Revision {
 		return fmt.Errorf("%w: source revision %q is not an available exact commit", skillsync.ErrInvalidConfig, source.Revision)
 	}
 	// An origin is common in CI. When it is present, reject descriptor
 	// repository metadata that disagrees with it. Repositories intentionally
 	// created without an origin remain useful offline test/build inputs.
-	if origin, err := git.run(repository, "remote", "get-url", "origin"); err == nil && strings.TrimSpace(string(origin)) != "" && canonicalRepository(string(origin)) != source.Repository {
+	if origin, err := git.run(repository, 4096, "remote", "get-url", "origin"); err == nil && strings.TrimSpace(string(origin)) != "" && canonicalRepository(string(origin)) != source.Repository {
 		return fmt.Errorf("%w: descriptor repository %q disagrees with origin %q", skillsync.ErrInvalidConfig, source.Repository, strings.TrimSpace(string(origin)))
 	}
 	return nil
@@ -167,15 +202,16 @@ func readCommittedTree(git gitRunner, repository string, source skillsync.Source
 	if source.Path == "." {
 		treeRef = source.Revision + "^{tree}"
 	}
-	typeName, err := git.run(repository, "cat-file", "-t", treeRef)
+	typeName, err := git.run(repository, 1024, "cat-file", "-t", treeRef)
 	if err != nil || strings.TrimSpace(string(typeName)) != "tree" {
 		return nil, fmt.Errorf("%w: source path %q is not a committed tree", skillsync.ErrInvalidConfig, source.Path)
 	}
-	raw, err := git.run(repository, "ls-tree", "-r", "-z", "--full-tree", source.Revision, "--", source.Path)
+	raw, err := git.run(repository, snapshot.DefaultMaxBytes, "ls-tree", "-r", "-z", "--full-tree", source.Revision, "--", source.Path)
 	if err != nil {
 		return nil, fmt.Errorf("read committed source tree: %w", err)
 	}
 	result := fstest.MapFS{}
+	var total int64
 	prefix := ""
 	if source.Path != "." {
 		prefix = source.Path + "/"
@@ -183,6 +219,9 @@ func readCommittedTree(git gitRunner, repository string, source skillsync.Source
 	for _, record := range bytes.Split(raw, []byte{0}) {
 		if len(record) == 0 {
 			continue
+		}
+		if len(result) >= snapshot.DefaultMaxFiles-1 {
+			return nil, fmt.Errorf("%w: committed tree exceeds %d content files", skillsync.ErrInvalidConfig, snapshot.DefaultMaxFiles-1)
 		}
 		fields := bytes.SplitN(record, []byte{'\t'}, 2)
 		if len(fields) != 2 {
@@ -204,10 +243,15 @@ func readCommittedTree(git gitRunner, repository string, source skillsync.Source
 		if !fs.ValidPath(name) {
 			return nil, fmt.Errorf("%w: unsafe committed path %q", skillsync.ErrInvalidConfig, name)
 		}
-		data, err := git.run(repository, "cat-file", "blob", metadata[2])
+		remaining := snapshot.DefaultMaxBytes - total
+		if remaining <= 0 {
+			return nil, fmt.Errorf("%w: committed tree exceeds %d bytes", skillsync.ErrInvalidConfig, snapshot.DefaultMaxBytes)
+		}
+		data, err := git.run(repository, remaining, "cat-file", "blob", metadata[2])
 		if err != nil {
 			return nil, fmt.Errorf("read committed blob %q: %w", name, err)
 		}
+		total += int64(len(data))
 		result[name] = &fstest.MapFile{Data: data, Mode: fs.FileMode(mode & 0o777)}
 	}
 	return result, nil

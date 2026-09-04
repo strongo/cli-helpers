@@ -131,7 +131,9 @@ checkout state, symlinks, gitlinks, special entries, unsafe paths, and
 non-regular modes, preserve tracked dotfiles and executable modes, calculate or
 verify the digest with the shared mode-aware implementation, and validate the
 descriptor against captured bytes before publication. A fresh output directory
-is required. If an origin exists, the declared repository MUST agree with it;
+is required. Every Git invocation MUST disable local replacement objects,
+separate bounded stderr from blob stdout, and bound tree/blob/archive bytes and
+file count to the default archive-consumer limits before publication. If an origin exists, the declared repository MUST agree with it;
 an originless local repository verifies commit/tree provenance but cannot
 independently attest its repository identity.
 
@@ -247,7 +249,8 @@ with the first full commit SHA, then archive, companion descriptor, embed tree,
 and a synced installation reproduce the same verified digest, bytes, and
 executable mode from that first commit. Repeated builds are byte-identical;
 stale metadata, short SHAs, unsafe committed tree entries, origin disagreement,
-an existing output path, and output failures are reported without completed
+local Git replacement objects, consumer-limit overflow, an existing output path,
+and output failures are reported without completed
 publication.
 
 ## Open Questions

@@ -103,6 +103,17 @@ but cannot independently attest the repository name. It never overwrites an
 existing output path and returns an error rather than claiming publication on a
 partial failure.
 
+Use `all:` when embedding the generated directory so tracked dotfiles remain
+available to the embedded snapshot. The descriptor retains executable paths,
+because `embed.FS` does not preserve executable modes.
+
+```go
+import "embed"
+
+//go:embed all:generated/skills/embed
+var generatedSkills embed.FS
+```
+
 ## Wiring example
 
 A minimal CLI wires one `Config` and builds a Cobra command from it:

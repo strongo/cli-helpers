@@ -25,6 +25,11 @@ import (
 const DefaultAssetName = "skillsync-bundle.tar"
 const DefaultDescriptorAssetName = "skillsync-bundle.json"
 
+// DefaultMaxFiles and DefaultMaxBytes are the consumer bounds applied when a
+// caller passes zero-value Limits to Unpack.
+const DefaultMaxFiles = 256
+const DefaultMaxBytes int64 = 16 << 20
+
 const descriptorName = "bundle.json"
 const contentPrefix = "content/"
 
@@ -36,10 +41,10 @@ type Limits struct {
 
 func (l Limits) normalized() Limits {
 	if l.MaxFiles <= 0 {
-		l.MaxFiles = 256
+		l.MaxFiles = DefaultMaxFiles
 	}
 	if l.MaxBytes <= 0 {
-		l.MaxBytes = 16 << 20
+		l.MaxBytes = DefaultMaxBytes
 	}
 	return l
 }

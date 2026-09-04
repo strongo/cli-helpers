@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -91,6 +92,103 @@ func TestProduceReadsPinnedCommitAndPublishesOneSnapshot(t *testing.T) {
 	repeatedArchive, err := os.ReadFile(repeatedResult.ArchivePath)
 	if err != nil || !bytes.Equal(archive, repeatedArchive) {
 		t.Fatalf("reproducible=%v err=%v", bytes.Equal(archive, repeatedArchive), err)
+	}
+}
+
+func TestProduceIgnoresLocalReplacementObjects(t *testing.T) {
+	repo, original, replacement := testRepository(t)
+	gitCommand(t, repo, "replace", original, replacement)
+	result, err := Produce(Config{RepositoryDir: repo, OutputDir: filepath.Join(t.TempDir(), "out"), Descriptor: descriptor(original)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := os.ReadFile(result.ArchivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, content, err := snapshot.Unpack(archive, snapshot.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body, err := fs.ReadFile(content, "demo/SKILL.md"); err != nil || string(body) != "first" {
+		t.Fatalf("descriptor revision %s published %q from replacement %s: %v", original, body, replacement, err)
+	}
+}
+
+func TestProduceRejectsConsumerBoundedInputs(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		files int
+		bytes int
+	}{
+		{"file count", snapshot.DefaultMaxFiles, 0},
+		{"archive bytes", 0, int(snapshot.DefaultMaxBytes)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			gitCommand(t, repo, "init")
+			gitCommand(t, repo, "config", "user.email", "test@example.com")
+			gitCommand(t, repo, "config", "user.name", "Test")
+			gitCommand(t, repo, "remote", "add", "origin", "https://github.com/example/plugin.git")
+			root := filepath.Join(repo, "skills", "demo")
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "SKILL.md"), []byte("skill"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < tc.files; i++ {
+				if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("resource-%03d", i)), []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.bytes > 0 {
+				if err := os.WriteFile(filepath.Join(root, "large"), bytes.Repeat([]byte{'x'}, tc.bytes), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gitCommand(t, repo, "add", ".")
+			gitCommand(t, repo, "commit", "-m", tc.name)
+			revision := strings.TrimSpace(gitCommand(t, repo, "rev-parse", "HEAD"))
+			out := filepath.Join(t.TempDir(), "out")
+			if _, err := Produce(Config{RepositoryDir: repo, OutputDir: out, Descriptor: descriptor(revision)}); err == nil {
+				t.Fatal("expected bounded input rejection")
+			}
+			if _, err := os.Lstat(out); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("output exists after rejected input: %v", err)
+			}
+		})
+	}
+}
+
+func TestBoundedGitOutputAndBuffers(t *testing.T) {
+	repo, _, _ := testRepository(t)
+	if _, err := (systemGit{}).run(repo, 0, "rev-parse", "HEAD"); err == nil {
+		t.Fatal("expected non-positive Git bound rejection")
+	}
+	if _, err := (systemGit{}).run(repo, 1, "rev-parse", "HEAD"); err == nil {
+		t.Fatal("expected stdout bound rejection")
+	}
+	if _, err := (systemGit{}).run(repo, 1024, "cat-file", "-t", "missing"); err == nil {
+		t.Fatal("expected Git stderr failure")
+	}
+	for _, tc := range []struct {
+		name     string
+		buffer   limitedBuffer
+		input    string
+		wantErr  bool
+		wantBody string
+	}{
+		{"within", limitedBuffer{limit: 3}, "abc", false, "abc"},
+		{"bounded", limitedBuffer{limit: 2}, "abc", true, "ab"},
+		{"truncated", limitedBuffer{limit: 2, truncate: true}, "abc", false, "ab"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.buffer.Write([]byte(tc.input))
+			if (err != nil) != tc.wantErr || tc.buffer.String() != tc.wantBody {
+				t.Fatalf("err=%v body=%q", err, tc.buffer.String())
+			}
+		})
 	}
 }
 
@@ -250,6 +348,14 @@ func TestProducerPrivateFailureSeams(t *testing.T) {
 	if _, err := readCommittedTree(broken, ".", config.Descriptor.Source); err == nil {
 		t.Fatal("expected blob read rejection")
 	}
+	overLimit := fake.clone()
+	firstBlob := strings.Repeat("x", int(snapshot.DefaultMaxBytes))
+	overLimit.responses["ls-tree -r -z --full-tree aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -- skills"] = response{out: "100644 blob " + strings.Repeat("b", 40) + "\tskills/first\x00100644 blob " + strings.Repeat("c", 40) + "\tskills/second\x00"}
+	overLimit.responses["cat-file blob "+strings.Repeat("b", 40)] = response{out: firstBlob}
+	overLimit.responses["cat-file blob "+strings.Repeat("c", 40)] = response{out: "x"}
+	if _, err := readCommittedTree(overLimit, ".", config.Descriptor.Source); err == nil {
+		t.Fatal("expected aggregate committed-byte rejection")
+	}
 	captured, err := snapshot.Capture(fstest.MapFS{"skill/SKILL.md": &fstest.MapFile{Data: []byte("skill")}})
 	if err != nil {
 		t.Fatal(err)
@@ -269,7 +375,7 @@ func TestProducerPrivateFailureSeams(t *testing.T) {
 	if _, err := bindDescriptor(snapshot.Captured{}, badExecutable); err == nil {
 		t.Fatal("expected captured digest failure")
 	}
-	for _, phase := range []string{"capture", "pack", "descriptor"} {
+	for _, phase := range []string{"capture", "pack", "validate", "descriptor"} {
 		t.Run("snapshot "+phase, func(t *testing.T) {
 			ops := defaultSnapshotOps()
 			switch phase {
@@ -277,6 +383,8 @@ func TestProducerPrivateFailureSeams(t *testing.T) {
 				ops.capture = func(fs.FS) (snapshot.Captured, error) { return snapshot.Captured{}, errors.New("capture") }
 			case "pack":
 				ops.pack = func(snapshot.Captured, skillsync.BundleDescriptor) ([]byte, error) { return nil, errors.New("pack") }
+			case "validate":
+				ops.validate = func([]byte) error { return errors.New("validate") }
 			case "descriptor":
 				ops.descriptor = func(snapshot.Captured, skillsync.BundleDescriptor) ([]byte, error) {
 					return nil, errors.New("descriptor")
@@ -328,7 +436,7 @@ func (g fakeGit) clone() fakeGit {
 	return result
 }
 
-func (g fakeGit) run(_ string, args ...string) ([]byte, error) {
+func (g fakeGit) run(_ string, _ int64, args ...string) ([]byte, error) {
 	r, ok := g.responses[strings.Join(args, " ")]
 	if !ok {
 		return nil, errors.New("unexpected git call")
