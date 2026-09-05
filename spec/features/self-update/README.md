@@ -90,20 +90,24 @@ it, and MUST treat the run as a success rather than a failure.
 
 #### REQ: managed-executable-command
 
-A consumer MAY opt a manager into execution by configuring an executable and an
-argument vector separately from its human-readable upgrade command. The package
-MUST pass those values directly to a consumer-supplied command runner and MUST
-NOT parse or invoke the display command through a shell. The normal path MUST
-confirm before execution unless confirmation was explicitly skipped, MUST stream
-the manager's output through the command adapter, and MUST fail with a typed
-manager-command failure when the process cannot start or exits unsuccessfully.
+A consumer MAY opt a manager into execution by configuring one executable and
+argument vector, or an ordered sequence of executable/argument-vector steps,
+separately from its human-readable upgrade command. The package MUST pass every
+step directly to a consumer-supplied command runner and MUST NOT parse or invoke
+the display command through a shell. The normal path MUST confirm once before
+execution unless confirmation was explicitly skipped, MUST stream every step's
+output through the command adapter, MUST stop at the first failed step, and MUST
+fail with a typed manager-command failure identifying that step when the process
+cannot start or exits unsuccessfully.
 
 A dry run MUST report the exact display command without invoking the runner. An
 explicit version pin MUST be refused with a typed failure because a generic
 package-manager upgrade cannot promise an arbitrary historical release. After a
-successful manager command, the adapter MUST probe the CLI found on `PATH` with
-the configured version arguments; a failed probe is a warning because the
-manager command already completed.
+successful manager command sequence, the adapter MUST probe the CLI found on
+`PATH` with the configured version arguments. When the latest stable release is
+known, the probe output MUST contain that exact normalized version; non-empty
+output from an older installed build is a failed probe. A failed probe is a
+warning because the manager command already completed.
 
 #### REQ: managed-availability-report
 
@@ -220,6 +224,11 @@ After a successful swap the package MUST confirm the installed binary reports
 the expected version, using the version-probe arguments the consumer configured.
 Because the swap has already succeeded, a failed confirmation is reported, not
 treated as a failed update.
+
+The same exact-version rule applies after a package-manager update whenever the
+managed availability lookup resolved a stable target. A manager that exits zero
+while stale metadata retains an older binary MUST produce a post-update warning,
+not an unqualified verified-version claim.
 
 #### REQ: after-update-integration
 
@@ -400,7 +409,7 @@ behavior above is inherited, not restated.
 
 **Given** a binary whose resolved path lies inside a configured manager's layout, reached through a symlink
 **When** an update is requested first with a redirect-only manager, then with executable argv, then as a dry run and with a version pin
-**Then** redirect-only reports the manager command without executing it; executable mode confirms and invokes exactly the configured program and argv without a shell, streams its output, and probes the installed CLI; dry-run reports but does not execute; the pin is refused; and no branch downloads, writes, or directly replaces the manager-owned executable.
+**Then** redirect-only reports the manager command without executing it; executable mode confirms and invokes every configured program and argv in order without a shell, stops on the first failure, streams its output, and proves the installed CLI reports the exact known target version; dry-run reports but does not execute; the pin is refused; and no branch downloads, writes, or directly replaces the manager-owned executable.
 
 ### AC: ambiguity-never-becomes-manual
 

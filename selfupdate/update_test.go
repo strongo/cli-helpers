@@ -257,7 +257,7 @@ func TestUpdate_ManagedAvailabilityReportPrecedesConfirmationAndRunner(t *testin
 		ReportAvailability: func(Availability) { events = append(events, "report") },
 		Confirm:            func(string) (bool, error) { events = append(events, "confirm"); return true, nil },
 		RunManaged:         func(context.Context, string, []string) error { events = append(events, "run"); return nil },
-		VerifyManaged:      func(context.Context, string, []string) error { return nil },
+		VerifyManaged:      func(context.Context, string, []string, string) error { return nil },
 	})
 	if err != nil {
 		t.Fatalf("Update() error = %v", err)
@@ -284,10 +284,13 @@ func TestUpdate_ManagedExecutable_ConfirmsRunsArgvAndVerifies(t *testing.T) {
 			args = append([]string(nil), gotArgs...)
 			return nil
 		},
-		VerifyManaged: func(_ context.Context, binary string, probeArgs []string) error {
+		VerifyManaged: func(_ context.Context, binary string, probeArgs []string, expectedVersion string) error {
 			verified = true
 			if binary != "wb" || !reflect.DeepEqual(probeArgs, []string{"--version"}) {
 				t.Errorf("managed probe = %q %v, want wb [--version]", binary, probeArgs)
+			}
+			if expectedVersion != "1.1.0" {
+				t.Errorf("managed expected version = %q, want 1.1.0", expectedVersion)
 			}
 			return nil
 		},
@@ -315,6 +318,66 @@ func TestUpdate_ManagedExecutable_ConfirmsRunsArgvAndVerifies(t *testing.T) {
 	}
 	if h.targetBytes() != "old binary" {
 		t.Error("core replaced a package-manager-owned binary")
+	}
+}
+
+func TestUpdate_ManagedExecutable_RunsRefreshAndUpgradeInOrder(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.Managers = []Manager{
+		Homebrew("brew update && brew upgrade --cask wb").WithExecutableUpgradeSteps(
+			ManagedCommand{Executable: "brew", Args: []string{"update"}},
+			ManagedCommand{Executable: "brew", Args: []string{"upgrade", "--cask", "wb"}},
+		),
+	}
+	h.setReleases(stableReleaseJSON("v1.1.0"))
+	var calls []string
+	outcome, err := h.cfg.Update(context.Background(), Options{
+		RunManaged: func(_ context.Context, executable string, args []string) error {
+			calls = append(calls, executable+" "+strings.Join(args, " "))
+			return nil
+		},
+		VerifyManaged: func(_ context.Context, _ string, _ []string, expectedVersion string) error {
+			calls = append(calls, "verify "+expectedVersion)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	if outcome.Action != ActionManagerExecuted {
+		t.Fatalf("Action = %s, want manager_executed", outcome.Action)
+	}
+	want := []string{"brew update", "brew upgrade --cask wb", "verify 1.1.0"}
+	if !reflect.DeepEqual(calls, want) {
+		t.Errorf("calls = %v, want %v", calls, want)
+	}
+}
+
+func TestUpdate_ManagedExecutable_StopsAfterFailedRefresh(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.Managers = []Manager{
+		Homebrew("brew update && brew upgrade --cask wb").WithExecutableUpgradeSteps(
+			ManagedCommand{Executable: "brew", Args: []string{"update"}},
+			ManagedCommand{Executable: "brew", Args: []string{"upgrade", "--cask", "wb"}},
+		),
+	}
+	h.setReleases(stableReleaseJSON("v1.1.0"))
+	var calls []string
+	_, err := h.cfg.Update(context.Background(), Options{
+		RunManaged: func(_ context.Context, executable string, args []string) error {
+			calls = append(calls, executable+" "+strings.Join(args, " "))
+			return errors.New("refresh failed")
+		},
+		VerifyManaged: func(context.Context, string, []string, string) error {
+			t.Fatal("verification ran after a failed refresh")
+			return nil
+		},
+	})
+	if KindOf(err) != KindManagedCommand || !strings.Contains(err.Error(), "step 1/2") {
+		t.Fatalf("error = %v, want typed first-step failure", err)
+	}
+	if !reflect.DeepEqual(calls, []string{"brew update"}) {
+		t.Errorf("calls = %v, want only the failed refresh", calls)
 	}
 }
 
@@ -381,7 +444,7 @@ func TestUpdate_ManagedExecutable_CommandFailureIsTyped(t *testing.T) {
 		RunManaged: func(context.Context, string, []string) error {
 			return errors.New("brew failed")
 		},
-		VerifyManaged: func(context.Context, string, []string) error { return nil },
+		VerifyManaged: func(context.Context, string, []string, string) error { return nil },
 	})
 	if err == nil {
 		t.Fatal("expected managed command failure")
@@ -425,7 +488,7 @@ func TestUpdate_ManagedExecutable_ConfirmationOutcomes(t *testing.T) {
 	baseOptions := func() Options {
 		return Options{
 			RunManaged:    func(context.Context, string, []string) error { return nil },
-			VerifyManaged: func(context.Context, string, []string) error { return nil },
+			VerifyManaged: func(context.Context, string, []string, string) error { return nil },
 		}
 	}
 
@@ -478,7 +541,7 @@ func TestUpdate_ManagedExecutable_ProbeFailureIsWarning(t *testing.T) {
 	outcome, err := h.cfg.Update(context.Background(), Options{
 		Confirm:    func(string) (bool, error) { return true, nil },
 		RunManaged: func(context.Context, string, []string) error { return nil },
-		VerifyManaged: func(context.Context, string, []string) error {
+		VerifyManaged: func(context.Context, string, []string, string) error {
 			return errors.New("version probe failed")
 		},
 	})
@@ -1366,7 +1429,7 @@ func TestUpdate_AfterUpdateManagerResolvesNewExecutableAndKeepsCancellationNonfa
 			cancel()
 			return nil
 		},
-		VerifyManaged: func(context.Context, string, []string) error { return nil },
+		VerifyManaged: func(context.Context, string, []string, string) error { return nil },
 		AfterUpdate: func(gotCtx context.Context, update AfterUpdate) error {
 			got = update
 			return gotCtx.Err()

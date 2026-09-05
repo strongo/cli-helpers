@@ -32,10 +32,22 @@ type Manager struct {
 	// UpgradeArgs are passed directly to UpgradeExecutable without shell
 	// parsing or interpolation.
 	UpgradeArgs []string
+	// UpgradeSteps are executed in order when non-empty. They allow a manager
+	// whose local metadata must be refreshed before upgrade to express both
+	// operations as structured argv without invoking a shell. A failed step
+	// stops the sequence.
+	UpgradeSteps []ManagedCommand
 	// PathMarkers are lowercased, '/'-separated substrings; a resolved
 	// executable path containing any one of them classifies as this
 	// manager's install.
 	PathMarkers []string
+}
+
+// ManagedCommand is one argv-safe package-manager process. Executable and Args
+// are passed directly to ManagedCommandRunner; neither is shell parsed.
+type ManagedCommand struct {
+	Executable string
+	Args       []string
 }
 
 // WithExecutableUpgrade opts this manager into executable updates. executable
@@ -46,13 +58,47 @@ type Manager struct {
 func (m Manager) WithExecutableUpgrade(executable string, args ...string) Manager {
 	m.UpgradeExecutable = executable
 	m.UpgradeArgs = append([]string(nil), args...)
+	m.UpgradeSteps = nil
+	return m
+}
+
+// WithExecutableUpgradeSteps opts this manager into an ordered executable
+// update. It is intended for managers such as Homebrew where refreshing local
+// metadata and upgrading the package are separate commands. Every argv slice
+// is copied and empty executables are rejected by CanExecuteUpgrade.
+func (m Manager) WithExecutableUpgradeSteps(steps ...ManagedCommand) Manager {
+	m.UpgradeExecutable = ""
+	m.UpgradeArgs = nil
+	m.UpgradeSteps = make([]ManagedCommand, len(steps))
+	for i, step := range steps {
+		m.UpgradeSteps[i] = ManagedCommand{Executable: step.Executable, Args: append([]string(nil), step.Args...)}
+	}
 	return m
 }
 
 // CanExecuteUpgrade reports whether the consumer explicitly opted this manager
 // into executable updates. A display-only UpgradeCommand is never sufficient.
 func (m Manager) CanExecuteUpgrade() bool {
+	if len(m.UpgradeSteps) > 0 {
+		for _, step := range m.UpgradeSteps {
+			if step.Executable == "" {
+				return false
+			}
+		}
+		return true
+	}
 	return m.UpgradeExecutable != ""
+}
+
+func (m Manager) executableUpgradeSteps() []ManagedCommand {
+	if len(m.UpgradeSteps) > 0 {
+		steps := make([]ManagedCommand, len(m.UpgradeSteps))
+		for i, step := range m.UpgradeSteps {
+			steps[i] = ManagedCommand{Executable: step.Executable, Args: append([]string(nil), step.Args...)}
+		}
+		return steps
+	}
+	return []ManagedCommand{{Executable: m.UpgradeExecutable, Args: append([]string(nil), m.UpgradeArgs...)}}
 }
 
 // Homebrew describes a Homebrew-managed install (macOS, Linux, or

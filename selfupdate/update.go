@@ -134,7 +134,7 @@ type ManagedCommandRunner func(ctx context.Context, executable string, args []st
 // ManagedBinaryVerifier probes the CLI after a successful package-manager
 // command. A failure becomes Outcome.PostSwapWarning because the manager
 // command has already completed.
-type ManagedBinaryVerifier func(ctx context.Context, binary string, args []string) error
+type ManagedBinaryVerifier func(ctx context.Context, binary string, args []string, expectedVersion string) error
 
 // Availability is the structured version information reported before an
 // update confirmation or package-manager command. Pinned is true when Target
@@ -421,17 +421,19 @@ func (c Config) updateManaged(ctx context.Context, opts Options, detection Detec
 		}
 	}
 
-	args := append([]string(nil), m.UpgradeArgs...)
-	if err := opts.RunManaged(ctx, m.UpgradeExecutable, args); err != nil {
-		return base, &Failure{
-			Kind: KindManagedCommand,
-			Err:  fmt.Errorf("run %s: %w", m.UpgradeCommand, err),
+	steps := m.executableUpgradeSteps()
+	for index, step := range steps {
+		if err := opts.RunManaged(ctx, step.Executable, step.Args); err != nil {
+			return base, &Failure{
+				Kind: KindManagedCommand,
+				Err:  fmt.Errorf("run managed update step %d/%d (%s): %w", index+1, len(steps), step.Executable, err),
+			}
 		}
 	}
 
 	outcome := Outcome{Action: ActionManagerExecuted, Detection: detection, Result: base.Result, ReleaseCheckWarning: base.ReleaseCheckWarning}
 	probeArgs := append([]string(nil), c.VersionProbeArgs...)
-	if err := opts.VerifyManaged(ctx, c.BinaryName, probeArgs); err != nil {
+	if err := opts.VerifyManaged(ctx, c.BinaryName, probeArgs, availability.Target); err != nil {
 		outcome.PostSwapWarning = err
 	}
 	c.runAfterUpdate(ctx, opts, &outcome)
