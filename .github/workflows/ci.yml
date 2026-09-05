@@ -5,12 +5,47 @@ on:
     branches-ignore:
       - renovate/**
     tags:
-      - 'v[0-9]+\.[0-9]+\.[0-9]+' # Push events to matching v*, i.e. v20.15.10
+      - 'v[0-9]+.[0-9]+.[0-9]+' # Push events to matching v*, i.e. v20.15.10
   pull_request:
     branches:
       - '**'
 
 jobs:
+
+  windows_skillsync:
+    name: Windows skills synchronization
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Exercise native durability and enforce platform coverage
+        shell: pwsh
+        run: |
+          $coveragePath = Join-Path $PWD 'coverage-windows.out'
+          go test "-coverprofile=$coveragePath" ./skillsync
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          go test ./skillsync/reexec ./skillsync/selfupdate
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $coverage = go tool cover "-func=$coveragePath"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $platform = @($coverage | Select-String 'sync_directory_windows.go')
+          if ($platform.Count -lt 4) {
+            throw "Windows directory-sync functions were not present in coverage output"
+          }
+          $uncovered = @($platform | Where-Object { $_.ToString() -notmatch '\s100\.0%$' })
+          if ($uncovered.Count -ne 0) {
+            throw "Windows directory-sync coverage is incomplete: $uncovered"
+          }
 
   strongo_workflow:
     uses: strongo/cicd/.github/workflows/workflow.yml@main

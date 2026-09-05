@@ -1,0 +1,356 @@
+// Package snapshot encodes one verified skillsync bundle as a reproducible tar
+// artifact and exposes the same descriptor/content pair for embedding.
+package snapshot
+
+import (
+	"archive/tar"
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing/fstest"
+	"time"
+
+	"github.com/strongo/cli-helpers/skillsync"
+)
+
+// DefaultAssetName is the stable GitHub Release asset name for packed bundles.
+const DefaultAssetName = "skillsync-bundle.tar"
+const DefaultDescriptorAssetName = "skillsync-bundle.json"
+
+// DefaultMaxFiles and DefaultMaxBytes are the consumer bounds applied when a
+// caller passes zero-value Limits to Unpack.
+const DefaultMaxFiles = 256
+const DefaultMaxBytes int64 = 16 << 20
+
+const descriptorName = "bundle.json"
+const contentPrefix = "content/"
+
+// Limits bounds untrusted release artifact processing.
+type Limits struct {
+	MaxFiles int
+	MaxBytes int64
+}
+
+func (l Limits) normalized() Limits {
+	if l.MaxFiles <= 0 {
+		l.MaxFiles = DefaultMaxFiles
+	}
+	if l.MaxBytes <= 0 {
+		l.MaxBytes = DefaultMaxBytes
+	}
+	return l
+}
+
+// Pack emits byte-for-byte reproducible tar content. HTTPS transport and the
+// descriptor digest provide integrity; this format does not claim signatures.
+func Pack(descriptor skillsync.BundleDescriptor, content fs.FS) ([]byte, error) {
+	captured, err := Capture(content)
+	if err != nil {
+		return nil, err
+	}
+	return captured.Pack(descriptor)
+}
+
+// Captured is an immutable, mode-preserving copy of a source filesystem. A
+// producer captures once, verifies that copy, then uses it for every output so
+// a changing filesystem cannot make the archive and descriptor disagree.
+type Captured struct {
+	files []sourceFile
+	fs    fstest.MapFS
+}
+
+// Capture reads every regular source file once and retains its bytes and mode.
+// Symlinks, special entries, and unsafe paths are rejected before a caller can
+// publish any output.
+func Capture(content fs.FS) (Captured, error) {
+	files, err := sourceFiles(content)
+	if err != nil {
+		return Captured{}, err
+	}
+	contents := make(fstest.MapFS, len(files))
+	for _, file := range files {
+		contents[file.name] = &fstest.MapFile{Data: append([]byte(nil), file.data...), Mode: file.mode}
+	}
+	return Captured{files: files, fs: contents}, nil
+}
+
+// NormalizeDescriptor binds descriptor metadata to the captured bytes. It is
+// intentionally the one validation point shared by archive and embed output.
+func (c Captured) NormalizeDescriptor(descriptor skillsync.BundleDescriptor) (skillsync.BundleDescriptor, error) {
+	return normalizedDescriptor(descriptor, c.fs)
+}
+
+// Digest computes the mode-aware digest from the captured bytes, using the
+// shared skillsync digest implementation.
+func (c Captured) Digest(executablePaths []string) (string, error) {
+	return skillsync.DigestWithExecutables(c.fs, executablePaths)
+}
+
+// Pack emits a reproducible archive from one captured source image.
+func (c Captured) Pack(descriptor skillsync.BundleDescriptor) ([]byte, error) {
+	var out bytes.Buffer
+	if err := c.Write(&out, descriptor); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
+// DescriptorJSON returns canonical descriptor metadata for a companion release
+// asset and normalizes executable modes discovered in local source content.
+func DescriptorJSON(descriptor skillsync.BundleDescriptor, content fs.FS) ([]byte, error) {
+	captured, err := Capture(content)
+	if err != nil {
+		return nil, err
+	}
+	return captured.DescriptorJSON(descriptor)
+}
+
+// DescriptorJSON returns canonical descriptor metadata for a captured image.
+func (c Captured) DescriptorJSON(descriptor skillsync.BundleDescriptor) ([]byte, error) {
+	descriptor, err := c.NormalizeDescriptor(descriptor)
+	if err != nil {
+		return nil, err
+	}
+	raw, _ := json.Marshal(descriptor)
+	return raw, nil
+}
+
+// Write emits a reproducible archive to w. It is useful to release producers
+// that upload an artifact without first duplicating it on disk.
+func Write(w io.Writer, descriptor skillsync.BundleDescriptor, content fs.FS) error {
+	captured, err := Capture(content)
+	if err != nil {
+		return err
+	}
+	return captured.Write(w, descriptor)
+}
+
+// Write emits a reproducible archive from one captured source image.
+func (c Captured) Write(w io.Writer, descriptor skillsync.BundleDescriptor) error {
+	descriptor, err := c.NormalizeDescriptor(descriptor)
+	if err != nil {
+		return err
+	}
+	raw, _ := json.Marshal(descriptor) // BundleDescriptor contains only marshalable value fields.
+	tw := tar.NewWriter(w)
+	if err := writeEntry(tw, descriptorName, 0o644, raw); err != nil {
+		return err
+	}
+	for _, file := range c.files {
+		mode := int64(0o644)
+		if executable(descriptor.ExecutablePaths, file.name) {
+			mode = 0o755
+		}
+		if err := writeEntry(tw, contentPrefix+file.name, mode, file.data); err != nil {
+			return err
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func normalizedDescriptor(descriptor skillsync.BundleDescriptor, content fs.FS) (skillsync.BundleDescriptor, error) {
+	executables, err := skillsync.NormalizeExecutablePaths(content, descriptor.ExecutablePaths)
+	if err != nil {
+		return skillsync.BundleDescriptor{}, err
+	}
+	descriptor.ExecutablePaths = executables
+	if _, err := skillsync.EmbeddedBundle(descriptor, content); err != nil {
+		return skillsync.BundleDescriptor{}, err
+	}
+	return descriptor, nil
+}
+
+type sourceFile struct {
+	name string
+	data []byte
+	mode fs.FileMode
+}
+
+func sourceFiles(content fs.FS) ([]sourceFile, error) {
+	var files []sourceFile
+	err := fs.WalkDir(content, ".", func(name string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !validArchivePath(name) || entry.Type()&fs.ModeSymlink != 0 || !entry.Type().IsRegular() {
+			return fmt.Errorf("%w: unsafe source entry %q", skillsync.ErrInvalidConfig, name)
+		}
+		data, err := fs.ReadFile(content, name)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		files = append(files, sourceFile{name: name, data: append([]byte(nil), data...), mode: info.Mode()})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
+	return files, nil
+}
+
+func writeEntry(tw *tar.Writer, name string, mode int64, data []byte) error {
+	head := &tar.Header{Name: name, Mode: mode, Size: int64(len(data)), Typeflag: tar.TypeReg, ModTime: time.Unix(0, 0).UTC(), AccessTime: time.Time{}, ChangeTime: time.Time{}, Format: tar.FormatUSTAR}
+	if err := tw.WriteHeader(head); err != nil {
+		return err
+	}
+	_, err := tw.Write(data)
+	return err
+}
+
+// Unpack validates an artifact completely before returning a bundle.
+func Unpack(artifact []byte, limits Limits) (skillsync.BundleDescriptor, fs.FS, error) {
+	limits = limits.normalized()
+	if int64(len(artifact)) > limits.MaxBytes {
+		return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: archive exceeds size limit", skillsync.ErrInvalidConfig)
+	}
+	tr := tar.NewReader(bytes.NewReader(artifact))
+	files := fstest.MapFS{}
+	var rawDescriptor []byte
+	seen := map[string]bool{}
+	var count int
+	var total int64
+	for {
+		head, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: read archive: %v", skillsync.ErrInvalidConfig, err)
+		}
+		count++
+		if count > limits.MaxFiles || head.Size < 0 || head.Size > limits.MaxBytes-total {
+			return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: archive limits exceeded", skillsync.ErrInvalidConfig)
+		}
+		// A legacy regular-file header encodes Typeflag as NUL (0); modern tar
+		// writers use tar.TypeReg. Both carry the same accepted file semantics.
+		if (head.Typeflag != tar.TypeReg && head.Typeflag != 0) || head.Linkname != "" || !validArchivePath(head.Name) || seen[head.Name] {
+			return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: unsafe archive entry %q", skillsync.ErrInvalidConfig, head.Name)
+		}
+		seen[head.Name] = true
+		data, err := io.ReadAll(io.LimitReader(tr, head.Size+1))
+		if err != nil || int64(len(data)) != head.Size {
+			return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: invalid archive entry %q", skillsync.ErrInvalidConfig, head.Name)
+		}
+		total += int64(len(data))
+		if head.Name == descriptorName {
+			rawDescriptor = data
+			continue
+		}
+		if !strings.HasPrefix(head.Name, contentPrefix) {
+			return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: unknown archive entry %q", skillsync.ErrInvalidConfig, head.Name)
+		}
+		name := strings.TrimPrefix(head.Name, contentPrefix)
+		for existing := range files {
+			if strings.HasPrefix(name, existing+"/") || strings.HasPrefix(existing, name+"/") {
+				return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: file-directory archive collision", skillsync.ErrInvalidConfig)
+			}
+		}
+		mode := fs.FileMode(0o644)
+		if head.Mode&0o111 != 0 {
+			mode = 0o755
+		}
+		files[name] = &fstest.MapFile{Data: data, Mode: mode}
+	}
+	if rawDescriptor == nil {
+		return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: archive descriptor missing", skillsync.ErrInvalidConfig)
+	}
+	var descriptor skillsync.BundleDescriptor
+	decoder := json.NewDecoder(bytes.NewReader(rawDescriptor))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&descriptor); err != nil {
+		return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: invalid archive descriptor", skillsync.ErrInvalidConfig)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return skillsync.BundleDescriptor{}, nil, fmt.Errorf("%w: invalid archive descriptor", skillsync.ErrInvalidConfig)
+	}
+	if _, err := skillsync.EmbeddedBundle(descriptor, files); err != nil {
+		return skillsync.BundleDescriptor{}, nil, err
+	}
+	return descriptor, files, nil
+}
+
+// WriteEmbedDirectory materializes the exact descriptor/content pair for a
+// caller's go:embed directory. The destination must not already exist. A write
+// failure may leave partial output in this newly created directory; callers
+// must discard that output before retrying or embedding it.
+func WriteEmbedDirectory(dir string, descriptor skillsync.BundleDescriptor, content fs.FS) error {
+	captured, err := Capture(content)
+	if err != nil {
+		return err
+	}
+	return captured.WriteEmbedDirectory(dir, descriptor)
+}
+
+// Keep filesystem fault injection at the output boundary, so tests can prove
+// that failures after directory creation cannot be reported as publication.
+type embedOutput struct {
+	mkdir     func(string, fs.FileMode) error
+	mkdirAll  func(string, fs.FileMode) error
+	writeFile func(string, []byte, fs.FileMode) error
+}
+
+func (c Captured) WriteEmbedDirectory(dir string, descriptor skillsync.BundleDescriptor) error {
+	return c.writeEmbedDirectory(dir, descriptor, embedOutput{os.Mkdir, os.MkdirAll, os.WriteFile})
+}
+
+func (c Captured) writeEmbedDirectory(dir string, descriptor skillsync.BundleDescriptor, output embedOutput) error {
+	descriptor, err := c.NormalizeDescriptor(descriptor)
+	if err != nil {
+		return err
+	}
+	// A producer owns a freshly-created output only. Reusing an existing tree
+	// could retain stale content, follow a symlink, or preserve the wrong mode.
+	if err := output.mkdir(dir, 0o755); err != nil {
+		return err
+	}
+	raw, _ := json.MarshalIndent(descriptor, "", "  ") // BundleDescriptor contains only marshalable value fields.
+	if err := output.writeFile(filepath.Join(dir, descriptorName), append(raw, '\n'), 0o644); err != nil {
+		return err
+	}
+	for _, file := range c.files {
+		path := filepath.Join(dir, filepath.FromSlash(contentPrefix), filepath.FromSlash(file.name))
+		if err := output.mkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		mode := fs.FileMode(0o644)
+		if executable(descriptor.ExecutablePaths, file.name) {
+			mode = 0o755
+		}
+		if err := output.writeFile(path, file.data, mode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func executable(paths []string, name string) bool {
+	for _, path := range paths {
+		if path == name {
+			return true
+		}
+	}
+	return false
+}
+
+func validArchivePath(name string) bool {
+	return name != "." && fs.ValidPath(name) && !path.IsAbs(name) && !strings.Contains(name, "\\") && path.Clean(name) == name
+}
