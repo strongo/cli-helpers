@@ -330,10 +330,86 @@ func validVersion(v string) bool {
 }
 
 // validCurrentCLIVersion accepts the stable semantic versions used for
-// compatibility plus the deliberate development-build labels Go CLIs expose.
-// Source and release versions remain stricter: they use validVersion.
+// compatibility, Go module pseudo-versions emitted by go builds, and the
+// deliberate development-build labels Go CLIs expose. Source and release
+// versions remain stricter: they use validVersion.
 func validCurrentCLIVersion(v string) bool {
-	return validVersion(v) || v == "(devel)" || v == "unknown" || v == "dev"
+	return validVersion(v) || validGoPseudoVersion(v) || v == "(devel)" || v == "unknown" || v == "dev"
+}
+
+// validGoPseudoVersion recognizes the three pseudo-version forms Go emits:
+//
+//	vX.0.0-yyyymmddhhmmss-abcdefabcdef
+//	vX.Y.Z-0.yyyymmddhhmmss-abcdefabcdef
+//	vX.Y.Z-pre.0.yyyymmddhhmmss-abcdefabcdef
+//
+// It deliberately accepts this only for a CLI's display version. Immutable
+// plugin source versions and ownership evidence still require validVersion,
+// a full revision, and a content digest.
+func validGoPseudoVersion(v string) bool {
+	v = strings.TrimPrefix(v, "v")
+	v = strings.TrimSuffix(v, "+incompatible")
+	base, suffix, ok := strings.Cut(v, "-")
+	if !ok || !validVersion(base) {
+		return false
+	}
+	pseudo, revision, ok := strings.Cut(suffix, "-")
+	if !ok || !validPseudoRevision(revision) {
+		return false
+	}
+	lastDot := strings.LastIndex(pseudo, ".")
+	if lastDot < 0 {
+		return validPseudoTimestamp(pseudo)
+	}
+	if !validPseudoTimestamp(pseudo[lastDot+1:]) {
+		return false
+	}
+	prefix := pseudo[:lastDot]
+	if prefix == "0" {
+		return true
+	}
+	return strings.HasSuffix(prefix, ".0") && validPrerelease(prefix[:len(prefix)-2])
+}
+
+func validPseudoTimestamp(value string) bool {
+	if len(value) != 14 {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func validPseudoRevision(value string) bool {
+	if len(value) != 12 {
+		return false
+	}
+	for _, r := range value {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validPrerelease(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, part := range strings.Split(value, ".") {
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 func versionCompare(a, b string) int {
 	a = strings.TrimPrefix(a, "v")
