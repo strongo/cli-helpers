@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 )
@@ -131,10 +130,12 @@ type AfterUpdateFunc func(ctx context.Context, update AfterUpdate) error
 // that wires stdin/stdout/stderr according to their own output contract.
 type ManagedCommandRunner func(ctx context.Context, executable string, args []string) error
 
-// ManagedBinaryVerifier probes the CLI after a successful package-manager
-// command. A failure becomes Outcome.PostSwapWarning because the manager
-// command has already completed.
-type ManagedBinaryVerifier func(ctx context.Context, binary string, args []string, expectedVersion string) error
+// ManagedBinaryVerifier resolves and probes the CLI after a successful
+// package-manager command. The returned identity is the exact executable that
+// passed the probe and is reused by AfterUpdate; callers must not perform a
+// second PATH lookup. A failure becomes Outcome.PostSwapWarning because the
+// manager command has already completed.
+type ManagedBinaryVerifier func(ctx context.Context, detection Detection, binary string, args []string, expectedVersion string) (ExecutableIdentity, error)
 
 // Availability is the structured version information reported before an
 // update confirmation or package-manager command. Pinned is true when Target
@@ -205,7 +206,6 @@ type Options struct {
 }
 
 var (
-	execLookPath               = exec.LookPath
 	absPath                    = filepath.Abs
 	managedAvailabilityTimeout = 5 * time.Second
 )
@@ -318,7 +318,7 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 			cfg.reportAvailability(opts, Availability{Result: result, Target: target, Detection: detection})
 			// REQ: no-op-when-current.
 			outcome := Outcome{Action: ActionAlreadyCurrent, Detection: detection, Result: result}
-			cfg.runAfterUpdate(ctx, opts, &outcome)
+			cfg.runAfterUpdate(ctx, opts, &outcome, nil)
 			return outcome, nil
 		}
 		cfg.reportAvailability(opts, Availability{Result: result, Target: target, Detection: detection})
@@ -375,7 +375,7 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 		// version-check).
 		outcome.PostSwapWarning = err
 	}
-	cfg.runAfterUpdate(ctx, opts, &outcome)
+	cfg.runAfterUpdate(ctx, opts, &outcome, nil)
 	return outcome, nil
 }
 
@@ -433,10 +433,12 @@ func (c Config) updateManaged(ctx context.Context, opts Options, detection Detec
 
 	outcome := Outcome{Action: ActionManagerExecuted, Detection: detection, Result: base.Result, ReleaseCheckWarning: base.ReleaseCheckWarning}
 	probeArgs := append([]string(nil), c.VersionProbeArgs...)
-	if err := opts.VerifyManaged(ctx, c.BinaryName, probeArgs, availability.Target); err != nil {
-		outcome.PostSwapWarning = err
+	verifiedExecutable, verifyErr := opts.VerifyManaged(ctx, detection, c.BinaryName, probeArgs, availability.Target)
+	if verifyErr != nil {
+		outcome.PostSwapWarning = verifyErr
+		return outcome, nil
 	}
-	c.runAfterUpdate(ctx, opts, &outcome)
+	c.runAfterUpdate(ctx, opts, &outcome, &verifiedExecutable)
 	return outcome, nil
 }
 
@@ -460,11 +462,11 @@ func (c Config) reportAvailability(opts Options, availability Availability) {
 	}
 }
 
-func (c Config) runAfterUpdate(ctx context.Context, opts Options, outcome *Outcome) {
+func (c Config) runAfterUpdate(ctx context.Context, opts Options, outcome *Outcome, verifiedManaged *ExecutableIdentity) {
 	if opts.AfterUpdate == nil || opts.DryRun || !isAfterUpdateAction(outcome.Action) {
 		return
 	}
-	executable, err := c.installedExecutable(outcome)
+	executable, err := c.installedExecutable(outcome, verifiedManaged)
 	if err != nil {
 		outcome.AfterUpdateWarning = fmt.Errorf("resolve installed executable after self-update: %w", err)
 		return
@@ -478,14 +480,13 @@ func isAfterUpdateAction(action Action) bool {
 	return action == ActionUpdated || action == ActionAlreadyCurrent || action == ActionManagerExecuted
 }
 
-func (c Config) installedExecutable(outcome *Outcome) (ExecutableIdentity, error) {
+func (c Config) installedExecutable(outcome *Outcome, verifiedManaged *ExecutableIdentity) (ExecutableIdentity, error) {
 	path := outcome.Detection.Path
 	if outcome.Action == ActionManagerExecuted {
-		var err error
-		path, err = execLookPath(c.BinaryName)
-		if err != nil {
-			return ExecutableIdentity{}, err
+		if verifiedManaged == nil || verifiedManaged.Path == "" || verifiedManaged.ResolvedPath == "" {
+			return ExecutableIdentity{}, errors.New("managed executable identity was not verified")
 		}
+		return *verifiedManaged, nil
 	}
 	if !filepath.IsAbs(path) {
 		var err error

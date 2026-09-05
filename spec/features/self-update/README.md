@@ -228,7 +228,11 @@ treated as a failed update.
 The same exact-version rule applies after a package-manager update whenever the
 managed availability lookup resolved a stable target. A manager that exits zero
 while stale metadata retains an older binary MUST produce a post-update warning,
-not an unqualified verified-version claim.
+not an unqualified verified-version claim. Verification MUST inspect executable
+candidates owned by the detected manager rather than accepting an unrelated
+development binary that appears earlier on `PATH`. A successfully verified
+manager update MUST retain the exact absolute invocation path and resolved path
+that passed the probe.
 
 #### REQ: after-update-integration
 
@@ -238,9 +242,11 @@ manual replacement, an already-current result, or a completed executable
 package-manager update; it MUST NOT run for a check, dry run, declined update,
 redirected manager, or failed update. It MUST receive the completed outcome and
 an absolute executable identity suitable for reexecution. For a
-package-manager update, the identity MUST be looked up from the configured
-binary name after the manager exits and then resolved through symlinks, so a
-manager-owned version-directory or shim change cannot reuse the stale path.
+package-manager update, the identity MUST be the same manager-owned executable
+that passed the exact-version probe. The callback MUST NOT perform or depend on
+a second `PATH` lookup, and MUST NOT run when no manager-owned executable passed
+verification, so a manager-owned version-directory or shim change cannot select
+a stale or shadowing binary.
 
 #### REQ: after-update-integration-nonfatal
 
