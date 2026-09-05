@@ -50,6 +50,29 @@ func TestManagerWithoutExecutableUpgradeRemainsRedirectOnly(t *testing.T) {
 	}
 }
 
+func TestWithExecutableUpgradeStepsCopiesAndValidatesEveryStep(t *testing.T) {
+	refreshArgs := []string{"update"}
+	m := Homebrew("brew update && brew upgrade --cask wb").WithExecutableUpgradeSteps(
+		ManagedCommand{Executable: "brew", Args: refreshArgs},
+		ManagedCommand{Executable: "brew", Args: []string{"upgrade", "--cask", "wb"}},
+	)
+	refreshArgs[0] = "outdated"
+	if !m.CanExecuteUpgrade() {
+		t.Fatal("CanExecuteUpgrade() = false, want true for two valid steps")
+	}
+	if got := m.executableUpgradeSteps()[0].Args[0]; got != "update" {
+		t.Errorf("first step aliases caller args: got %q, want update", got)
+	}
+	if m.UpgradeExecutable != "" || m.UpgradeArgs != nil {
+		t.Errorf("legacy executable fields = %q %v, want cleared for ordered steps", m.UpgradeExecutable, m.UpgradeArgs)
+	}
+
+	invalid := Homebrew("invalid").WithExecutableUpgradeSteps(ManagedCommand{Args: []string{"update"}})
+	if invalid.CanExecuteUpgrade() {
+		t.Error("CanExecuteUpgrade() = true for a step with no executable")
+	}
+}
+
 func TestScoop(t *testing.T) {
 	m := Scoop("scoop update specscore")
 	if m.Name != "Scoop" {

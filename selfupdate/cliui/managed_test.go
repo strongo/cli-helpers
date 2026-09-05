@@ -72,7 +72,7 @@ func TestVerifyManagedBinaryRunsConfiguredProbe(t *testing.T) {
 	err := VerifyManagedBinary(context.Background(), os.Args[0], []string{
 		"-test.run=^TestManagedCommandHelperProcess$",
 		"--", "--managed-command-helper", "ok", "version 1.2.3",
-	})
+	}, "1.2.3")
 	if err != nil {
 		t.Fatalf("unexpected probe error: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestVerifyManagedBinaryRunsConfiguredProbe(t *testing.T) {
 
 func TestVerifyManagedBinaryFailures(t *testing.T) {
 	t.Run("binary missing", func(t *testing.T) {
-		err := VerifyManagedBinary(context.Background(), "selfupdate-binary-that-does-not-exist", []string{"--version"})
+		err := VerifyManagedBinary(context.Background(), "selfupdate-binary-that-does-not-exist", []string{"--version"}, "1.2.3")
 		if err == nil || !strings.Contains(err.Error(), "locate updated") {
 			t.Errorf("error = %v, want locate failure", err)
 		}
@@ -90,7 +90,7 @@ func TestVerifyManagedBinaryFailures(t *testing.T) {
 		err := VerifyManagedBinary(context.Background(), os.Args[0], []string{
 			"-test.run=^TestManagedCommandHelperProcess$",
 			"--", "--managed-command-helper", "fail", "bad version",
-		})
+		}, "1.2.3")
 		if err == nil || !strings.Contains(err.Error(), "probe updated") {
 			t.Errorf("error = %v, want probe failure", err)
 		}
@@ -100,9 +100,19 @@ func TestVerifyManagedBinaryFailures(t *testing.T) {
 		err := VerifyManagedBinary(context.Background(), os.Args[0], []string{
 			"-test.run=^TestManagedCommandHelperProcess$",
 			"--", "--managed-command-helper", "empty", "ignored",
-		})
+		}, "1.2.3")
 		if err == nil || !strings.Contains(err.Error(), "no version output") {
 			t.Errorf("error = %v, want empty-output failure", err)
+		}
+	})
+
+	t.Run("probe reports stale version", func(t *testing.T) {
+		err := VerifyManagedBinary(context.Background(), os.Args[0], []string{
+			"-test.run=^TestManagedCommandHelperProcess$",
+			"--", "--managed-command-helper", "ok", "version 1.2.2",
+		}, "1.2.3")
+		if err == nil || !strings.Contains(err.Error(), `expected version "1.2.3"`) {
+			t.Errorf("error = %v, want exact-version mismatch", err)
 		}
 	})
 }

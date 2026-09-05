@@ -28,9 +28,11 @@ func ManagedCommandRunner(in io.Reader, out, errOut io.Writer) selfupdate.Manage
 }
 
 // VerifyManagedBinary locates binary on PATH after a successful manager
-// command and runs its configured version probe. A successful probe must emit
-// non-empty output; callers surface a failure as a post-update warning.
-func VerifyManagedBinary(ctx context.Context, binary string, args []string) error {
+// command and runs its configured version probe. When expectedVersion is
+// known, the output must contain that exact release version; accepting any
+// non-empty output would let stale package-manager metadata report success
+// while retaining an older binary.
+func VerifyManagedBinary(ctx context.Context, binary string, args []string, expectedVersion string) error {
 	path, err := exec.LookPath(binary)
 	if err != nil {
 		return fmt.Errorf("locate updated %s on PATH: %w", binary, err)
@@ -41,6 +43,9 @@ func VerifyManagedBinary(ctx context.Context, binary string, args []string) erro
 	}
 	if strings.TrimSpace(string(out)) == "" {
 		return fmt.Errorf("probe updated %s returned no version output", binary)
+	}
+	if expectedVersion != "" && !strings.Contains(string(out), expectedVersion) {
+		return fmt.Errorf("probe updated %s did not report expected version %q (got %q)", binary, expectedVersion, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
