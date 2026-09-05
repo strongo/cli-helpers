@@ -77,7 +77,15 @@ func TestRepeatedRegisteredSupplierDoesNotRewriteUnchangedOwnership(t *testing.T
 }
 
 func TestLegacyWBVersionSurvivesMigrationAsReportPriorVersion(t *testing.T) {
-	for _, version := range []string{"0.92.0", "(devel)", "unknown", "dev"} {
+	for _, version := range []string{
+		"0.92.0",
+		"(devel)",
+		"unknown",
+		"dev",
+		"v0.0.0-20260904214609-2fa8866c771f",
+		"v0.95.1-0.20260904214609-2fa8866c771f",
+		"v1.2.3-rc.1.0.20260904214609-2fa8866c771f",
+	} {
 		t.Run(version, func(t *testing.T) {
 			dir := t.TempDir()
 			b := bundle(t, "plugin", "legacy-version-"+version, "body")
@@ -135,6 +143,54 @@ func TestLegacyWBVersionRejectsUnrecognizedBuildLabel(t *testing.T) {
 	}
 	if data, readErr := os.ReadFile(filepath.Join(dir, "alpha", "SKILL.md")); readErr != nil || string(data) != "body" {
 		t.Fatalf("legacy target=%q err=%v", data, readErr)
+	}
+}
+
+func TestValidCurrentCLIVersionAcceptsOnlyWellFormedGoPseudoVersions(t *testing.T) {
+	for _, version := range []string{
+		"v0.0.0-20260904214609-2fa8866c771f",
+		"v0.95.1-0.20260904214609-2fa8866c771f",
+		"v1.2.3-rc.1.0.20260904214609-2fa8866c771f",
+		"v2.0.0-0.20260904214609-2fa8866c771f+incompatible",
+	} {
+		if !validCurrentCLIVersion(version) {
+			t.Errorf("valid Go pseudo-version rejected: %q", version)
+		}
+	}
+	for _, version := range []string{
+		"nightly-42",
+		"v0.95.1-0.2026090421460-2fa8866c771f",
+		"v0.95.1-0.20260904214609-2fa8866c771",
+		"v0.95.1-0.20260904214609-2FA8866C771F",
+		"v0.95.1-1.20260904214609-2fa8866c771f",
+	} {
+		if validCurrentCLIVersion(version) {
+			t.Errorf("invalid CLI version accepted: %q", version)
+		}
+	}
+}
+
+func TestGoPseudoVersionComponentValidation(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		got  bool
+		want bool
+	}{
+		{"timestamp valid", validPseudoTimestamp("20260904214609"), true},
+		{"timestamp wrong length", validPseudoTimestamp("2026090421460"), false},
+		{"timestamp non-digit", validPseudoTimestamp("2026090421460x"), false},
+		{"revision valid", validPseudoRevision("2fa8866c771f"), true},
+		{"revision uppercase", validPseudoRevision("2FA8866C771F"), false},
+		{"prerelease valid", validPrerelease("rc-1.2"), true},
+		{"prerelease empty", validPrerelease(""), false},
+		{"prerelease empty identifier", validPrerelease("rc..1"), false},
+		{"prerelease invalid character", validPrerelease("rc_1"), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.got != test.want {
+				t.Errorf("got %t, want %t", test.got, test.want)
+			}
+		})
 	}
 }
 
