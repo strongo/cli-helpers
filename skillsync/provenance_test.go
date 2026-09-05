@@ -170,6 +170,30 @@ func TestValidCurrentCLIVersionAcceptsOnlyWellFormedGoPseudoVersions(t *testing.
 	}
 }
 
+func TestGoPseudoVersionComponentValidation(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		got  bool
+		want bool
+	}{
+		{"timestamp valid", validPseudoTimestamp("20260904214609"), true},
+		{"timestamp wrong length", validPseudoTimestamp("2026090421460"), false},
+		{"timestamp non-digit", validPseudoTimestamp("2026090421460x"), false},
+		{"revision valid", validPseudoRevision("2fa8866c771f"), true},
+		{"revision uppercase", validPseudoRevision("2FA8866C771F"), false},
+		{"prerelease valid", validPrerelease("rc-1.2"), true},
+		{"prerelease empty", validPrerelease(""), false},
+		{"prerelease empty identifier", validPrerelease("rc..1"), false},
+		{"prerelease invalid character", validPrerelease("rc_1"), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.got != test.want {
+				t.Errorf("got %t, want %t", test.got, test.want)
+			}
+		})
+	}
+}
+
 func TestPublicDescriptorJSONAndInvalidCompatibilityBounds(t *testing.T) {
 	d := BundleDescriptor{Plugin: PluginIdentity{Publisher: "strongo", Name: "plugin"}, Source: Source{Repository: "github.com/strongo/plugin", Path: "skills", Revision: revisionForTest("json"), Version: "1.2.3", Digest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Compatibility: Compatibility{MinCLI: "2.0.0", MaxCLI: "1.0.0"}}}
 	raw, err := json.Marshal(d)
