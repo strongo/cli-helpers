@@ -2,12 +2,22 @@ package cliui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/strongo/cli-helpers/selfupdate"
+)
+
+var (
+	managedLookPath     = exec.LookPath
+	managedEvalSymlinks = filepath.EvalSymlinks
+	managedAbsPath      = filepath.Abs
+	managedGetenv       = os.Getenv
 )
 
 // ManagedCommandRunner returns a framework-neutral runner that passes the
@@ -27,25 +37,75 @@ func ManagedCommandRunner(in io.Reader, out, errOut io.Writer) selfupdate.Manage
 	}
 }
 
-// VerifyManagedBinary locates binary on PATH after a successful manager
-// command and runs its configured version probe. When expectedVersion is
-// known, the output must contain that exact release version; accepting any
-// non-empty output would let stale package-manager metadata report success
-// while retaining an older binary.
-func VerifyManagedBinary(ctx context.Context, binary string, args []string, expectedVersion string) error {
-	path, err := exec.LookPath(binary)
-	if err != nil {
-		return fmt.Errorf("locate updated %s on PATH: %w", binary, err)
+// VerifyManagedBinary inspects every PATH candidate after a successful manager
+// command, ignores candidates that are not owned by the detected manager, and
+// returns the one exact executable identity that passed the configured version
+// probe. This avoids selecting a development binary that happens to precede a
+// Homebrew, Scoop, or WinGet launcher on PATH. The returned identity is reused
+// by AfterUpdate, so verification and reexecution cannot disagree.
+func VerifyManagedBinary(ctx context.Context, detection selfupdate.Detection, binary string, args []string, expectedVersion string) (selfupdate.ExecutableIdentity, error) {
+	candidates := managedBinaryCandidates(binary)
+	if len(candidates) == 0 {
+		return selfupdate.ExecutableIdentity{}, fmt.Errorf("locate updated %s on PATH: executable not found", binary)
 	}
-	out, err := exec.CommandContext(ctx, path, args...).CombinedOutput() //nolint:gosec // binary and probe args are consumer-configured
-	if err != nil {
-		return fmt.Errorf("probe updated %s: %w (output: %s)", binary, err, strings.TrimSpace(string(out)))
+	var failures []error
+	for _, path := range candidates {
+		resolved, err := managedEvalSymlinks(path)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("resolve %s: %w", path, err))
+			continue
+		}
+		if detection.Manager != nil && selfupdate.Classify(resolved, []selfupdate.Manager{*detection.Manager}).Method != selfupdate.Managed {
+			continue
+		}
+		out, err := exec.CommandContext(ctx, path, args...).CombinedOutput() //nolint:gosec // paths come from PATH and must match the detected manager
+		if err != nil {
+			failures = append(failures, fmt.Errorf("probe updated %s at %s: %w (output: %s)", binary, path, err, strings.TrimSpace(string(out))))
+			continue
+		}
+		if strings.TrimSpace(string(out)) == "" {
+			failures = append(failures, fmt.Errorf("probe updated %s at %s returned no version output", binary, path))
+			continue
+		}
+		if expectedVersion != "" && !strings.Contains(string(out), expectedVersion) {
+			failures = append(failures, fmt.Errorf("probe updated %s at %s did not report expected version %q (got %q)", binary, path, expectedVersion, strings.TrimSpace(string(out))))
+			continue
+		}
+		absolute, err := managedAbsPath(path)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("make updated executable path absolute: %w", err))
+			continue
+		}
+		return selfupdate.ExecutableIdentity{Path: absolute, ResolvedPath: resolved}, nil
 	}
-	if strings.TrimSpace(string(out)) == "" {
-		return fmt.Errorf("probe updated %s returned no version output", binary)
+	manager := "configured package manager"
+	if detection.Manager != nil {
+		manager = detection.Manager.Name
 	}
-	if expectedVersion != "" && !strings.Contains(string(out), expectedVersion) {
-		return fmt.Errorf("probe updated %s did not report expected version %q (got %q)", binary, expectedVersion, strings.TrimSpace(string(out)))
+	if len(failures) == 0 {
+		return selfupdate.ExecutableIdentity{}, fmt.Errorf("locate updated %s owned by %s on PATH: no matching executable", binary, manager)
 	}
-	return nil
+	return selfupdate.ExecutableIdentity{}, fmt.Errorf("verify updated %s owned by %s: %w", binary, manager, errors.Join(failures...))
+}
+
+func managedBinaryCandidates(binary string) []string {
+	if filepath.IsAbs(binary) || strings.ContainsAny(binary, `/\\`) {
+		if path, err := managedLookPath(binary); err == nil {
+			return []string{path}
+		}
+		return nil
+	}
+	seen := make(map[string]bool)
+	var candidates []string
+	for _, directory := range filepath.SplitList(managedGetenv("PATH")) {
+		if directory == "" {
+			directory = "."
+		}
+		path, err := managedLookPath(filepath.Join(directory, binary))
+		if err == nil && !seen[path] {
+			seen[path] = true
+			candidates = append(candidates, path)
+		}
+	}
+	return candidates
 }

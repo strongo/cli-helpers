@@ -257,7 +257,9 @@ func TestUpdate_ManagedAvailabilityReportPrecedesConfirmationAndRunner(t *testin
 		ReportAvailability: func(Availability) { events = append(events, "report") },
 		Confirm:            func(string) (bool, error) { events = append(events, "confirm"); return true, nil },
 		RunManaged:         func(context.Context, string, []string) error { events = append(events, "run"); return nil },
-		VerifyManaged:      func(context.Context, string, []string, string) error { return nil },
+		VerifyManaged: func(context.Context, Detection, string, []string, string) (ExecutableIdentity, error) {
+			return ExecutableIdentity{Path: "/tmp/wb", ResolvedPath: "/tmp/wb"}, nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("Update() error = %v", err)
@@ -284,15 +286,18 @@ func TestUpdate_ManagedExecutable_ConfirmsRunsArgvAndVerifies(t *testing.T) {
 			args = append([]string(nil), gotArgs...)
 			return nil
 		},
-		VerifyManaged: func(_ context.Context, binary string, probeArgs []string, expectedVersion string) error {
+		VerifyManaged: func(_ context.Context, detection Detection, binary string, probeArgs []string, expectedVersion string) (ExecutableIdentity, error) {
 			verified = true
+			if detection.Manager == nil || detection.Manager.Name != "Homebrew" {
+				t.Errorf("managed detection = %+v, want Homebrew", detection)
+			}
 			if binary != "wb" || !reflect.DeepEqual(probeArgs, []string{"--version"}) {
 				t.Errorf("managed probe = %q %v, want wb [--version]", binary, probeArgs)
 			}
 			if expectedVersion != "1.1.0" {
 				t.Errorf("managed expected version = %q, want 1.1.0", expectedVersion)
 			}
-			return nil
+			return ExecutableIdentity{Path: "/tmp/wb", ResolvedPath: "/tmp/Cellar/wb/1.1.0/wb"}, nil
 		},
 	})
 	if err != nil {
@@ -336,9 +341,9 @@ func TestUpdate_ManagedExecutable_RunsRefreshAndUpgradeInOrder(t *testing.T) {
 			calls = append(calls, executable+" "+strings.Join(args, " "))
 			return nil
 		},
-		VerifyManaged: func(_ context.Context, _ string, _ []string, expectedVersion string) error {
+		VerifyManaged: func(_ context.Context, _ Detection, _ string, _ []string, expectedVersion string) (ExecutableIdentity, error) {
 			calls = append(calls, "verify "+expectedVersion)
-			return nil
+			return ExecutableIdentity{Path: "/tmp/wb", ResolvedPath: "/tmp/Cellar/wb/1.1.0/wb"}, nil
 		},
 	})
 	if err != nil {
@@ -368,9 +373,9 @@ func TestUpdate_ManagedExecutable_StopsAfterFailedRefresh(t *testing.T) {
 			calls = append(calls, executable+" "+strings.Join(args, " "))
 			return errors.New("refresh failed")
 		},
-		VerifyManaged: func(context.Context, string, []string, string) error {
+		VerifyManaged: func(context.Context, Detection, string, []string, string) (ExecutableIdentity, error) {
 			t.Fatal("verification ran after a failed refresh")
-			return nil
+			return ExecutableIdentity{}, nil
 		},
 	})
 	if KindOf(err) != KindManagedCommand || !strings.Contains(err.Error(), "step 1/2") {
@@ -444,7 +449,9 @@ func TestUpdate_ManagedExecutable_CommandFailureIsTyped(t *testing.T) {
 		RunManaged: func(context.Context, string, []string) error {
 			return errors.New("brew failed")
 		},
-		VerifyManaged: func(context.Context, string, []string, string) error { return nil },
+		VerifyManaged: func(context.Context, Detection, string, []string, string) (ExecutableIdentity, error) {
+			return ExecutableIdentity{Path: "/tmp/wb", ResolvedPath: "/tmp/wb"}, nil
+		},
 	})
 	if err == nil {
 		t.Fatal("expected managed command failure")
@@ -487,8 +494,10 @@ func TestUpdate_ManagedExecutable_ConfirmationOutcomes(t *testing.T) {
 	}
 	baseOptions := func() Options {
 		return Options{
-			RunManaged:    func(context.Context, string, []string) error { return nil },
-			VerifyManaged: func(context.Context, string, []string, string) error { return nil },
+			RunManaged: func(context.Context, string, []string) error { return nil },
+			VerifyManaged: func(context.Context, Detection, string, []string, string) (ExecutableIdentity, error) {
+				return ExecutableIdentity{Path: "/tmp/wb", ResolvedPath: "/tmp/wb"}, nil
+			},
 		}
 	}
 
@@ -538,11 +547,16 @@ func TestUpdate_ManagedExecutable_ProbeFailureIsWarning(t *testing.T) {
 	h.cfg.Managers = []Manager{
 		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
 	}
+	afterUpdateCalled := false
 	outcome, err := h.cfg.Update(context.Background(), Options{
 		Confirm:    func(string) (bool, error) { return true, nil },
 		RunManaged: func(context.Context, string, []string) error { return nil },
-		VerifyManaged: func(context.Context, string, []string, string) error {
-			return errors.New("version probe failed")
+		VerifyManaged: func(context.Context, Detection, string, []string, string) (ExecutableIdentity, error) {
+			return ExecutableIdentity{}, errors.New("version probe failed")
+		},
+		AfterUpdate: func(context.Context, AfterUpdate) error {
+			afterUpdateCalled = true
+			return nil
 		},
 	})
 	if err != nil {
@@ -550,6 +564,9 @@ func TestUpdate_ManagedExecutable_ProbeFailureIsWarning(t *testing.T) {
 	}
 	if outcome.Action != ActionManagerExecuted || outcome.PostSwapWarning == nil {
 		t.Errorf("outcome = %+v, want manager executed with warning", outcome)
+	}
+	if afterUpdateCalled {
+		t.Error("AfterUpdate ran without a verified manager-owned executable")
 	}
 }
 
@@ -1393,7 +1410,7 @@ func TestUpdate_AfterUpdateRunsOnlyForSuccessfulManualOutcomes(t *testing.T) {
 	}
 }
 
-func TestUpdate_AfterUpdateManagerResolvesNewExecutableAndKeepsCancellationNonfatal(t *testing.T) {
+func TestUpdate_AfterUpdateManagerReusesVerifiedExecutableAndKeepsCancellationNonfatal(t *testing.T) {
 	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
 	h.cfg.Managers = []Manager{
 		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
@@ -1406,21 +1423,6 @@ func TestUpdate_AfterUpdateManagerResolvesNewExecutableAndKeepsCancellationNonfa
 		t.Fatal(err)
 	}
 
-	origLookPath, origEval := execLookPath, evalSymlinksFunc
-	execLookPath = func(binary string) (string, error) {
-		if binary != "wb" {
-			t.Fatalf("LookPath binary = %q, want wb", binary)
-		}
-		return newPath, nil
-	}
-	evalSymlinksFunc = func(path string) (string, error) {
-		if path == newPath {
-			return filepath.Join(h.dir, "Cellar", "wb", "1.1.0", "bin", "wb"), nil
-		}
-		return path, nil
-	}
-	t.Cleanup(func() { execLookPath, evalSymlinksFunc = origLookPath, origEval })
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var got AfterUpdate
@@ -1429,7 +1431,9 @@ func TestUpdate_AfterUpdateManagerResolvesNewExecutableAndKeepsCancellationNonfa
 			cancel()
 			return nil
 		},
-		VerifyManaged: func(context.Context, string, []string, string) error { return nil },
+		VerifyManaged: func(context.Context, Detection, string, []string, string) (ExecutableIdentity, error) {
+			return ExecutableIdentity{Path: newPath, ResolvedPath: filepath.Join(h.dir, "Cellar", "wb", "1.1.0", "bin", "wb")}, nil
+		},
 		AfterUpdate: func(gotCtx context.Context, update AfterUpdate) error {
 			got = update
 			return gotCtx.Err()
@@ -1451,14 +1455,13 @@ func TestUpdate_AfterUpdateManagerResolvesNewExecutableAndKeepsCancellationNonfa
 
 func TestInstalledExecutableIdentityResolution(t *testing.T) {
 	cfg := Config{BinaryName: "wb"}
-	origLookPath, origEval, origAbs := execLookPath, evalSymlinksFunc, absPath
-	t.Cleanup(func() { execLookPath, evalSymlinksFunc, absPath = origLookPath, origEval, origAbs })
+	origEval, origAbs := evalSymlinksFunc, absPath
+	t.Cleanup(func() { evalSymlinksFunc, absPath = origEval, origAbs })
 
-	t.Run("manager lookup failure", func(t *testing.T) {
-		execLookPath = func(string) (string, error) { return "", errors.New("not on PATH") }
-		_, err := cfg.installedExecutable(&Outcome{Action: ActionManagerExecuted})
-		if err == nil || !strings.Contains(err.Error(), "not on PATH") {
-			t.Errorf("installedExecutable() error = %v, want lookup failure", err)
+	t.Run("manager identity must already be verified", func(t *testing.T) {
+		_, err := cfg.installedExecutable(&Outcome{Action: ActionManagerExecuted}, nil)
+		if err == nil || !strings.Contains(err.Error(), "was not verified") {
+			t.Errorf("installedExecutable() error = %v, want missing verification failure", err)
 		}
 	})
 
@@ -1470,7 +1473,7 @@ func TestInstalledExecutableIdentityResolution(t *testing.T) {
 			}
 			return "/tmp/bin/wb", nil
 		}
-		identity, err := cfg.installedExecutable(&Outcome{Action: ActionUpdated, Detection: Detection{Path: "bin/wb"}})
+		identity, err := cfg.installedExecutable(&Outcome{Action: ActionUpdated, Detection: Detection{Path: "bin/wb"}}, nil)
 		if err != nil {
 			t.Fatalf("installedExecutable() error = %v", err)
 		}
@@ -1480,17 +1483,14 @@ func TestInstalledExecutableIdentityResolution(t *testing.T) {
 	})
 
 	t.Run("unresolvable executable skips callback with nonfatal warning", func(t *testing.T) {
-		missing := errors.New("missing installed symlink target")
-		evalSymlinksFunc = func(string) (string, error) { return "", missing }
 		called := false
 		outcome := Outcome{Action: ActionManagerExecuted, Detection: Detection{Path: "/tmp/old/wb"}}
-		execLookPath = func(string) (string, error) { return "/tmp/new/wb", nil }
 		cfg.runAfterUpdate(context.Background(), Options{AfterUpdate: func(context.Context, AfterUpdate) error {
 			called = true
 			return nil
-		}}, &outcome)
-		if called || !errors.Is(outcome.AfterUpdateWarning, missing) {
-			t.Fatalf("callback called = %v, warning = %v; want skipped callback and resolution warning", called, outcome.AfterUpdateWarning)
+		}}, &outcome, nil)
+		if called || outcome.AfterUpdateWarning == nil || !strings.Contains(outcome.AfterUpdateWarning.Error(), "was not verified") {
+			t.Fatalf("callback called = %v, warning = %v; want skipped callback and missing verification warning", called, outcome.AfterUpdateWarning)
 		}
 		if outcome.Action != ActionManagerExecuted {
 			t.Fatalf("completed update action changed to %s", outcome.Action)
@@ -1499,9 +1499,19 @@ func TestInstalledExecutableIdentityResolution(t *testing.T) {
 
 	t.Run("absolute path resolution failure", func(t *testing.T) {
 		absPath = func(string) (string, error) { return "", errors.New("cannot make absolute") }
-		_, err := cfg.installedExecutable(&Outcome{Action: ActionUpdated, Detection: Detection{Path: "bin/wb"}})
+		_, err := cfg.installedExecutable(&Outcome{Action: ActionUpdated, Detection: Detection{Path: "bin/wb"}}, nil)
 		if err == nil || !strings.Contains(err.Error(), "cannot make absolute") {
 			t.Errorf("installedExecutable() error = %v, want absolute-path failure", err)
+		}
+		absPath = origAbs
+	})
+
+	t.Run("resolved executable failure", func(t *testing.T) {
+		missing := errors.New("missing installed target")
+		evalSymlinksFunc = func(string) (string, error) { return "", missing }
+		_, err := cfg.installedExecutable(&Outcome{Action: ActionUpdated, Detection: Detection{Path: "/tmp/bin/wb"}}, nil)
+		if !errors.Is(err, missing) || !strings.Contains(err.Error(), "resolve installed executable") {
+			t.Errorf("installedExecutable() error = %v, want resolved target failure", err)
 		}
 	})
 }
@@ -1517,7 +1527,7 @@ func TestRunAfterUpdateResolutionFailureIsNonfatalAndSkippedWhenIneligible(t *te
 	cfg.runAfterUpdate(context.Background(), Options{AfterUpdate: func(context.Context, AfterUpdate) error {
 		called = true
 		return nil
-	}}, &outcome)
+	}}, &outcome, nil)
 	if called {
 		t.Error("AfterUpdate callback ran despite executable-resolution failure")
 	}
@@ -1530,7 +1540,7 @@ func TestRunAfterUpdateResolutionFailureIsNonfatalAndSkippedWhenIneligible(t *te
 	cfg.runAfterUpdate(context.Background(), Options{AfterUpdate: func(context.Context, AfterUpdate) error {
 		called = true
 		return nil
-	}}, &ineligible)
+	}}, &ineligible, nil)
 	if called || ineligible.AfterUpdateWarning != nil {
 		t.Errorf("planned outcome callback state = called %v, warning %v; want no callback or warning", called, ineligible.AfterUpdateWarning)
 	}
