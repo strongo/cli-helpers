@@ -25,7 +25,8 @@ jobs:
       - name: Exercise native durability and enforce platform coverage
         shell: pwsh
         run: |
-          go test -coverprofile=coverage-windows.out ./skillsync
+          $coveragePath = Join-Path $PWD 'coverage-windows.out'
+          go test "-coverprofile=$coveragePath" ./skillsync
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
@@ -33,7 +34,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
-          $coverage = go tool cover '-func=coverage-windows.out'
+          $coverage = go tool cover "-func=$coveragePath"
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
