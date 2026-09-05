@@ -388,7 +388,7 @@ func validPseudoRevision(value string) bool {
 		return false
 	}
 	for _, r := range value {
-		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
 			return false
 		}
 	}
@@ -404,7 +404,7 @@ func validPrerelease(value string) bool {
 			return false
 		}
 		for _, r := range part {
-			if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '-') {
+			if (r < '0' || r > '9') && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && r != '-' {
 				return false
 			}
 		}
