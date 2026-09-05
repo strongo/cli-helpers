@@ -25,7 +25,7 @@ jobs:
       - name: Exercise native durability and enforce platform coverage
         shell: pwsh
         run: |
-          go test ./skillsync -coverprofile=coverage-windows.out
+          go test -coverprofile=coverage-windows.out ./skillsync
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
