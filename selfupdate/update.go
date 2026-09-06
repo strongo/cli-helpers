@@ -227,7 +227,7 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 	}
 
 	if detection.Method == Managed {
-		if opts.PinnedVersion != "" {
+		if opts.PinnedVersion != "" && (detection.Manager == nil || !detection.Manager.CanExecuteUpgrade()) {
 			managerName := "the package manager"
 			if detection.Manager != nil {
 				managerName = detection.Manager.Name
@@ -238,6 +238,26 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 			}
 		}
 		availability := cfg.managedAvailability(ctx, detection)
+		if opts.PinnedVersion != "" {
+			availability.Pinned = true
+			availability.Target = normalize(opts.PinnedVersion)
+			if availability.Warning != nil {
+				return Outcome{Detection: detection, Result: availability.Result, Target: availability.Target}, &Failure{
+					Kind: KindManagedVersion,
+					Err:  fmt.Errorf("cannot prove requested version %q is the package manager's latest release: %w", availability.Target, availability.Warning),
+				}
+			}
+			if CompareVersions(availability.Result.Latest, availability.Target) != 0 {
+				return Outcome{Detection: detection, Result: availability.Result, Target: availability.Target}, &Failure{
+					Kind: KindManagedVersion,
+					Err:  fmt.Errorf("package manager can install only latest release %q, not requested version %q", availability.Result.Latest, availability.Target),
+				}
+			}
+			if !cfg.isUndetermined(availability.Result.Current) && CompareVersions(availability.Result.Current, availability.Target) > 0 && !opts.AllowDowngrade {
+				return Outcome{Detection: detection, Result: availability.Result, Target: availability.Target, Downgrade: true},
+					&Failure{Kind: KindDowngrade, Err: fmt.Errorf("refusing to downgrade from %s to %s", availability.Result.Current, availability.Target)}
+			}
+		}
 		cfg.reportAvailability(opts, availability)
 		// REQ: managed-no-overwrite — this branch never reaches the
 		// download/write path below. Redirect-only managers preserve the
@@ -381,13 +401,14 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 
 func (c Config) updateManaged(ctx context.Context, opts Options, detection Detection, availability Availability) (Outcome, error) {
 	m := detection.Manager
-	base := Outcome{Detection: detection, Result: availability.Result, ReleaseCheckWarning: availability.Warning}
+	base := Outcome{Detection: detection, Result: availability.Result, Target: availability.Target, ReleaseCheckWarning: availability.Warning}
 
 	if opts.DryRun {
 		return Outcome{
 			Action:              ActionPlanned,
 			Detection:           base.Detection,
 			Result:              base.Result,
+			Target:              base.Target,
 			ReleaseCheckWarning: base.ReleaseCheckWarning,
 			PlannedCommand:      m.UpgradeCommand,
 		}, nil
@@ -431,7 +452,7 @@ func (c Config) updateManaged(ctx context.Context, opts Options, detection Detec
 		}
 	}
 
-	outcome := Outcome{Action: ActionManagerExecuted, Detection: detection, Result: base.Result, ReleaseCheckWarning: base.ReleaseCheckWarning}
+	outcome := Outcome{Action: ActionManagerExecuted, Detection: detection, Result: base.Result, Target: base.Target, ReleaseCheckWarning: base.ReleaseCheckWarning}
 	probeArgs := append([]string(nil), c.VersionProbeArgs...)
 	verifiedExecutable, verifyErr := opts.VerifyManaged(ctx, detection, c.BinaryName, probeArgs, availability.Target)
 	if verifyErr != nil {
