@@ -50,9 +50,9 @@ const (
 	// path, or an error returned from an Options.Confirm callback that
 	// wasn't already a *Failure.
 	KindUnexpected
-	// KindManagedVersion means a version pin was requested for an
-	// executable package-manager update, which cannot promise an arbitrary
-	// historical release.
+	// KindManagedVersion means a version pin cannot be proven to match the
+	// latest release an executable package-manager update would install, or
+	// was requested from a redirect-only manager.
 	KindManagedVersion
 	// KindManagedCommand means the executable manager runner or its required
 	// configuration failed. The underlying process error remains unwrap-able.

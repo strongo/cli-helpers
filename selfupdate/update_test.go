@@ -414,11 +414,12 @@ func TestUpdate_ManagedExecutable_DryRunReportsCommandWithoutExecuting(t *testin
 	}
 }
 
-func TestUpdate_ManagedExecutable_RefusesVersionPin(t *testing.T) {
+func TestUpdate_ManagedExecutable_RefusesVersionPinThatIsNotLatest(t *testing.T) {
 	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
 	h.cfg.Managers = []Manager{
 		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
 	}
+	h.setReleases(stableReleaseJSON("v1.1.0"))
 	run := false
 	_, err := h.cfg.Update(context.Background(), Options{
 		PinnedVersion: "1.2.3",
@@ -435,6 +436,74 @@ func TestUpdate_ManagedExecutable_RefusesVersionPin(t *testing.T) {
 	}
 	if run {
 		t.Error("managed command ran despite an unsupported version pin")
+	}
+}
+
+func TestUpdate_ManagedExecutable_InstallsExactPinWhenItIsLatest(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.Managers = []Manager{
+		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
+	}
+	h.setReleases(stableReleaseJSON("v1.2.3"))
+	run := false
+	verifiedTarget := ""
+	outcome, err := h.cfg.Update(context.Background(), Options{
+		PinnedVersion: "v1.2.3",
+		RunManaged: func(_ context.Context, executable string, args []string) error {
+			run = executable == "brew" && reflect.DeepEqual(args, []string{"upgrade", "--cask", "wb"})
+			return nil
+		},
+		VerifyManaged: func(_ context.Context, _ Detection, _ string, _ []string, expectedVersion string) (ExecutableIdentity, error) {
+			verifiedTarget = expectedVersion
+			return ExecutableIdentity{Path: "/tmp/wb", ResolvedPath: "/tmp/wb"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !run || verifiedTarget != "1.2.3" {
+		t.Fatalf("run=%v verified target=%q", run, verifiedTarget)
+	}
+	if outcome.Action != ActionManagerExecuted || outcome.Target != "1.2.3" {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+}
+
+func TestUpdate_ManagedExecutable_ExactPinFailsClosedWhenLatestIsUnavailable(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.Managers = []Manager{
+		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
+	}
+	run := false
+	_, err := h.cfg.Update(context.Background(), Options{
+		PinnedVersion: "1.2.3",
+		RunManaged: func(context.Context, string, []string) error {
+			run = true
+			return nil
+		},
+	})
+	if KindOf(err) != KindManagedVersion || run {
+		t.Fatalf("err=%v kind=%v run=%v", err, KindOf(err), run)
+	}
+}
+
+func TestUpdate_ManagedExecutable_ExactPinPreservesDowngradeGuard(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/2.0.0/bin/wb", "old binary")
+	h.cfg.CurrentVersion = "2.0.0"
+	h.cfg.Managers = []Manager{
+		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
+	}
+	h.setReleases(stableReleaseJSON("v1.2.3"))
+	run := false
+	outcome, err := h.cfg.Update(context.Background(), Options{
+		PinnedVersion: "1.2.3",
+		RunManaged: func(context.Context, string, []string) error {
+			run = true
+			return nil
+		},
+	})
+	if KindOf(err) != KindDowngrade || !outcome.Downgrade || run {
+		t.Fatalf("outcome=%+v err=%v kind=%v run=%v", outcome, err, KindOf(err), run)
 	}
 }
 
