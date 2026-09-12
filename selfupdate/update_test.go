@@ -328,12 +328,7 @@ func TestUpdate_ManagedExecutable_ConfirmsRunsArgvAndVerifies(t *testing.T) {
 
 func TestUpdate_ManagedExecutable_RunsRefreshAndUpgradeInOrder(t *testing.T) {
 	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
-	h.cfg.Managers = []Manager{
-		Homebrew("brew update && brew upgrade --cask wb").WithExecutableUpgradeSteps(
-			ManagedCommand{Executable: "brew", Args: []string{"update"}},
-			ManagedCommand{Executable: "brew", Args: []string{"upgrade", "--cask", "wb"}},
-		),
-	}
+	h.cfg.Managers = []Manager{HomebrewCask("wb")}
 	h.setReleases(stableReleaseJSON("v1.1.0"))
 	var calls []string
 	outcome, err := h.cfg.Update(context.Background(), Options{
@@ -352,7 +347,7 @@ func TestUpdate_ManagedExecutable_RunsRefreshAndUpgradeInOrder(t *testing.T) {
 	if outcome.Action != ActionManagerExecuted {
 		t.Fatalf("Action = %s, want manager_executed", outcome.Action)
 	}
-	want := []string{"brew update", "brew upgrade --cask wb", "verify 1.1.0"}
+	want := []string{"brew update", "brew upgrade --yes --cask -- wb", "verify 1.1.0"}
 	if !reflect.DeepEqual(calls, want) {
 		t.Errorf("calls = %v, want %v", calls, want)
 	}
@@ -360,12 +355,7 @@ func TestUpdate_ManagedExecutable_RunsRefreshAndUpgradeInOrder(t *testing.T) {
 
 func TestUpdate_ManagedExecutable_StopsAfterFailedRefresh(t *testing.T) {
 	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
-	h.cfg.Managers = []Manager{
-		Homebrew("brew update && brew upgrade --cask wb").WithExecutableUpgradeSteps(
-			ManagedCommand{Executable: "brew", Args: []string{"update"}},
-			ManagedCommand{Executable: "brew", Args: []string{"upgrade", "--cask", "wb"}},
-		),
-	}
+	h.cfg.Managers = []Manager{HomebrewCask("wb")}
 	h.setReleases(stableReleaseJSON("v1.1.0"))
 	var calls []string
 	_, err := h.cfg.Update(context.Background(), Options{

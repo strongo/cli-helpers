@@ -2,6 +2,7 @@ package selfupdate
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -16,6 +17,53 @@ func TestHomebrew(t *testing.T) {
 	want := []string{"/cellar/", "/homebrew/", "/linuxbrew/", "/caskroom/"}
 	if !reflect.DeepEqual(m.PathMarkers, want) {
 		t.Errorf("PathMarkers = %v, want %v", m.PathMarkers, want)
+	}
+}
+
+func TestHomebrewCaskProvidesExecutableManagedUpdate(t *testing.T) {
+	m := HomebrewCask("codegrapher")
+	if m.UpgradeCommand != "brew update && brew upgrade --yes --cask -- codegrapher" {
+		t.Errorf("UpgradeCommand = %q", m.UpgradeCommand)
+	}
+	want := []ManagedCommand{
+		{Executable: "brew", Args: []string{"update"}},
+		{Executable: "brew", Args: []string{"upgrade", "--yes", "--cask", "--", "codegrapher"}},
+	}
+	if !reflect.DeepEqual(m.UpgradeSteps, want) {
+		t.Errorf("UpgradeSteps = %#v, want %#v", m.UpgradeSteps, want)
+	}
+	if !m.CanExecuteUpgrade() {
+		t.Error("HomebrewCask must execute the managed update")
+	}
+}
+
+func TestHomebrewFormulaProvidesExecutableManagedUpdate(t *testing.T) {
+	m := HomebrewFormula("tool")
+	if m.UpgradeCommand != "brew update && brew upgrade --yes --formula -- tool" {
+		t.Errorf("UpgradeCommand = %q", m.UpgradeCommand)
+	}
+	want := []ManagedCommand{
+		{Executable: "brew", Args: []string{"update"}},
+		{Executable: "brew", Args: []string{"upgrade", "--yes", "--formula", "--", "tool"}},
+	}
+	if !reflect.DeepEqual(m.UpgradeSteps, want) {
+		t.Errorf("UpgradeSteps = %#v, want %#v", m.UpgradeSteps, want)
+	}
+	if !m.CanExecuteUpgrade() {
+		t.Error("HomebrewFormula must execute the managed update")
+	}
+}
+
+func TestHomebrewPackageNameCannotBecomeAnOptionOrShellSyntax(t *testing.T) {
+	for _, name := range []string{"--cask", "bad; touch /tmp/pwned", "it's"} {
+		m := HomebrewCask(name)
+		args := m.UpgradeSteps[1].Args
+		if !reflect.DeepEqual(args[:4], []string{"upgrade", "--yes", "--cask", "--"}) || args[4] != name {
+			t.Errorf("HomebrewCask(%q) args = %#v", name, args)
+		}
+		if !strings.HasSuffix(m.UpgradeCommand, shellDisplayArg(name)) {
+			t.Errorf("HomebrewCask(%q) display command = %q", name, m.UpgradeCommand)
+		}
 	}
 }
 
