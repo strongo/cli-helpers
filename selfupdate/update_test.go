@@ -347,7 +347,7 @@ func TestUpdate_ManagedExecutable_RunsRefreshAndUpgradeInOrder(t *testing.T) {
 	if outcome.Action != ActionManagerExecuted {
 		t.Fatalf("Action = %s, want manager_executed", outcome.Action)
 	}
-	want := []string{"brew update", "brew upgrade --cask wb", "verify 1.1.0"}
+	want := []string{"brew update", "brew upgrade --yes --cask -- wb", "verify 1.1.0"}
 	if !reflect.DeepEqual(calls, want) {
 		t.Errorf("calls = %v, want %v", calls, want)
 	}

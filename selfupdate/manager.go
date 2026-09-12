@@ -1,5 +1,7 @@
 package selfupdate
 
+import "strings"
+
 // Manager describes one package manager that might own the running binary's
 // install. PathMarkers are lowercased, '/'-separated substrings of a
 // resolved executable path that identify that manager's install layout —
@@ -126,19 +128,28 @@ func Homebrew(upgradeCommand string) Manager {
 // Consumers should prefer this constructor when their cask is safe for
 // self-update to execute directly.
 func HomebrewCask(name string) Manager {
-	return Homebrew("brew update && brew upgrade --cask "+name).WithExecutableUpgradeSteps(
+	return Homebrew("brew update && brew upgrade --yes --cask -- "+shellDisplayArg(name)).WithExecutableUpgradeSteps(
 		ManagedCommand{Executable: "brew", Args: []string{"update"}},
-		ManagedCommand{Executable: "brew", Args: []string{"upgrade", "--cask", name}},
+		ManagedCommand{Executable: "brew", Args: []string{"upgrade", "--yes", "--cask", "--", name}},
 	)
 }
 
 // HomebrewFormula describes an executable Homebrew formula update. It uses
 // the same ordered, argv-safe update contract as HomebrewCask.
 func HomebrewFormula(name string) Manager {
-	return Homebrew("brew update && brew upgrade "+name).WithExecutableUpgradeSteps(
+	return Homebrew("brew update && brew upgrade --yes --formula -- "+shellDisplayArg(name)).WithExecutableUpgradeSteps(
 		ManagedCommand{Executable: "brew", Args: []string{"update"}},
-		ManagedCommand{Executable: "brew", Args: []string{"upgrade", name}},
+		ManagedCommand{Executable: "brew", Args: []string{"upgrade", "--yes", "--formula", "--", name}},
 	)
+}
+
+func shellDisplayArg(arg string) string {
+	if arg != "" && !strings.HasPrefix(arg, "-") && strings.IndexFunc(arg, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || strings.ContainsRune("@+._/-", r))
+	}) == -1 {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", "'\"'\"'") + "'"
 }
 
 // Scoop describes a Scoop-managed install (Windows). Both the versioned

@@ -181,9 +181,9 @@ func (wbErrors) UpdateAvailable(res selfupdate.CheckResult) error {
 
 `HomebrewCask` and `HomebrewFormula` provide the same managed-update behavior
 to every consumer: refresh Homebrew metadata, run the package-specific upgrade
-as structured argv, verify the installed binary, and then run any configured
-post-update hook. The Cobra command asks once in an interactive terminal;
-`--yes` skips that prompt for non-interactive automation.
+as structured argv with Homebrew's `--yes`, verify the installed binary, and
+then run any configured post-update hook. The Cobra command asks once in an
+interactive terminal; `--yes` skips that prompt for non-interactive automation.
 
 A CLI that doesn't use Cobra calls `cfg.Check(ctx)` and `cfg.Update(ctx,
 opts)` directly — `cobracmd` is optional sugar over the same two calls; the
