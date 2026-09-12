@@ -120,6 +120,27 @@ func Homebrew(upgradeCommand string) Manager {
 	}
 }
 
+// HomebrewCask describes an executable Homebrew cask update. It refreshes
+// Homebrew metadata before upgrading the named cask, using structured argv
+// rather than parsing or executing the display command through a shell.
+// Consumers should prefer this constructor when their cask is safe for
+// self-update to execute directly.
+func HomebrewCask(name string) Manager {
+	return Homebrew("brew update && brew upgrade --cask "+name).WithExecutableUpgradeSteps(
+		ManagedCommand{Executable: "brew", Args: []string{"update"}},
+		ManagedCommand{Executable: "brew", Args: []string{"upgrade", "--cask", name}},
+	)
+}
+
+// HomebrewFormula describes an executable Homebrew formula update. It uses
+// the same ordered, argv-safe update contract as HomebrewCask.
+func HomebrewFormula(name string) Manager {
+	return Homebrew("brew update && brew upgrade "+name).WithExecutableUpgradeSteps(
+		ManagedCommand{Executable: "brew", Args: []string{"update"}},
+		ManagedCommand{Executable: "brew", Args: []string{"upgrade", name}},
+	)
+}
+
 // Scoop describes a Scoop-managed install (Windows). Both the versioned
 // "apps" directory and the "shims" directory Scoop puts on PATH are
 // markers, because either one may be the resolved, symlink-followed path

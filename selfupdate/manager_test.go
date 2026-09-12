@@ -19,6 +19,40 @@ func TestHomebrew(t *testing.T) {
 	}
 }
 
+func TestHomebrewCaskProvidesExecutableManagedUpdate(t *testing.T) {
+	m := HomebrewCask("codegrapher")
+	if m.UpgradeCommand != "brew update && brew upgrade --cask codegrapher" {
+		t.Errorf("UpgradeCommand = %q", m.UpgradeCommand)
+	}
+	want := []ManagedCommand{
+		{Executable: "brew", Args: []string{"update"}},
+		{Executable: "brew", Args: []string{"upgrade", "--cask", "codegrapher"}},
+	}
+	if !reflect.DeepEqual(m.UpgradeSteps, want) {
+		t.Errorf("UpgradeSteps = %#v, want %#v", m.UpgradeSteps, want)
+	}
+	if !m.CanExecuteUpgrade() {
+		t.Error("HomebrewCask must execute the managed update")
+	}
+}
+
+func TestHomebrewFormulaProvidesExecutableManagedUpdate(t *testing.T) {
+	m := HomebrewFormula("tool")
+	if m.UpgradeCommand != "brew update && brew upgrade tool" {
+		t.Errorf("UpgradeCommand = %q", m.UpgradeCommand)
+	}
+	want := []ManagedCommand{
+		{Executable: "brew", Args: []string{"update"}},
+		{Executable: "brew", Args: []string{"upgrade", "tool"}},
+	}
+	if !reflect.DeepEqual(m.UpgradeSteps, want) {
+		t.Errorf("UpgradeSteps = %#v, want %#v", m.UpgradeSteps, want)
+	}
+	if !m.CanExecuteUpgrade() {
+		t.Error("HomebrewFormula must execute the managed update")
+	}
+}
+
 func TestWithExecutableUpgrade(t *testing.T) {
 	m := Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb")
 
