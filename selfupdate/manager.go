@@ -145,7 +145,7 @@ func HomebrewFormula(name string) Manager {
 
 func shellDisplayArg(arg string) string {
 	if arg != "" && !strings.HasPrefix(arg, "-") && strings.IndexFunc(arg, func(r rune) bool {
-		return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || strings.ContainsRune("@+._/-", r))
+		return !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@+._/-", r)
 	}) == -1 {
 		return arg
 	}
