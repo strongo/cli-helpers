@@ -234,6 +234,14 @@ development binary that appears earlier on `PATH`. A successfully verified
 manager update MUST retain the exact absolute invocation path and resolved path
 that passed the probe.
 
+#### REQ: shell-command-cache-refresh
+
+After a completed manual replacement or executable package-manager update, the
+framework-neutral text and JSON adapters MUST explain that a parent shell may
+still cache the previously resolved command and MUST provide an explicit
+`hash -r` or new-shell remedy. The updater runs as a child process and MUST NOT
+claim that it refreshed its parent shell's command cache.
+
 #### REQ: after-update-integration
 
 `Options` and the optional Cobra command adapter MUST accept the same typed,
@@ -427,7 +435,7 @@ behavior above is inherited, not restated.
 
 ### AC: only-verified-bytes-are-installed
 
-**Requirements:** self-update#req:latest-release-source, self-update#req:multi-product-repository, self-update#req:download-matching-asset, self-update#req:checksum-before-extract, self-update#req:atomic-replace, self-update#req:post-swap-version-check, self-update#req:after-update-integration, self-update#req:after-update-integration-nonfatal, self-update#req:no-op-when-current
+**Requirements:** self-update#req:latest-release-source, self-update#req:multi-product-repository, self-update#req:download-matching-asset, self-update#req:checksum-before-extract, self-update#req:atomic-replace, self-update#req:post-swap-version-check, self-update#req:shell-command-cache-refresh, self-update#req:after-update-integration, self-update#req:after-update-integration-nonfatal, self-update#req:no-op-when-current
 
 **Given** a manual install older than the latest stable release, where drafts and prereleases exist alongside it
 **When** the update runs
