@@ -19,7 +19,9 @@ recovery decisions in the consuming CLI.
 
 `ProtectOwnerOnly` MUST make a regular file or directory accessible only to the
 current user. On Windows it MUST install a protected DACL with one current-user
-allow entry; it MUST NOT treat Unix mode bits as proof of Windows privacy.
+allow entry without rewriting an already-correct owner, which can require an
+unavailable privilege; it MUST NOT treat Unix mode bits as proof of Windows
+privacy.
 
 `ValidateOwnerOnly` MUST reject symlinks, special files, other owners, group or
 world Unix permissions, and Windows ACLs that grant another principal access.
