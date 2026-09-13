@@ -179,6 +179,9 @@ func TestWriteOutcome_ManagerExecuted(t *testing.T) {
 	if !strings.Contains(out.String(), "Homebrew") || !strings.Contains(out.String(), "completed") {
 		t.Errorf("stdout %q does not report the completed manager update", out.String())
 	}
+	if !strings.Contains(out.String(), "hash -r") {
+		t.Errorf("stdout %q does not explain how to refresh a cached command path", out.String())
+	}
 }
 
 // A redirected outcome without a Manager (a contradiction the caller should
@@ -272,8 +275,25 @@ func TestWriteOutcome_UpdatedWithoutWarning(t *testing.T) {
 	if !strings.Contains(out.String(), "updated to 1.1.0") {
 		t.Errorf("stdout %q does not report the update", out.String())
 	}
+	if !strings.Contains(out.String(), "hash -r") || !strings.Contains(out.String(), "new shell") {
+		t.Errorf("stdout %q does not explain how to refresh a cached command path", out.String())
+	}
 	if errOut.String() != "" {
 		t.Errorf("stderr = %q, want empty without a post-swap warning", errOut.String())
+	}
+}
+
+func TestWriteOutcomeJSON_UpdatedIncludesShellRefreshHint(t *testing.T) {
+	var out bytes.Buffer
+	if err := WriteOutcomeJSON(&out, selfupdate.Outcome{Action: selfupdate.ActionUpdated, Target: "1.1.0"}); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if hint, ok := got["shell_refresh_hint"].(string); !ok || !strings.Contains(hint, "hash -r") {
+		t.Errorf("shell_refresh_hint = %v, want an explicit hash refresh remedy", got["shell_refresh_hint"])
 	}
 }
 

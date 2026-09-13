@@ -44,7 +44,10 @@ type outcomeJSON struct {
 	ReleaseCheckWarning string `json:"release_check_warning,omitempty"`
 	Warning             string `json:"warning,omitempty"`
 	AfterUpdateWarning  string `json:"after_update_warning,omitempty"`
+	ShellRefreshHint    string `json:"shell_refresh_hint,omitempty"`
 }
+
+const shellRefreshHint = "If this shell still reports the previous version, run hash -r or start a new shell."
 
 // WriteOutcomeJSON writes outcome's --format json shape to out.
 func WriteOutcomeJSON(out io.Writer, outcome selfupdate.Outcome) error {
@@ -71,6 +74,9 @@ func WriteOutcomeJSON(out io.Writer, outcome selfupdate.Outcome) error {
 	}
 	if outcome.AfterUpdateWarning != nil {
 		oj.AfterUpdateWarning = outcome.AfterUpdateWarning.Error()
+	}
+	if outcome.Action == selfupdate.ActionUpdated || outcome.Action == selfupdate.ActionManagerExecuted {
+		oj.ShellRefreshHint = shellRefreshHint
 	}
 	return json.NewEncoder(out).Encode(oj)
 }
@@ -105,9 +111,11 @@ func WriteOutcome(out, errOut io.Writer, cfg selfupdate.Config, outcome selfupda
 			verb, cfg.BinaryName, outcome.Result.Current, outcome.Target, outcome.PlannedURL)
 	case selfupdate.ActionUpdated:
 		writeStyled(out, successStyle, fmt.Sprintf("[OK] %s updated to %s.\n", cfg.BinaryName, outcome.Target))
+		fmt.Fprintln(out, shellRefreshHint) //nolint:errcheck
 	case selfupdate.ActionManagerExecuted:
 		if m := outcome.Detection.Manager; m != nil {
 			writeStyled(out, successStyle, fmt.Sprintf("[OK] %s upgrade command completed for %s.\n", m.Name, cfg.BinaryName))
+			fmt.Fprintln(out, shellRefreshHint) //nolint:errcheck
 		}
 	}
 	WriteAvailabilityWarning(errOut, outcome)
