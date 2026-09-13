@@ -42,8 +42,8 @@ func protectOwnerOnly(path string) error {
 		return err
 	}
 	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		sid, nil, acl, nil)
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, acl, nil)
 }
 
 func protectOwnerOnlyFile(file *os.File) error {
@@ -56,8 +56,8 @@ func protectOwnerOnlyFile(file *os.File) error {
 		return err
 	}
 	return windows.SetSecurityInfo(windows.Handle(file.Fd()), windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		sid, nil, acl, nil)
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, acl, nil)
 }
 
 func ownerOnlyACL(sid *windows.SID, inheritance uint32) (*windows.ACL, error) {
