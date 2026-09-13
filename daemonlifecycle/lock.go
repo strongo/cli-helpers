@@ -26,9 +26,7 @@ func Lock(ctx context.Context, file *os.File, interval time.Duration) error {
 		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
+			timer.Stop()
 			return ctx.Err()
 		case <-timer.C:
 		}
