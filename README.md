@@ -16,6 +16,11 @@ this package implements, and `cmd/selfupdate/` for a complete, runnable
 consumer (this module's own reference CLI, which updates itself from this
 repository's GitHub releases using nothing but the public API below).
 
+`github.com/strongo/cli-helpers/daemonlifecycle` supplies the narrow
+OS-sensitive layer shared by CLI daemons: owner-only state paths and
+cancellable advisory file locks. Process launching, lifecycle state, and
+recovery policy remain consumer-owned.
+
 ## Safety guarantees
 
 - **A managed install is never overwritten directly.** `Classify`
