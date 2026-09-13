@@ -71,7 +71,7 @@ func ownerOnlyACL(sid *windows.SID, inheritance uint32) (*windows.ACL, error) {
 
 func validateOwnerOnly(path string, _ os.FileInfo) error {
 	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+		windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return err
 	}
@@ -80,7 +80,7 @@ func validateOwnerOnly(path string, _ os.FileInfo) error {
 
 func validateOwnerOnlyFile(file *os.File, _ os.FileInfo) error {
 	descriptor, err := windows.GetSecurityInfo(windows.Handle(file.Fd()), windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+		windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return err
 	}
@@ -88,16 +88,9 @@ func validateOwnerOnlyFile(file *os.File, _ os.FileInfo) error {
 }
 
 func validateSecurityDescriptor(descriptor *windows.SECURITY_DESCRIPTOR) error {
-	owner, _, err := descriptor.Owner()
-	if err != nil {
-		return err
-	}
 	want, err := currentUserSID()
 	if err != nil {
 		return err
-	}
-	if owner == nil || !owner.Equals(want) {
-		return fmt.Errorf("owner is not the current user")
 	}
 	dacl, _, err := descriptor.DACL()
 	if err != nil {
