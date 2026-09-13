@@ -47,17 +47,11 @@ func protectOwnerOnly(path string) error {
 }
 
 func protectOwnerOnlyFile(file *os.File) error {
-	sid, err := currentUserSID()
-	if err != nil {
-		return err
-	}
-	acl, err := ownerOnlyACL(sid, windows.NO_INHERITANCE)
-	if err != nil {
-		return err
-	}
-	return windows.SetSecurityInfo(windows.Handle(file.Fd()), windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil, nil, acl, nil)
+	// os.OpenFile does not request WRITE_DAC, so SetSecurityInfo on its handle
+	// fails with ERROR_ACCESS_DENIED on Windows. Apply the policy through the
+	// named object instead. Callers pair this with ValidateOwnerOnlyFile, whose
+	// handle-based check detects a path replacement before the file is trusted.
+	return protectOwnerOnly(file.Name())
 }
 
 func ownerOnlyACL(sid *windows.SID, inheritance uint32) (*windows.ACL, error) {

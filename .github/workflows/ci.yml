@@ -25,6 +25,10 @@ jobs:
       - name: Exercise native durability and enforce platform coverage
         shell: pwsh
         run: |
+          go test ./daemonlifecycle
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
           $coveragePath = Join-Path $PWD 'coverage-windows.out'
           go test "-coverprofile=$coveragePath" ./skillsync
           if ($LASTEXITCODE -ne 0) {
