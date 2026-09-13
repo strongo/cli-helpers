@@ -9,6 +9,7 @@ import (
 	"time"
 )
 
+// specscore:verifies https://specscore.org/github.com/strongo/cli-helpers/spec/features/daemon-lifecycle#ac:protected-lock-journey
 func TestOwnerOnlyPathAndLockJourney(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
 	if err := os.Mkdir(dir, 0o755); err != nil {
