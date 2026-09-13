@@ -26,10 +26,10 @@ func TestOwnerOnlyPathAndLockJourney(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = file.Close() }()
-	if err := ProtectOwnerOnly(path); err != nil {
+	if err := ProtectOwnerOnlyFile(file); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateOwnerOnly(path); err != nil {
+	if err := ValidateOwnerOnlyFile(file); err != nil {
 		t.Fatal(err)
 	}
 	if err := Lock(context.Background(), file, time.Millisecond); err != nil {

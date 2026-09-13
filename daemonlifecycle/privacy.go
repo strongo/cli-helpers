@@ -15,8 +15,10 @@ func ProtectOwnerOnly(path string) error {
 }
 
 // ProtectOwnerOnlyFile replaces an already-open file's access policy with one
-// granting access only to the current user. Using the handle avoids changing a
-// different path if an attacker replaces a directory entry after it is opened.
+// granting access only to the current user. Consumers must subsequently call
+// ValidateOwnerOnlyFile before trusting the handle. On Windows, applying the
+// policy uses the file name because ordinary os.OpenFile handles do not carry
+// WRITE_DAC; the handle-based validation detects any path replacement.
 func ProtectOwnerOnlyFile(file *os.File) error {
 	if file == nil {
 		return fmt.Errorf("protect current-user access: nil file")

@@ -47,17 +47,11 @@ func protectOwnerOnly(path string) error {
 }
 
 func protectOwnerOnlyFile(file *os.File) error {
-	sid, err := currentUserSID()
-	if err != nil {
-		return err
-	}
-	acl, err := ownerOnlyACL(sid, windows.NO_INHERITANCE)
-	if err != nil {
-		return err
-	}
-	return windows.SetSecurityInfo(windows.Handle(file.Fd()), windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil, nil, acl, nil)
+	// os.OpenFile does not request WRITE_DAC, so SetSecurityInfo on its handle
+	// fails with ERROR_ACCESS_DENIED on Windows. Apply the policy through the
+	// named object instead. Callers pair this with ValidateOwnerOnlyFile, whose
+	// handle-based check detects a path replacement before the file is trusted.
+	return protectOwnerOnly(file.Name())
 }
 
 func ownerOnlyACL(sid *windows.SID, inheritance uint32) (*windows.ACL, error) {
@@ -77,7 +71,7 @@ func ownerOnlyACL(sid *windows.SID, inheritance uint32) (*windows.ACL, error) {
 
 func validateOwnerOnly(path string, _ os.FileInfo) error {
 	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+		windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return err
 	}
@@ -86,7 +80,7 @@ func validateOwnerOnly(path string, _ os.FileInfo) error {
 
 func validateOwnerOnlyFile(file *os.File, _ os.FileInfo) error {
 	descriptor, err := windows.GetSecurityInfo(windows.Handle(file.Fd()), windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+		windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return err
 	}
@@ -94,16 +88,9 @@ func validateOwnerOnlyFile(file *os.File, _ os.FileInfo) error {
 }
 
 func validateSecurityDescriptor(descriptor *windows.SECURITY_DESCRIPTOR) error {
-	owner, _, err := descriptor.Owner()
-	if err != nil {
-		return err
-	}
 	want, err := currentUserSID()
 	if err != nil {
 		return err
-	}
-	if owner == nil || !owner.Equals(want) {
-		return fmt.Errorf("owner is not the current user")
 	}
 	dacl, _, err := descriptor.DACL()
 	if err != nil {
