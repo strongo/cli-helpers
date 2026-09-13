@@ -19,12 +19,15 @@ recovery decisions in the consuming CLI.
 
 `ProtectOwnerOnly` MUST make a regular file or directory accessible only to the
 current user. On Windows it MUST install a protected DACL with one current-user
-allow entry without rewriting an already-correct owner, which can require an
-unavailable privilege; it MUST NOT treat Unix mode bits as proof of Windows
-privacy.
+allow entry, then reassert the current user as owner. The DACL update MUST grant
+the owner-write right before the owner update so inherited administrative-group
+ownership does not require an elevated token. It MUST NOT treat Unix mode bits
+as proof of Windows privacy.
 
 `ValidateOwnerOnly` MUST reject symlinks, special files, other owners, group or
-world Unix permissions, and Windows ACLs that grant another principal access.
+world Unix permissions, Windows ACLs that grant another principal access,
+directories whose private ACL is not inherited by children, and an open handle
+whose directory entry was replaced after opening.
 
 ### REQ: cancellable-advisory-lock
 
@@ -46,7 +49,10 @@ rules, recovery actions, ports, or persistence schemas.
 **When** it protects, validates, locks, and unlocks them
 
 **Then** validation succeeds, a competing handle cannot acquire the live lock,
-and the same public API compiles on Unix and Windows.
+and the same public API compiles on Unix and Windows
+
+**And** Windows rejects foreign owners, missing directory inheritance, and
+replaced lock-file directory entries.
 
 **Requirements:** daemon-lifecycle#req:owner-only-state, daemon-lifecycle#req:cancellable-advisory-lock, daemon-lifecycle#req:consumer-owned-policy
 

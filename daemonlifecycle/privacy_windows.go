@@ -41,9 +41,17 @@ func protectOwnerOnly(path string) error {
 	if err != nil {
 		return err
 	}
-	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil, nil, acl, nil)
+		nil, nil, acl, nil); err != nil {
+		return err
+	}
+	// Applying the restrictive DACL first grants the current user WRITE_OWNER
+	// even when a runner-created parent assigned an administrative group as the
+	// inherited owner. A combined owner+DACL update opens the object before that
+	// right exists and fails for an ordinary process token.
+	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION, sid, nil, nil, nil)
 }
 
 func protectOwnerOnlyFile(file *os.File) error {
@@ -69,28 +77,42 @@ func ownerOnlyACL(sid *windows.SID, inheritance uint32) (*windows.ACL, error) {
 	}}, nil)
 }
 
-func validateOwnerOnly(path string, _ os.FileInfo) error {
+func validateOwnerOnly(path string, info os.FileInfo) error {
 	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION)
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return err
 	}
-	return validateSecurityDescriptor(descriptor)
+	return validateSecurityDescriptor(descriptor, info.IsDir())
 }
 
-func validateOwnerOnlyFile(file *os.File, _ os.FileInfo) error {
+func validateOwnerOnlyFile(file *os.File, info os.FileInfo) error {
+	pathInfo, err := os.Stat(file.Name())
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(info, pathInfo) {
+		return fmt.Errorf("open handle no longer names the file at %s", file.Name())
+	}
 	descriptor, err := windows.GetSecurityInfo(windows.Handle(file.Fd()), windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION)
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return err
 	}
-	return validateSecurityDescriptor(descriptor)
+	return validateSecurityDescriptor(descriptor, false)
 }
 
-func validateSecurityDescriptor(descriptor *windows.SECURITY_DESCRIPTOR) error {
+func validateSecurityDescriptor(descriptor *windows.SECURITY_DESCRIPTOR, directory bool) error {
 	want, err := currentUserSID()
 	if err != nil {
 		return err
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return err
+	}
+	if owner == nil || !owner.Equals(want) {
+		return fmt.Errorf("owner is not the current user")
 	}
 	dacl, _, err := descriptor.DACL()
 	if err != nil {
@@ -109,6 +131,12 @@ func validateSecurityDescriptor(descriptor *windows.SECURITY_DESCRIPTOR) error {
 	aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 	if !aceSID.Equals(want) {
 		return fmt.Errorf("DACL entry belongs to a different user")
+	}
+	if directory {
+		wantFlags := uint8(windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE)
+		if ace.Header.AceFlags&wantFlags != wantFlags {
+			return fmt.Errorf("directory DACL entry is not inheritable by child files and directories")
+		}
 	}
 	return nil
 }

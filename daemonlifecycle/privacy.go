@@ -5,8 +5,9 @@ import (
 	"os"
 )
 
-// ProtectOwnerOnly replaces path's access policy with one granting access only
-// to the current user. Directories keep inheritable permissions for children.
+// ProtectOwnerOnly makes the current user the owner and replaces path's access
+// policy with one granting access only to that user. Directories keep
+// inheritable permissions for children.
 func ProtectOwnerOnly(path string) error {
 	if err := protectOwnerOnly(path); err != nil {
 		return fmt.Errorf("protect %s for current user: %w", path, err)
@@ -14,8 +15,9 @@ func ProtectOwnerOnly(path string) error {
 	return nil
 }
 
-// ProtectOwnerOnlyFile replaces an already-open file's access policy with one
-// granting access only to the current user. Consumers must subsequently call
+// ProtectOwnerOnlyFile makes the current user the owner and replaces an
+// already-open file's access policy with one granting access only to that user.
+// Consumers must subsequently call
 // ValidateOwnerOnlyFile before trusting the handle. On Windows, applying the
 // policy uses the file name because ordinary os.OpenFile handles do not carry
 // WRITE_DAC; the handle-based validation detects any path replacement.
