@@ -20,7 +20,7 @@ func TestValidateOwnerOnlyFileRejectsUnsafeExistingFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	if err := ValidateOwnerOnlyFile(file); err == nil {
 		t.Fatal("ValidateOwnerOnlyFile accepted group/world-readable state")
 	}
@@ -46,7 +46,7 @@ func TestValidateOwnerOnlyFileRejectsHardLink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	if err := ValidateOwnerOnlyFile(file); err == nil {
 		t.Fatal("ValidateOwnerOnlyFile accepted a multiply linked state file")
 	}

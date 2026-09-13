@@ -24,7 +24,7 @@ func TestOwnerOnlyPathAndLockJourney(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	if err := ProtectOwnerOnly(path); err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestOwnerOnlyPathAndLockJourney(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer competitor.Close()
+	defer func() { _ = competitor.Close() }()
 	if locked, err := TryLock(competitor); err != nil || locked {
 		t.Fatalf("competing lock = %t, %v; want busy", locked, err)
 	}
