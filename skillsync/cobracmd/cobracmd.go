@@ -33,14 +33,37 @@ type ErrorMapper interface {
 }
 
 // Harness describes one Agent Skills configuration root.
+//
+// ConfigEnv and HomeEnv express the two different ways vendors let a variable
+// relocate that root. Choosing the wrong one installs skills where the harness
+// never looks, so each is set only against a vendor statement of its actual
+// semantics:
+//
+//   - ConfigEnv replaces the config root outright, giving <ConfigEnv>/skills.
+//     Claude's CLAUDE_CONFIG_DIR, Codex's CODEX_HOME, DeepSeek's DSH_HOME, and
+//     Junie's JUNIE_HOME ("overrides the default ~/.junie") all work this way.
+//   - HomeEnv replaces the user home the config root is resolved under, giving
+//     <HomeEnv>/<ConfigRel>/skills. Gemini's GEMINI_CLI_HOME is this case: it
+//     "specifies the root directory for Gemini CLI's user-level configuration
+//     and storage", and the CLI creates its own .gemini folder inside it.
+//
+// Variables that only ever add a search path rather than replacing one belong
+// in neither field. OpenCode's OPENCODE_CONFIG_DIR is additive -- the default
+// ~/.config/opencode keeps being read -- so it is deliberately unset here.
 type Harness struct {
 	ID        string
 	Aliases   []string
 	ConfigRel string
 	ConfigEnv string
+	HomeEnv   string
 }
 
 func (h Harness) SkillsDir(home string, getenv func(string) string) string {
+	if h.HomeEnv != "" {
+		if value := strings.TrimSpace(getenv(h.HomeEnv)); value != "" {
+			home = value
+		}
+	}
 	root := filepath.Join(home, h.ConfigRel)
 	if h.ConfigEnv != "" {
 		if value := strings.TrimSpace(getenv(h.ConfigEnv)); value != "" {
@@ -55,11 +78,49 @@ func (h Harness) Present(home string, getenv func(string) string) bool {
 	return err == nil && info.IsDir()
 }
 
-// DefaultHarnesses preserves WB's Claude, Cursor, and Codex conventions.
+// DefaultHarnesses holds the user-level Agent Skills roots this package knows
+// about. Each entry resolves to <config root>/skills; see Harness for how
+// ConfigEnv and HomeEnv relocate that root, and for why an additive variable
+// such as OpenCode's is deliberately unset.
+//
+// Order is part of the observable contract: callers that select by position
+// and the discovery fallback both read harnesses[0], so Claude, Cursor, and
+// Codex keep their existing slots and new harnesses are appended.
+//
+// The "agents" entry is the cross-client ~/.agents/skills convention rather
+// than one vendor's directory. Amp and Zed are aliases of it because it is the
+// only user skill root either one reads. Several other harnesses here (Copilot,
+// Cursor, Codex, Gemini, DeepSeek) also scan it, so "all" installs the same
+// skills into both a native and a shared root; that is redundant but safe,
+// since every target is independently owned. A caller who wants one shared
+// install selects "agents" alone.
+//
+// Two entries are worth flagging as version-sensitive:
+//
+//   - Antigravity. Google's own docs published three different global roots:
+//     ~/.gemini/config/skills (flagship 2.0 and the official codelab, which
+//     calls it available across all Antigravity products), the older
+//     ~/.gemini/antigravity/skills (IDE doc only), and
+//     ~/.gemini/antigravity-cli/skills (CLI doc). The cross-product path is
+//     used here; revisit if the IDE-only path turns out to be the live one.
+//   - Windsurf. ~/.codeium/windsurf/skills is the stable channel; the CLI
+//     documents ~/.codeium/<channel>/skills and ~/.config/devin/skills
+//     alongside it, and the product is now branded Devin Desktop.
 var DefaultHarnesses = []Harness{
 	{ID: "claude", Aliases: []string{"claude-code"}, ConfigRel: ".claude", ConfigEnv: "CLAUDE_CONFIG_DIR"},
 	{ID: "cursor", ConfigRel: ".cursor"},
 	{ID: "codex", ConfigRel: ".codex", ConfigEnv: "CODEX_HOME"},
+	{ID: "deepseek", Aliases: []string{"dsh", "deepseek-harness"}, ConfigRel: ".dsh", ConfigEnv: "DSH_HOME"},
+	{ID: "agents", Aliases: []string{"amp", "zed"}, ConfigRel: ".agents"},
+	{ID: "copilot", ConfigRel: ".copilot"},
+	{ID: "gemini", ConfigRel: ".gemini", HomeEnv: "GEMINI_CLI_HOME"},
+	{ID: "antigravity", ConfigRel: filepath.Join(".gemini", "config")},
+	{ID: "opencode", ConfigRel: filepath.Join(".config", "opencode")},
+	{ID: "cline", ConfigRel: ".cline"},
+	{ID: "roo", ConfigRel: ".roo"},
+	{ID: "kiro", ConfigRel: ".kiro"},
+	{ID: "windsurf", ConfigRel: filepath.Join(".codeium", "windsurf")},
+	{ID: "junie", ConfigRel: ".junie", ConfigEnv: "JUNIE_HOME"},
 }
 
 // TargetResult retains both an attempted target's complete core report and its
@@ -140,7 +201,7 @@ func NewSync(cfg skillsync.Config, opts CommandOptions) *cobra.Command {
 	}
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return mapFailure(opts, &UsageError{Err: err}) })
 	cmd.Flags().StringVar(&dir, "dir", "", "explicit harness skills directory (mutually exclusive with --harness)")
-	cmd.Flags().StringArrayVar(&harnesses, "harness", nil, "harness: claude, cursor, codex, or all (repeatable)")
+	cmd.Flags().StringArrayVar(&harnesses, "harness", nil, harnessFlagUsage(configuredHarnesses(opts)))
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report changes without writing")
 	cmd.Flags().BoolVar(&newer, "newer-compatible", false, "explicitly select a newer compatible plugin release")
 	cmd.Flags().StringVar(&format, "format", "text", "output format: text|json")
@@ -169,6 +230,18 @@ func configuredHarnesses(opts CommandOptions) []Harness {
 		return opts.Harnesses
 	}
 	return DefaultHarnesses
+}
+
+// harnessFlagUsage derives the --harness help from the registry actually in
+// force, so a harness cannot be selectable without being advertised and the
+// two cannot drift. Aliases are omitted to keep the line readable; they are
+// resolved the same way, and an unknown value still fails as a usage error.
+func harnessFlagUsage(harnesses []Harness) string {
+	ids := make([]string, 0, len(harnesses))
+	for _, harness := range harnesses {
+		ids = append(ids, harness.ID)
+	}
+	return fmt.Sprintf("harness: %s, or all (repeatable)", strings.Join(ids, ", "))
 }
 func homeFunc(opts CommandOptions) func() (string, error) {
 	if opts.Home != nil {
