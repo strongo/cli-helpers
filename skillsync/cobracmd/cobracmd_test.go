@@ -328,6 +328,99 @@ func TestTargetSelectionValidationAndDefaultDiscovery(t *testing.T) {
 	}
 }
 
+func TestDeepSeekHarnessResolvesAliasesHomeOverrideAndDiscovery(t *testing.T) {
+	home := t.TempDir()
+	noEnv := func(string) string { return "" }
+	byID := map[string]Harness{}
+	for _, harness := range DefaultHarnesses {
+		byID[harness.ID] = harness
+	}
+	deepseek, ok := byID["deepseek"]
+	if !ok {
+		t.Fatal("deepseek harness missing from DefaultHarnesses")
+	}
+	if got, want := deepseek.SkillsDir(home, noEnv), filepath.Join(home, ".dsh", "skills"); got != want {
+		t.Fatalf("skills dir = %q, want %q", got, want)
+	}
+	custom := t.TempDir()
+	if got, want := deepseek.SkillsDir(home, func(string) string { return custom }), filepath.Join(custom, "skills"); got != want {
+		t.Fatalf("DSH_HOME skills dir = %q, want %q", got, want)
+	}
+
+	// A newly appended harness must stay invisible to default discovery until
+	// its own config root exists, and must not disturb the earlier slots.
+	if deepseek.Present(home, noEnv) {
+		t.Fatal("deepseek reported present without a config root")
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".dsh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !deepseek.Present(home, noEnv) {
+		t.Fatal("deepseek not present once its config root exists")
+	}
+	targets, err := resolveTargets("", nil, DefaultHarnesses, func() (string, error) { return home, nil }, noEnv)
+	if err != nil || len(targets) != 1 || targets[0].Harness != "deepseek" {
+		t.Fatalf("default discovery targets=%#v err=%v", targets, err)
+	}
+
+	// Each documented alias and spelling selects the same single target.
+	for _, names := range [][]string{
+		{"deepseek"},
+		{"dsh"},
+		{"deepseek-harness"},
+		{"DSH"},
+		{" deepseek "},
+		{"deepseek,dsh"},
+		{"dsh", "deepseek-harness"},
+	} {
+		targets, err := resolveTargets("", names, DefaultHarnesses, func() (string, error) { return home, nil }, noEnv)
+		if err != nil || len(targets) != 1 || targets[0].Harness != "deepseek" {
+			t.Fatalf("names=%q targets=%#v err=%v", names, targets, err)
+		}
+	}
+
+	// DSH_HOME must reach target resolution, not just SkillsDir. Resolution
+	// canonicalizes the target, so compare against the canonical form too --
+	// on macOS t.TempDir is reached through the /var -> /private/var symlink.
+	redirected := t.TempDir()
+	wantDir, err := skillsync.ValidateTarget(filepath.Join(redirected, "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err = resolveTargets("", []string{"deepseek"}, DefaultHarnesses, func() (string, error) { return home, nil }, func(key string) string {
+		if key == "DSH_HOME" {
+			return redirected
+		}
+		return ""
+	})
+	if err != nil || len(targets) != 1 || targets[0].Dir != wantDir {
+		t.Fatalf("DSH_HOME targets=%#v want dir %q err=%v", targets, wantDir, err)
+	}
+
+	if _, err := resolveTargets("", []string{"deepseek", "unknown"}, DefaultHarnesses, func() (string, error) { return home, nil }, noEnv); err == nil {
+		t.Fatal("an unknown harness alongside deepseek was accepted")
+	}
+}
+
+func TestHarnessFlagHelpNamesEveryDefaultHarness(t *testing.T) {
+	// The --harness flag belongs to the sync leaf; New only wraps it.
+	cmd := NewSync(commandConfig(t), CommandOptions{})
+	flag := cmd.Flags().Lookup("harness")
+	if flag == nil {
+		t.Fatal("sync leaf exposes no --harness flag")
+	}
+	// The help text is the only documentation a user sees at the call site, so
+	// it must not drift from the registry it advertises.
+	for _, harness := range DefaultHarnesses {
+		if !strings.Contains(flag.Usage, harness.ID) {
+			t.Fatalf("--harness help %q omits %q", flag.Usage, harness.ID)
+		}
+	}
+	if !strings.Contains(flag.Usage, "all") {
+		t.Fatalf("--harness help %q omits the all selector", flag.Usage)
+	}
+}
+
 func TestSameExistingTargetDeduplicatesAndAggregatePreservesErrors(t *testing.T) {
 	home := t.TempDir()
 	shared := filepath.Join(home, "shared")

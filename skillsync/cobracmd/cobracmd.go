@@ -55,11 +55,18 @@ func (h Harness) Present(home string, getenv func(string) string) bool {
 	return err == nil && info.IsDir()
 }
 
-// DefaultHarnesses preserves WB's Claude, Cursor, and Codex conventions.
+// DefaultHarnesses preserves WB's Claude, Cursor, and Codex conventions and
+// adds the DeepSeek Harness, whose user skill root is <DSH_HOME>/skills with
+// DSH_HOME defaulting to ~/.dsh.
+//
+// Order is part of the observable contract: callers that select by position
+// and the discovery fallback both rely on Claude, Cursor, and Codex keeping
+// their existing slots, so new harnesses are appended.
 var DefaultHarnesses = []Harness{
 	{ID: "claude", Aliases: []string{"claude-code"}, ConfigRel: ".claude", ConfigEnv: "CLAUDE_CONFIG_DIR"},
 	{ID: "cursor", ConfigRel: ".cursor"},
 	{ID: "codex", ConfigRel: ".codex", ConfigEnv: "CODEX_HOME"},
+	{ID: "deepseek", Aliases: []string{"dsh", "deepseek-harness"}, ConfigRel: ".dsh", ConfigEnv: "DSH_HOME"},
 }
 
 // TargetResult retains both an attempted target's complete core report and its
@@ -140,7 +147,7 @@ func NewSync(cfg skillsync.Config, opts CommandOptions) *cobra.Command {
 	}
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return mapFailure(opts, &UsageError{Err: err}) })
 	cmd.Flags().StringVar(&dir, "dir", "", "explicit harness skills directory (mutually exclusive with --harness)")
-	cmd.Flags().StringArrayVar(&harnesses, "harness", nil, "harness: claude, cursor, codex, or all (repeatable)")
+	cmd.Flags().StringArrayVar(&harnesses, "harness", nil, "harness: claude, cursor, codex, deepseek, or all (repeatable)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report changes without writing")
 	cmd.Flags().BoolVar(&newer, "newer-compatible", false, "explicitly select a newer compatible plugin release")
 	cmd.Flags().StringVar(&format, "format", "text", "output format: text|json")
