@@ -421,6 +421,131 @@ func TestHarnessFlagHelpNamesEveryDefaultHarness(t *testing.T) {
 	}
 }
 
+func TestHarnessEnvOverridesMatchVendorSemantics(t *testing.T) {
+	home := t.TempDir()
+	noEnv := func(string) string { return "" }
+	byID := map[string]Harness{}
+	for _, harness := range DefaultHarnesses {
+		byID[harness.ID] = harness
+	}
+	// Gemini's GEMINI_CLI_HOME relocates the user home, and the CLI creates its
+	// own .gemini folder inside it -- so the variable must NOT swallow the
+	// .gemini segment. Modelling it as ConfigEnv would install to
+	// $GEMINI_CLI_HOME/skills, which Gemini never reads.
+	geminiHome := t.TempDir()
+	gemini := byID["gemini"]
+	if got, want := gemini.SkillsDir(home, noEnv), filepath.Join(home, ".gemini", "skills"); got != want {
+		t.Fatalf("gemini default = %q, want %q", got, want)
+	}
+	if got, want := gemini.SkillsDir(home, func(string) string { return geminiHome }), filepath.Join(geminiHome, ".gemini", "skills"); got != want {
+		t.Fatalf("gemini under GEMINI_CLI_HOME = %q, want %q", got, want)
+	}
+	// A whitespace-only override is not a relocation.
+	if got, want := gemini.SkillsDir(home, func(string) string { return "   " }), filepath.Join(home, ".gemini", "skills"); got != want {
+		t.Fatalf("gemini blank override = %q, want %q", got, want)
+	}
+	// Junie's JUNIE_HOME replaces the ~/.junie root itself, so it is a
+	// ConfigEnv: the config segment must NOT survive.
+	junieHome := t.TempDir()
+	junie := byID["junie"]
+	if got, want := junie.SkillsDir(home, noEnv), filepath.Join(home, ".junie", "skills"); got != want {
+		t.Fatalf("junie default = %q, want %q", got, want)
+	}
+	if got, want := junie.SkillsDir(home, func(string) string { return junieHome }), filepath.Join(junieHome, "skills"); got != want {
+		t.Fatalf("junie under JUNIE_HOME = %q, want %q", got, want)
+	}
+	// Antigravity's cross-product global root, not the IDE-only or CLI-only one.
+	if got, want := byID["antigravity"].SkillsDir(home, noEnv), filepath.Join(home, ".gemini", "config", "skills"); got != want {
+		t.Fatalf("antigravity = %q, want %q", got, want)
+	}
+	// OpenCode's variable is additive, so the default root must be installed.
+	if byID["opencode"].ConfigEnv != "" || byID["opencode"].HomeEnv != "" {
+		t.Fatal("opencode must not claim an additive variable as an override")
+	}
+}
+
+func TestDefaultHarnessesAreWellFormedAndClaimDistinctTargets(t *testing.T) {
+	home := t.TempDir()
+	noEnv := func(string) string { return "" }
+	// Every selectable name -- ID and alias alike -- must map to exactly one
+	// harness. A silent collision would make one entry unreachable by name.
+	owner := map[string]string{}
+	// Two entries resolving to one directory would make one unreachable in a
+	// different way: resolution deduplicates by physical path, so the later
+	// entry would be dropped without any error.
+	dirOwner := map[string]string{}
+	for _, harness := range DefaultHarnesses {
+		if harness.ID == "" || harness.ConfigRel == "" {
+			t.Fatalf("incomplete harness %#v", harness)
+		}
+		for _, name := range append([]string{harness.ID}, harness.Aliases...) {
+			if name == "" {
+				t.Fatalf("%s has an empty name", harness.ID)
+			}
+			if strings.EqualFold(name, "all") {
+				t.Fatalf("%s claims the reserved selector %q", harness.ID, name)
+			}
+			key := strings.ToLower(name)
+			if prior, ok := owner[key]; ok {
+				t.Fatalf("name %q is claimed by both %q and %q", name, prior, harness.ID)
+			}
+			owner[key] = harness.ID
+		}
+		dir := harness.SkillsDir(home, noEnv)
+		if prior, ok := dirOwner[dir]; ok {
+			t.Fatalf("%s and %s share the skills directory %s", prior, harness.ID, dir)
+		}
+		dirOwner[dir] = harness.ID
+	}
+	// The established slots are contract: selection by position and the
+	// discovery fallback both read them, so they must not move.
+	for i, want := range []string{"claude", "cursor", "codex"} {
+		if DefaultHarnesses[i].ID != want {
+			t.Fatalf("DefaultHarnesses[%d] = %q, want %q", i, DefaultHarnesses[i].ID, want)
+		}
+	}
+}
+
+func TestSharedAgentsRootIsSelectedByAmpAndZed(t *testing.T) {
+	home := t.TempDir()
+	noEnv := func(string) string { return "" }
+	want, err := skillsync.ValidateTarget(filepath.Join(home, ".agents", "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Amp and Zed read the cross-client root exclusively or first, so all three
+	// names must land on that one directory rather than a vendor-private one.
+	for _, name := range []string{"agents", "amp", "zed"} {
+		targets, err := resolveTargets("", []string{name}, DefaultHarnesses, func() (string, error) { return home, nil }, noEnv)
+		if err != nil || len(targets) != 1 || targets[0].Dir != want {
+			t.Fatalf("%s targets=%#v want=%s err=%v", name, targets, want, err)
+		}
+	}
+}
+
+func TestEveryHarnessIsSelectableByNameAndAllResolvesEachOnce(t *testing.T) {
+	home := t.TempDir()
+	noEnv := func(string) string { return "" }
+	for _, harness := range DefaultHarnesses {
+		targets, err := resolveTargets("", []string{harness.ID}, DefaultHarnesses, func() (string, error) { return home, nil }, noEnv)
+		if err != nil || len(targets) != 1 || targets[0].Harness != harness.ID {
+			t.Fatalf("%s targets=%#v err=%v", harness.ID, targets, err)
+		}
+	}
+	all, err := resolveTargets("", []string{"all"}, DefaultHarnesses, func() (string, error) { return home, nil }, noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != len(DefaultHarnesses) {
+		t.Fatalf("all resolved %d targets, want %d", len(all), len(DefaultHarnesses))
+	}
+	for i, harness := range DefaultHarnesses {
+		if all[i].Harness != harness.ID {
+			t.Fatalf("all[%d] = %q, want %q", i, all[i].Harness, harness.ID)
+		}
+	}
+}
+
 func TestSameExistingTargetDeduplicatesAndAggregatePreservesErrors(t *testing.T) {
 	home := t.TempDir()
 	shared := filepath.Join(home, "shared")
