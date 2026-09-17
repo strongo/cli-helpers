@@ -1,12 +1,12 @@
 ---
 format: https://specscore.md/feature-specification
-status: Stable
+status: Amending
 ---
 
 # Feature: Self-Update Library
 
 > [SpecScore.**Studio**](https://specscore.studio): | [Explore](https://specscore.studio/app/github.com/strongo/cli-helpers/spec/features/self-update?op=explore) | [Edit](https://specscore.studio/app/github.com/strongo/cli-helpers/spec/features/self-update?op=edit) | [Ask question](https://specscore.studio/app/github.com/strongo/cli-helpers/spec/features/self-update?op=ask) | [Request change](https://specscore.studio/app/github.com/strongo/cli-helpers/spec/features/self-update?op=request-change) |
-**Status:** Stable
+**Status:** Amending
 **Source Ideas:** —
 
 ## Summary
@@ -149,6 +149,19 @@ undetermined one: it orders below its release per semver.
 
 When the running version already equals the latest stable release, the package
 MUST report that it is up to date and MUST NOT download or replace anything.
+
+#### REQ: ahead-of-latest
+
+When the running version is known and orders strictly above the latest stable
+release — a Go pseudo-version after the newest tag, or a build from a newer
+version line than the releases — the package MUST report a distinct `ahead`
+verdict carrying both versions. An unpinned update MUST then act as for
+[REQ: no-op-when-current](#req-no-op-when-current): no download, replacement,
+confirmation or manager command. A check-only report MUST NOT treat `ahead` as
+an available update, so a consumer's "update available" mapping is not invoked.
+This governs only the unpinned path: an explicit pin below the running version
+is still decided by [REQ: pinned-downgrade-guard](#req-pinned-downgrade-guard)
+and the allow-downgrade option, unchanged.
 
 #### REQ: version-pin
 
@@ -358,6 +371,20 @@ The package's own tests MUST NOT require network access and MUST NOT replace a
 real installed binary. The GitHub endpoints, filesystem operations, executable
 resolution, and interactivity check MUST be injectable for that purpose.
 
+#### REQ: update-at-classified-copy
+
+`Config` MUST expose the update path for a copy the caller has already
+classified and whose latest release it has already resolved:
+`UpdateAt(ctx, detection, opts)`, where `detection.Path` is the symlink-resolved
+file to replace and `CurrentVersion` is that copy's version. `Update` MUST be
+exactly `DetectSelf` followed by `UpdateAt`. `Options` MUST accept a resolved
+release tag; when it is set, neither the manual nor the managed path performs
+its own latest-release lookup, and the update MUST fail with the release-lookup
+failure kind, changing nothing, if that tag is no longer the latest stable
+release, so a caller that confirmed one version never installs another.
+`Config` MUST expose the latest-stable-release lookup the unpinned path uses, so
+a caller can resolve the tag once and pass it on.
+
 #### REQ: dry-run
 
 The package MUST support a dry run that walks the full decision path — detect,
@@ -443,11 +470,11 @@ behavior above is inherited, not restated.
 
 ### AC: only-verified-bytes-are-installed
 
-**Requirements:** self-update#req:latest-release-source, self-update#req:multi-product-repository, self-update#req:download-matching-asset, self-update#req:checksum-before-extract, self-update#req:atomic-replace, self-update#req:post-swap-version-check, self-update#req:shell-command-cache-refresh, self-update#req:after-update-integration, self-update#req:after-update-integration-nonfatal, self-update#req:no-op-when-current
+**Requirements:** self-update#req:latest-release-source, self-update#req:ahead-of-latest, self-update#req:update-at-classified-copy, self-update#req:multi-product-repository, self-update#req:download-matching-asset, self-update#req:checksum-before-extract, self-update#req:atomic-replace, self-update#req:post-swap-version-check, self-update#req:shell-command-cache-refresh, self-update#req:after-update-integration, self-update#req:after-update-integration-nonfatal, self-update#req:no-op-when-current
 
 **Given** a manual install older than the latest stable release, where drafts and prereleases exist alongside it
 **When** the update runs
-**Then** the package selects the newest stable release, downloads the asset for the host platform, compares its sha256 against that release's checksums before extracting, swaps the binary atomically, and confirms the installed version — and when already current it reports so having downloaded nothing.
+**Then** the package selects the newest stable release, downloads the asset for the host platform, compares its sha256 against that release's checksums before extracting, swaps the binary atomically, and confirms the installed version — and when already current, or when the running build is ahead of the latest stable release, it reports so having downloaded nothing and a check does not signal an update; the same outcome is reached through `UpdateAt` on a classified copy with a pre-resolved tag, and a tag that is no longer latest fails without changes.
 
 ### AC: pins-resolve-exactly-and-guard-direction
 
