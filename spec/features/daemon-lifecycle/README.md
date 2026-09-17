@@ -48,17 +48,23 @@ It MUST NOT let the child inherit any other handle, so a caller whose own
 stdout is a pipe reaches EOF when it exits while the child keeps running. On
 Windows, when creation with breakaway fails with `ERROR_ACCESS_DENIED`, it MUST
 retry once without `CREATE_BREAKAWAY_FROM_JOB`. It MUST reject a command that
-sets its own standard streams, extra files or system process attributes, and
+sets its own standard streams, extra files, system process attributes, or a
+context, `Cancel` or `WaitDelay` (a detached child does not follow them), and
 MUST return the started process so the caller can observe an early exit.
 
 ### REQ: process-identity
 
-`ProcessStartTime` MUST return a start time that is stable for the life of a
-running process on Linux, macOS and Windows without cgo, and MUST report an
-exited or unknown pid, including an unreaped zombie, as `ErrProcessNotFound`.
+`ProcessIdentity` MUST return an opaque token that is equal across calls for
+the life of a running process and differs for a later process that reuses the
+pid, on Linux, macOS and Windows without cgo. It MUST be built only from values
+the kernel records once, so wall-clock steps cannot change it: on Linux the
+boot id and the raw start time in clock ticks (never converted through
+`btime`), on macOS the kernel start timeval, on Windows the creation FILETIME.
+It MUST report an exited or unknown pid, including an unreaped zombie and a
+Windows process that exited with code 259, as `ErrProcessNotFound`.
 
 `TerminateIfSameProcess` MUST forcibly terminate a pid only when its current
-start time equals the recorded one, and otherwise MUST send nothing and return
+identity equals the recorded one, and otherwise MUST send nothing and return
 `ErrProcessMismatch` or `ErrProcessNotFound`. On Windows the check and the
 termination MUST use the same process handle.
 
@@ -104,14 +110,18 @@ still starts the child, which stays in that job.
 
 ### AC: reused-pid-never-signalled
 
-**Given** a running process and its start time from `ProcessStartTime`
+**Given** a running process and its token from `ProcessIdentity`
 
-**When** `TerminateIfSameProcess` is called with that pid and any different
-start time, then with the matching one
+**When** the token is read again, compared with another process's token, and
+`TerminateIfSameProcess` is called with that pid and any other token, then with
+the matching one
 
-**Then** every mismatched call returns `ErrProcessMismatch` and the process
-keeps running, the matching call terminates it, and afterwards both functions
-report `ErrProcessNotFound`.
+**Then** repeated reads are equal and the two processes' tokens differ, every
+mismatched call returns `ErrProcessMismatch` and the process keeps running, the
+matching call terminates it, and afterwards both functions report
+`ErrProcessNotFound`
+
+**And** on Linux the token does not change when `btime` changes.
 
 **Requirements:** daemon-lifecycle#req:process-identity
 

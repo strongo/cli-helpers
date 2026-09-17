@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // statLine builds a /proc/<pid>/stat line whose command name contains the
@@ -21,7 +20,7 @@ func statLine(state, startTicks string) string {
 	return "42 (a) (b c) " + strings.Join(append(fields, startTicks, "0"), " ")
 }
 
-func TestLinuxProcessStartTimeParsesProcfs(t *testing.T) {
+func TestLinuxProcessIdentityParsesProcfs(t *testing.T) {
 	root := t.TempDir()
 	previous := procRoot
 	procRoot = root
@@ -38,8 +37,8 @@ func TestLinuxProcessStartTimeParsesProcfs(t *testing.T) {
 	}
 	expectError := func(pid int, want string) {
 		t.Helper()
-		if _, err := ProcessStartTime(pid); err == nil || !strings.Contains(err.Error(), want) {
-			t.Fatalf("ProcessStartTime(%d) = %v, want %q", pid, err, want)
+		if _, err := ProcessIdentity(pid); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("ProcessIdentity(%d) = %v, want %q", pid, err, want)
 		}
 	}
 
@@ -51,30 +50,33 @@ func TestLinuxProcessStartTimeParsesProcfs(t *testing.T) {
 	write("9/stat", "9 (short) S 1 2")
 	expectError(9, "malformed")
 	write("10/stat", statLine("Z", "5"))
-	if _, err := ProcessStartTime(10); !errors.Is(err, ErrProcessNotFound) {
+	if _, err := ProcessIdentity(10); !errors.Is(err, ErrProcessNotFound) {
 		t.Fatalf("zombie = %v, want ErrProcessNotFound", err)
 	}
 	write("11/stat", statLine("S", "soon"))
 	expectError(11, "invalid syntax")
 	write("12/stat", statLine("S", "250"))
-	expectError(12, "stat")
-	write("stat", "cpu 1 2 3\nbtime later\n")
-	expectError(12, "parse btime")
-	write("stat", "cpu 1 2 3\n")
-	expectError(12, "btime missing")
-	write("stat", "cpu 1 2 3\nbtime 1700000000\nprocesses 9\n")
-	started, err := ProcessStartTime(12)
+	expectError(12, "boot_id")
+	write("sys/kernel/random/boot_id", "\n")
+	expectError(12, "empty boot_id")
+	write("sys/kernel/random/boot_id", "3f1c0a9e-boot\n")
+	identity, err := ProcessIdentity(12)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := time.Unix(1700000002, int64(500*time.Millisecond)); !started.Equal(want) {
-		t.Fatalf("start = %v, want %v", started, want)
+	if want := "linux:3f1c0a9e-boot:250"; identity != want {
+		t.Fatalf("identity = %q, want %q", identity, want)
+	}
+	// btime is deliberately not read: a wall-clock step must not change it.
+	write("stat", "btime 1\n")
+	if again, err := ProcessIdentity(12); err != nil || again != identity {
+		t.Fatalf("identity after a btime change = %q, %v", again, err)
 	}
 
-	// A matching start time on a pid no process holds reaches kill(2), whose
+	// A matching identity on a pid no process holds reaches kill(2), whose
 	// failure is reported rather than treated as success.
 	write("2147483000/stat", statLine("S", "250"))
-	if err := TerminateIfSameProcess(2147483000, started); err == nil || !strings.Contains(err.Error(), "terminate process") {
+	if err := TerminateIfSameProcess(2147483000, identity); err == nil || !strings.Contains(err.Error(), "terminate process") {
 		t.Fatalf("kill of an absent pid = %v", err)
 	}
 }

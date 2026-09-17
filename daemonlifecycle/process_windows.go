@@ -5,35 +5,33 @@ package daemonlifecycle
 import (
 	"errors"
 	"fmt"
-	"time"
 
 	"golang.org/x/sys/windows"
 )
 
-// stillActive is STILL_ACTIVE, the exit code of a process that has not exited.
-const stillActive = 259
+const queryAccess = windows.PROCESS_QUERY_LIMITED_INFORMATION | windows.SYNCHRONIZE
 
-func processStartTime(pid int) (time.Time, error) {
-	handle, err := openProcess(pid, windows.PROCESS_QUERY_LIMITED_INFORMATION)
+func processIdentity(pid int) (string, error) {
+	handle, err := openProcess(pid, queryAccess)
 	if err != nil {
-		return time.Time{}, err
+		return "", err
 	}
 	defer func() { _ = windows.CloseHandle(handle) }()
-	return handleStartTime(pid, handle)
+	return handleIdentity(pid, handle)
 }
 
-func terminateIfSameProcess(pid int, startedAt time.Time) error {
-	handle, err := openProcess(pid, windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE)
+func terminateIfSameProcess(pid int, identity string) error {
+	handle, err := openProcess(pid, queryAccess|windows.PROCESS_TERMINATE)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = windows.CloseHandle(handle) }()
-	started, err := handleStartTime(pid, handle)
+	current, err := handleIdentity(pid, handle)
 	if err != nil {
 		return err
 	}
-	if !started.Equal(startedAt) {
-		return mismatch(pid, startedAt, started)
+	if current != identity {
+		return mismatch(pid, identity, current)
 	}
 	if err := windows.TerminateProcess(handle, 1); err != nil {
 		return fmt.Errorf("terminate process %d: %w", pid, err)
@@ -52,17 +50,20 @@ func openProcess(pid int, access uint32) (windows.Handle, error) {
 	return handle, nil
 }
 
-func handleStartTime(pid int, handle windows.Handle) (time.Time, error) {
-	var code uint32
-	if err := windows.GetExitCodeProcess(handle, &code); err != nil {
-		return time.Time{}, fmt.Errorf("process %d exit code: %w", pid, err)
+func handleIdentity(pid int, handle windows.Handle) (string, error) {
+	// A process handle is signalled once the process exits. Unlike
+	// GetExitCodeProcess, this cannot confuse an exit code of 259 with
+	// STILL_ACTIVE.
+	event, err := windows.WaitForSingleObject(handle, 0)
+	if err != nil {
+		return "", fmt.Errorf("process %d state: %w", pid, err)
 	}
-	if code != stillActive {
-		return time.Time{}, fmt.Errorf("process %d has exited: %w", pid, ErrProcessNotFound)
+	if event != uint32(windows.WAIT_TIMEOUT) {
+		return "", fmt.Errorf("process %d has exited: %w", pid, ErrProcessNotFound)
 	}
 	var creation, exit, kernel, user windows.Filetime
 	if err := windows.GetProcessTimes(handle, &creation, &exit, &kernel, &user); err != nil {
-		return time.Time{}, fmt.Errorf("process %d start time: %w", pid, err)
+		return "", fmt.Errorf("process %d identity: %w", pid, err)
 	}
-	return time.Unix(0, creation.Nanoseconds()).UTC(), nil
+	return fmt.Sprintf("windows:%d", uint64(creation.HighDateTime)<<32|uint64(creation.LowDateTime)), nil
 }

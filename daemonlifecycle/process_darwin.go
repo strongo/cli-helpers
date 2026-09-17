@@ -4,7 +4,6 @@ package daemonlifecycle
 
 import (
 	"fmt"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -12,14 +11,14 @@ import (
 // darwinZombie is SZOMB from <sys/proc.h>.
 const darwinZombie = 5
 
-func processStartTime(pid int) (time.Time, error) {
+func processIdentity(pid int) (string, error) {
 	procs, err := unix.SysctlKinfoProcSlice("kern.proc.pid", pid)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("process %d start time: %w", pid, err)
+		return "", fmt.Errorf("process %d identity: %w", pid, err)
 	}
 	if len(procs) == 0 || procs[0].Proc.P_stat == darwinZombie {
-		return time.Time{}, fmt.Errorf("process %d: %w", pid, ErrProcessNotFound)
+		return "", fmt.Errorf("process %d: %w", pid, ErrProcessNotFound)
 	}
 	started := procs[0].Proc.P_starttime
-	return time.Unix(started.Sec, int64(started.Usec)*int64(time.Microsecond)).UTC(), nil
+	return fmt.Sprintf("darwin:%d.%06d", started.Sec, started.Usec), nil
 }

@@ -3,48 +3,48 @@ package daemonlifecycle
 import (
 	"errors"
 	"fmt"
-	"time"
 )
 
 // ErrProcessNotFound reports that no running process has the requested pid.
 // Exited processes that have not been reaped yet (zombies) count as not found.
 var ErrProcessNotFound = errors.New("process not found")
 
-// ErrProcessMismatch reports that the pid now belongs to a process with a
-// different start time than the one recorded, typically after pid reuse.
-var ErrProcessMismatch = errors.New("process start time does not match")
+// ErrProcessMismatch reports that the pid now belongs to a different process
+// than the one whose identity was recorded, typically after pid reuse.
+var ErrProcessMismatch = errors.New("process identity does not match")
 
-// ProcessStartTime returns when the running process pid started, so a pid
-// recorded together with its start time can later be checked against the
-// process that holds the pid now. Compare values with time.Time.Equal: the
-// result is stable for the life of a process (Linux reports 10 ms ticks
-// relative to boot, macOS microseconds, Windows 100 ns intervals).
+// ProcessIdentity returns an opaque token that names the running process pid
+// for its whole life, so a pid recorded together with its identity can later
+// be checked against the process that holds the pid now. Two calls for the
+// same process return equal strings; a process that later reuses the pid gets
+// a different one. Compare tokens only for equality and do not parse them.
+//
+// The token is built from values the kernel records once and never
+// recomputes, so wall-clock steps do not change it: on Linux the boot id plus
+// the start time in clock ticks since boot, on macOS the kernel's start
+// timeval, and on Windows the creation FILETIME.
 //
 // It returns an error wrapping ErrProcessNotFound when no running process has
 // that pid. It is implemented for Linux, macOS and Windows without cgo; other
 // platforms return an error.
-func ProcessStartTime(pid int) (time.Time, error) {
+func ProcessIdentity(pid int) (string, error) {
 	if pid <= 0 {
-		return time.Time{}, fmt.Errorf("process start time: invalid pid %d", pid)
+		return "", fmt.Errorf("process identity: invalid pid %d", pid)
 	}
-	return processStartTime(pid)
+	return processIdentity(pid)
 }
 
-// TerminateIfSameProcess forcibly terminates pid only when its current start
-// time equals startedAt. Otherwise it returns an error wrapping
-// ErrProcessMismatch (or ErrProcessNotFound) and sends nothing.
+// TerminateIfSameProcess forcibly terminates pid only when its current
+// identity equals identity, as returned earlier by ProcessIdentity. Otherwise
+// it returns an error wrapping ErrProcessMismatch (or ErrProcessNotFound) and
+// sends nothing.
 //
 // On Windows the check and the termination use one process handle, so the pid
 // cannot be reused in between. On Unix the check is immediately followed by
 // SIGKILL; a pid reused within that instant is not distinguishable.
-func TerminateIfSameProcess(pid int, startedAt time.Time) error {
+func TerminateIfSameProcess(pid int, identity string) error {
 	if pid <= 0 {
 		return fmt.Errorf("terminate process: invalid pid %d", pid)
 	}
-	return terminateIfSameProcess(pid, startedAt)
-}
-
-func mismatch(pid int, want, got time.Time) error {
-	return fmt.Errorf("terminate process %d: started %s, recorded %s: %w",
-		pid, got.Format(time.RFC3339Nano), want.Format(time.RFC3339Nano), ErrProcessMismatch)
+	return terminateIfSameProcess(pid, identity)
 }

@@ -11,9 +11,9 @@ import (
 // outlives its caller and never holds the caller's standard streams.
 //
 // Only template's Path, Args, Env and Dir are used; template itself is never
-// started, so its Stdin, Stdout, Stderr, ExtraFiles and SysProcAttr must be
-// unset. The child reads from the null device and writes both output streams
-// to log, which the caller owns and may close once StartDetached returns. No
+// started, so its Stdin, Stdout, Stderr, ExtraFiles, SysProcAttr, Cancel and
+// WaitDelay must be unset: a detached child does not follow a context. The
+// child reads from the null device and writes both output streams to log, which the caller owns and may close once StartDetached returns. No
 // other handle is inherited: on Unix every other descriptor is close-on-exec,
 // and on Windows only the three standard handles are listed for inheritance.
 // A caller whose own stdout is a pipe therefore sees EOF as soon as it exits,
@@ -47,6 +47,8 @@ func validateDetachedTemplate(template *exec.Cmd, log *os.File) error {
 	case template.Stdin != nil || template.Stdout != nil || template.Stderr != nil ||
 		len(template.ExtraFiles) != 0:
 		return errors.New("start detached: command must not set Stdin, Stdout, Stderr or ExtraFiles")
+	case template.Cancel != nil || template.WaitDelay != 0:
+		return errors.New("start detached: command must not use CommandContext, Cancel or WaitDelay")
 	case template.SysProcAttr != nil:
 		return errors.New("start detached: command must not set SysProcAttr")
 	}

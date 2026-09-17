@@ -19,8 +19,8 @@ repository's GitHub releases using nothing but the public API below).
 `github.com/strongo/cli-helpers/daemonlifecycle` supplies the narrow
 OS-sensitive layer shared by CLI daemons: owner-only state paths,
 cancellable advisory file locks, a detached start that returns to a piped
-caller (`ConfigureDetached`, `StartDetached`), and pid identity by start time
-(`ProcessStartTime`, `TerminateIfSameProcess`) on Linux, macOS and Windows
+caller (`ConfigureDetached`, `StartDetached`), and a clock-step-proof pid identity
+(`ProcessIdentity`, `TerminateIfSameProcess`) on Linux, macOS and Windows
 without cgo. Readiness, timeouts, lifecycle state, and recovery policy remain
 consumer-owned.
 

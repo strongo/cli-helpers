@@ -209,11 +209,11 @@ func TestStartDetachedReturnsToPipedCaller(t *testing.T) {
 	if _, err := fmt.Sscanf(line, "ready %d", &pid); err != nil {
 		t.Fatalf("readiness line %q: %v", line, err)
 	}
-	started, err := ProcessStartTime(pid)
+	identity, err := ProcessIdentity(pid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = TerminateIfSameProcess(pid, started) })
+	t.Cleanup(func() { _ = TerminateIfSameProcess(pid, identity) })
 	assertNoInheritedPipe(t, pid, reader)
 
 	// The reader sees EOF although the server keeps running: nothing but the
@@ -273,7 +273,7 @@ func TestStartDetachedReturnsToPipedCaller(t *testing.T) {
 		return true
 	})
 	waitFor(t, "the server to exit", func() bool {
-		_, err := ProcessStartTime(pid)
+		_, err := ProcessIdentity(pid)
 		return errors.Is(err, ErrProcessNotFound)
 	})
 }
@@ -353,6 +353,7 @@ func TestStartDetachedRejectsUnusableTemplates(t *testing.T) {
 	started := valid()
 	started.Process = &os.Process{Pid: 1}
 	withStdout, withFiles, withAttr := valid(), valid(), valid()
+	withContext := exec.CommandContext(context.Background(), os.Args[0])
 	withStdout.Stdout = io.Discard
 	withFiles.ExtraFiles = []*os.File{log}
 	withAttr.SysProcAttr = new(syscall.SysProcAttr)
@@ -368,6 +369,7 @@ func TestStartDetachedRejectsUnusableTemplates(t *testing.T) {
 		"stdio":        {withStdout, log, "Stdout"},
 		"extra files":  {withFiles, log, "ExtraFiles"},
 		"sysprocattr":  {withAttr, log, "SysProcAttr"},
+		"context":      {withContext, log, "CommandContext"},
 		"missing path": {&exec.Cmd{Path: filepath.Join(t.TempDir(), "missing")}, log, "start detached"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -416,7 +418,14 @@ func TestStartDetachedRetriesOnlyAcceptedFailures(t *testing.T) {
 }
 
 // specscore:verifies https://specscore.org/github.com/strongo/cli-helpers/spec/features/daemon-lifecycle#ac:reused-pid-never-signalled
-func TestTerminateIfSameProcessNeverSignalsAnotherStartTime(t *testing.T) {
+func TestTerminateIfSameProcessNeverSignalsAnotherIdentity(t *testing.T) {
+	own, err := ProcessIdentity(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Linux start times tick every 10 ms; make sure the sleeper starts in a
+	// later tick than this process.
+	time.Sleep(20 * time.Millisecond)
 	sleeper := probeCommand("sleep", "")
 	if err := sleeper.Start(); err != nil {
 		t.Fatal(err)
@@ -424,20 +433,20 @@ func TestTerminateIfSameProcessNeverSignalsAnotherStartTime(t *testing.T) {
 	exited := make(chan error, 1)
 	go func() { exited <- sleeper.Wait() }()
 	pid := sleeper.Process.Pid
-	started, err := ProcessStartTime(pid)
+	identity, err := ProcessIdentity(pid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if again, err := ProcessStartTime(pid); err != nil || !again.Equal(started) {
-		t.Fatalf("start time is unstable: %v then %v, %v", started, again, err)
+	if again, err := ProcessIdentity(pid); err != nil || again != identity {
+		t.Fatalf("identity is unstable: %q then %q, %v", identity, again, err)
 	}
-	if since := time.Since(started); since < -time.Minute || since > time.Minute {
-		t.Fatalf("start time %v is not near now", started)
+	if identity == own {
+		t.Fatalf("two processes share identity %q", identity)
 	}
 
-	for _, recorded := range []time.Time{started.Add(-time.Second), started.Add(10 * time.Millisecond), {}} {
+	for _, recorded := range []string{own, identity + "0", ""} {
 		if err := TerminateIfSameProcess(pid, recorded); !errors.Is(err, ErrProcessMismatch) {
-			t.Fatalf("TerminateIfSameProcess(%v) = %v, want ErrProcessMismatch", recorded, err)
+			t.Fatalf("TerminateIfSameProcess(%q) = %v, want ErrProcessMismatch", recorded, err)
 		}
 	}
 	select {
@@ -446,7 +455,7 @@ func TestTerminateIfSameProcessNeverSignalsAnotherStartTime(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 
-	if err := TerminateIfSameProcess(pid, started); err != nil {
+	if err := TerminateIfSameProcess(pid, identity); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -454,24 +463,21 @@ func TestTerminateIfSameProcessNeverSignalsAnotherStartTime(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the matching process was not terminated")
 	}
-	if _, err := ProcessStartTime(pid); !errors.Is(err, ErrProcessNotFound) {
-		t.Fatalf("start time of a reaped process = %v, want ErrProcessNotFound", err)
+	if _, err := ProcessIdentity(pid); !errors.Is(err, ErrProcessNotFound) {
+		t.Fatalf("identity of a reaped process = %v, want ErrProcessNotFound", err)
 	}
-	if err := TerminateIfSameProcess(pid, started); !errors.Is(err, ErrProcessNotFound) {
+	if err := TerminateIfSameProcess(pid, identity); !errors.Is(err, ErrProcessNotFound) {
 		t.Fatalf("terminate a reaped process = %v, want ErrProcessNotFound", err)
 	}
 }
 
 func TestProcessFunctionsRejectInvalidPids(t *testing.T) {
 	for _, pid := range []int{0, -1} {
-		if _, err := ProcessStartTime(pid); err == nil || errors.Is(err, ErrProcessNotFound) {
-			t.Fatalf("ProcessStartTime(%d) = %v", pid, err)
+		if _, err := ProcessIdentity(pid); err == nil || errors.Is(err, ErrProcessNotFound) {
+			t.Fatalf("ProcessIdentity(%d) = %v", pid, err)
 		}
-		if err := TerminateIfSameProcess(pid, time.Now()); err == nil || errors.Is(err, ErrProcessMismatch) {
+		if err := TerminateIfSameProcess(pid, "x"); err == nil || errors.Is(err, ErrProcessMismatch) {
 			t.Fatalf("TerminateIfSameProcess(%d) = %v", pid, err)
 		}
-	}
-	if _, err := ProcessStartTime(os.Getpid()); err != nil {
-		t.Fatalf("own start time: %v", err)
 	}
 }
