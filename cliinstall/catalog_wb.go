@@ -7,12 +7,11 @@ func init() {
 		ID:          "wb",
 		Homepage:    "https://sneat.work/bench",
 		Description: "Fleet-wide GitHub repository sync and config-driven recipes across many local clones, from the terminal.",
-		Details: "wb keeps every local clone of your GitHub repositories in sync and runs " +
+		Details: "WB keeps every local clone of your GitHub repositories in sync and runs " +
 			"config-driven recipes across every repository that matches — no per-repository " +
 			"scripting. It is part of Sneat.work's Workbench.\n\n" +
-			"wb also runs governed commands, tracks worktree activity, and coordinates " +
-			"cross-repository streams, so it is often the tool a fleet CLI's own CI and local " +
-			"development already run through.",
+			"WB also runs governed commands, fleet coverage and verification, and " +
+			"cross-repository streams.",
 
 		Repository: "sneat-dev/wb",
 		Managers: []selfupdate.Manager{

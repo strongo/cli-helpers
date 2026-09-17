@@ -23,35 +23,35 @@ var matrixRows = []relevanceRow{
 	{"wb", "cover100", "`wb coverage` measures many repositories; `cover100` opens one repository's coverage as a zoomable treemap"},
 
 	{"specscore", "wb", "lint every synced repository's specs through `wb`'s CI profile instead of one clone at a time"},
-	{"specscore", "ingitdb", "`specscore studio index` exports facts as INGR recordsets, inGitDB's record encoding"},
-	{"specscore", "synchestra", "Synchestra is built on SpecScore and coordinates agents working from its features and plans"},
+	{"specscore", "ingitdb", "`specscore studio index` exports its facts as INGR recordsets, one of the record formats inGitDB stores natively; use `ingitdb` to keep your own structured project data in Git in the same format and check it with `ingitdb validate`"},
+	{"specscore", "synchestra", "Synchestra turns the SpecScore features and plans you write into task queues AI agents claim and work from, tracking status in a separate state repository"},
 	{"specscore", "chatwright", "verify conversational features with Chatwright scenarios alongside `specscore rehearse` acceptance scenarios"},
-	{"specscore", "codegrapher", "codegrapher links source symbols to the SpecScore artifacts they implement"},
+	{"specscore", "codegrapher", "CodeGrapher links source symbols to the SpecScore artifacts they implement"},
 
-	{"chatwright", "specscore", "Chatwright is developed spec-first with SpecScore; specify the behavior your scenarios prove"},
+	{"chatwright", "specscore", "specify the conversational behavior your Chatwright scenarios prove as SpecScore features, and lint them with `specscore spec lint`"},
 
-	{"codegrapher", "specscore", "lint and query the specs codegrapher's traceability edges point to"},
+	{"codegrapher", "specscore", "lint and query the specs CodeGrapher's traceability edges point to"},
 	{"codegrapher", "wb", "let `wb` re-run `codegrapher sync` automatically after it updates a checkout"},
-	{"codegrapher", "cover100", "pair the dependency graph with a coverage treemap to find heavily used code that lacks tests"},
+	{"codegrapher", "cover100", "pair CodeGrapher's call graph with cover100's coverage treemap to find heavily called code that lacks tests"},
 
-	{"cover100", "codegrapher", "from an uncovered file in the treemap, query codegrapher for what calls into it"},
+	{"cover100", "codegrapher", "from an uncovered file in the treemap, run `codegrapher callers` to see what calls into it"},
 	{"cover100", "wb", "measure coverage across a whole local fleet with `wb coverage --fleet`, then open single repositories in cover100"},
 
 	{"ovdb", "ingitdb", "inGitDB is one of OpenVaultDB's pluggable storage engines; `ingitdb` validates and edits that data directly"},
-	{"ovdb", "datatug", "DataTug queries inGitDB databases, so it can explore data an OpenVaultDB instance keeps on the inGitDB engine"},
+	{"ovdb", "datatug", "DataTug connects to a running `ovdb serve` database as an `openvaultdb` catalog with a scoped OpenVaultDB token, so you can query it and copy data out of it from DataTug's CLI and Web UI, under the server's own access policies"},
 
 	{"synchestra", "ingitdb", "Synchestra uses inGitDB as its storage engine; `ingitdb` inspects and validates that state"},
 	{"synchestra", "specscore", "lint and scaffold the SpecScore features and plans Synchestra coordinates"},
 	{"synchestra", "datatug", "query and explore the inGitDB-stored project state in DataTug"},
-	{"synchestra", "ovdb", "keep data an agent task produces in a user-owned, portable OpenVaultDB database"},
+	{"synchestra", "ovdb", "OpenVaultDB's default engine is inGitDB, the same engine Synchestra stores state in; `ovdb serve` puts an inGitDB database behind an HTTP API with scoped, revocable tokens for tools that do not work in Git"},
 	{"synchestra", "chatwright", "prove a delivered conversational agent with deterministic Chatwright scenario runs"},
 
 	{"ingitdb", "datatug", "explore and query inGitDB collections in DataTug's CLI and Web UI"},
 	{"ingitdb", "ovdb", "serve an inGitDB repository as one storage engine behind OpenVaultDB"},
-	{"ingitdb", "synchestra", "Synchestra stores its coordination state in inGitDB"},
-	{"ingitdb", "specscore", "SpecScore Studio exports spec facts as INGR recordsets you can keep beside inGitDB data"},
+	{"ingitdb", "synchestra", "Synchestra coordinates AI agents from a Git state repository kept in inGitDB (tasks, claims, status) and bundles `ingitdb` pull/setup/resolve, so your inGitDB repositories and skills carry straight into agent coordination"},
+	{"ingitdb", "specscore", "`specscore studio index` exports an ecosystem's spec, code-graph and manifest facts as INGR recordsets, a record format your inGitDB collections already support"},
 
 	{"datatug", "ingitdb", "create, validate and edit the inGitDB databases DataTug reads"},
-	{"datatug", "ovdb", "run user-owned OpenVaultDB databases, including on the inGitDB engine DataTug reads"},
-	{"datatug", "specscore", "DataTug's own specifications are SpecScore artifacts; read and lint them when contributing"},
+	{"datatug", "ovdb", "run a user-owned OpenVaultDB server with `ovdb serve`, then register it in DataTug as an `openvaultdb` catalog to query it under that server's access policies"},
+	{"datatug", "specscore", "if you're contributing to or extending DataTug, its own specifications are SpecScore artifacts — read and lint them with `specscore spec lint`"},
 }

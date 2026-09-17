@@ -5,15 +5,15 @@ import "github.com/strongo/cli-helpers/selfupdate"
 func init() {
 	register(Entry{
 		ID:          "cover100",
-		Homepage:    "https://github.com/sneat-dev/cover100-cli",
+		Homepage:    "https://cover100.dev",
 		Description: "Collects Go and TypeScript/JavaScript test coverage and opens a zoomable local treemap of it.",
-		Details: "cover100 collects test coverage from Go and TypeScript/JavaScript projects, " +
+		Details: "`cover100` collects test coverage from Go and TypeScript/JavaScript projects, " +
 			"normalizes it into one JSON document, and opens a zoomable treemap in your " +
 			"browser: box area is code volume, box colour is coverage, so the biggest untested " +
 			"surface is impossible to miss. Nothing is uploaded and no server is left running.\n\n" +
-			"`wb coverage --fleet` can measure a whole local fleet, then hand a single " +
-			"repository to cover100 for the visual view; codegrapher can be queried from an " +
-			"uncovered file for what calls into it.",
+			"`wb coverage --fleet` shows which repositories in a local fleet need attention; " +
+			"run cover100 in one of them for the visual view, and `codegrapher callers` shows " +
+			"what calls into an uncovered file.",
 
 		Repository: "sneat-dev/cover100-cli",
 		// No managers: cover100 publishes only plain GitHub release

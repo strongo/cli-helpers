@@ -22,16 +22,26 @@ func init() {
 			"is a plain YAML or JSON file, every change is a commit, and branching, review and " +
 			"pull requests extend naturally to data. Collections are defined with typed schemas " +
 			"that `ingitdb validate` checks.\n\n" +
-			"inGitDB is a storage engine behind OpenVaultDB and Synchestra's own coordination " +
-			"state, and DataTug and SpecScore Studio both read or export data in its record " +
-			"encoding.",
+			"inGitDB is the default storage engine for OpenVaultDB and the store behind " +
+			"Synchestra's coordination state; DataTug queries inGitDB databases, and " +
+			"SpecScore Studio exports facts as INGR, one of inGitDB's record formats.",
 
 		Repository: "ingitdb/ingitdb-cli",
+		// Homebrew, Scoop and WinGet are all redirect-only here, matching
+		// ingitdb's current internal/selfupdate: package-managed installs
+		// are print-and-exit, never replaced. Scoop and WinGet are
+		// published (.goreleaser.yaml scoops: name "ingitdb", bucket
+		// ingitdb/scoop-bucket; winget: package_identifier
+		// "ingitdb.ingitdb") but ingitdb's own self-update has never
+		// modeled them, so they were previously invisible to Classify —
+		// task-14's rebuilt self-update MUST include these two managers
+		// (and Snap) or it will self-replace a binary a package manager
+		// owns on Windows.
 		Managers: []selfupdate.Manager{
-			// Redirect-only, matching ingitdb's current internal/selfupdate:
-			// package-managed installs are print-and-exit, never replaced.
 			selfupdate.Homebrew("brew upgrade --cask ingitdb"),
 			ingitdbSnap,
+			selfupdate.Scoop("scoop update ingitdb"),
+			selfupdate.WinGet("winget upgrade --id ingitdb.ingitdb"),
 		},
 		// Matches ingitdb's .goreleaser.yaml: linux/darwin/windows x
 		// amd64/arm64, minus windows/arm64.

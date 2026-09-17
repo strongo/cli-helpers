@@ -10,8 +10,8 @@ func init() {
 		Details: "Chatwright is a testing CLI for conversational applications: it drives " +
 			"platform-neutral scenarios against a chat surface both deterministically and with " +
 			"AI-driven checks, so a conversational feature can be proven the way it is used.\n\n" +
-			"Chatwright is developed spec-first with SpecScore; its own scenarios verify the " +
-			"same behavior a SpecScore acceptance criterion describes.",
+			"Chatwright is developed spec-first with SpecScore: its product and CLI behavior " +
+			"are specified as SpecScore features before they are built.",
 
 		Repository: "chatwright/cli",
 		Managers: []selfupdate.Manager{

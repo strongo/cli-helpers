@@ -6,12 +6,12 @@ func init() {
 	register(Entry{
 		ID:          "specscore",
 		Homepage:    "https://specscore.md",
-		Description: "Lint, validate, and navigate Markdown-based SpecScore specifications.",
-		Details: "specscore is the CLI for SpecScore: it lints spec trees against structural " +
+		Description: "Lint, query, and scaffold SpecScore specifications.",
+		Details: "SpecScore is the CLI for SpecScore: it lints spec trees against structural " +
 			"conventions, validates a project's features/plans/tasks, and scaffolds new spec " +
-			"artifacts. `specscore studio index` exports spec facts as recordsets for other " +
-			"tools to read.\n\n" +
-			"Several fleet CLIs are themselves developed spec-first against SpecScore, and " +
+			"artifacts. `specscore studio index` exports facts about specs, code and manifests " +
+			"as INGR recordsets for other tools to read.\n\n" +
+			"Chatwright, Synchestra and DataTug are developed spec-first with SpecScore, and " +
 			"`wb`'s CI profile runs `specscore spec lint` for every repository that has a " +
 			"spec/ tree.",
 

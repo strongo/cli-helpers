@@ -5,14 +5,14 @@ import "github.com/strongo/cli-helpers/selfupdate"
 func init() {
 	register(Entry{
 		ID:          "ovdb",
-		Homepage:    "https://github.com/openvaultdb/openvaultdb-go",
+		Homepage:    "https://openvaultdb.com",
 		Description: "The OpenVaultDB command-line interface for user-owned, portable databases with pluggable storage engines.",
-		Details: "ovdb is the canonical developer/admin CLI for OpenVaultDB: it creates, runs " +
+		Details: "`ovdb` is the canonical developer/admin CLI for OpenVaultDB: it creates, runs " +
 			"and operates instances of user-owned, portable databases backed by pluggable " +
 			"storage engines, including SQLite and inGitDB.\n\n" +
-			"inGitDB is one of ovdb's storage engines, so an inGitDB database an OpenVaultDB " +
-			"instance keeps can be validated and edited directly with `ingitdb`, and explored " +
-			"with DataTug.",
+			"inGitDB is the default engine for `ovdb init`, so a database OpenVaultDB keeps " +
+			"there can be validated and edited directly with `ingitdb`; DataTug can query a " +
+			"running `ovdb serve` instance through its `openvaultdb` catalog driver.",
 
 		Repository: "openvaultdb/ovdb",
 		Managers: []selfupdate.Manager{
