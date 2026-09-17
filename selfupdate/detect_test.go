@@ -167,6 +167,244 @@ func TestDetectSelf_SymlinkFallback(t *testing.T) {
 	}
 }
 
+// --- System package directories (REQ: system-package-dirs-are-managed) ---
+
+// withHostOS overrides goosName/getenvFunc for the duration of the test,
+// restoring both on cleanup — the same pattern replace_test.go already uses
+// for goosName alone, extended with getenvFunc so a Windows-shaped host can
+// be exercised from any real host running the test.
+func withHostOS(t *testing.T, goos string, env map[string]string) {
+	t.Helper()
+	origGoos, origGetenv := goosName, getenvFunc
+	t.Cleanup(func() { goosName, getenvFunc = origGoos, origGetenv })
+	goosName = goos
+	getenvFunc = func(k string) string { return env[k] }
+}
+
+func TestClassify_SystemPackageDir_Linux(t *testing.T) {
+	withHostOS(t, "linux", nil)
+	for _, path := range []string{
+		"/usr/bin/ingitdb", "/usr/sbin/ingitdb", "/usr/lib/ingitdb", "/usr/lib64/ingitdb",
+		"/usr/libexec/ingitdb", "/usr/share/ingitdb", "/bin/ingitdb", "/sbin/ingitdb",
+		"/lib/ingitdb", "/lib64/ingitdb", "/nix/store/abc123-ingitdb/bin/ingitdb",
+		"/run/current-system/sw/bin/ingitdb",
+	} {
+		got := Classify(path, nil)
+		if got.Method != Managed || got.Manager == nil || got.Manager.Name != systemPackageManagerName {
+			t.Errorf("Classify(%q) = %+v, want Managed/%q", path, got, systemPackageManagerName)
+		}
+		if got.Manager.CanExecuteUpgrade() {
+			t.Errorf("Classify(%q).Manager unexpectedly executes an upgrade", path)
+		}
+	}
+}
+
+func TestClassify_SystemPackageDir_Darwin(t *testing.T) {
+	withHostOS(t, "darwin", nil)
+	for _, path := range []string{
+		"/usr/bin/ingitdb", "/usr/sbin/ingitdb", "/usr/libexec/ingitdb",
+		"/bin/ingitdb", "/sbin/ingitdb", "/System/ingitdb",
+		// nix-darwin.
+		"/nix/store/abc123-ingitdb/bin/ingitdb", "/run/current-system/sw/bin/ingitdb",
+	} {
+		got := Classify(path, nil)
+		if got.Method != Managed || got.Manager == nil || got.Manager.Name != systemPackageManagerName {
+			t.Errorf("Classify(%q) = %+v, want Managed/%q", path, got, systemPackageManagerName)
+		}
+	}
+	// darwin's own list excludes /usr/local (Homebrew's own Intel prefix,
+	// already recognized through Manager.PathMarkers) and /usr/lib64 and
+	// /lib (Linux-only spellings with no macOS equivalent).
+	for _, path := range []string{"/usr/local/bin/ingitdb", "/usr/lib64/ingitdb", "/lib/ingitdb"} {
+		if got := Classify(path, nil); got.Method == Managed {
+			t.Errorf("Classify(%q) = %+v, want NOT Managed on darwin", path, got)
+		}
+	}
+}
+
+func TestClassify_SystemPackageDir_Windows(t *testing.T) {
+	withHostOS(t, "windows", map[string]string{
+		"SystemRoot":        `C:\Windows`,
+		"ProgramFiles":      `C:\Program Files`,
+		"ProgramFiles(x86)": `C:\Program Files (x86)`,
+	})
+	for _, path := range []string{
+		`C:\Windows\System32\ingitdb.exe`,
+		`C:\Program Files\ingitdb\ingitdb.exe`,
+		`C:\Program Files (x86)\ingitdb\ingitdb.exe`,
+	} {
+		got := Classify(path, nil)
+		if got.Method != Managed || got.Manager == nil || got.Manager.Name != systemPackageManagerName {
+			t.Errorf("Classify(%q) = %+v, want Managed/%q", path, got, systemPackageManagerName)
+		}
+	}
+}
+
+// Boundary cases: a sibling directory that merely starts with the same
+// characters as a system directory must never match it.
+func TestClassify_SystemPackageDir_BoundaryCases(t *testing.T) {
+	t.Run("posix: /usr/binx is not /usr/bin", func(t *testing.T) {
+		withHostOS(t, "linux", nil)
+		got := Classify("/usr/binx/ingitdb", nil)
+		if got.Method == Managed {
+			t.Errorf("Classify(/usr/binx/ingitdb) = %+v, want NOT Managed", got)
+		}
+	})
+	t.Run("posix: /usr/local/bin is explicitly manual", func(t *testing.T) {
+		withHostOS(t, "linux", nil)
+		got := Classify("/usr/local/bin/ingitdb", nil)
+		if got.Method != Manual {
+			t.Errorf("Classify(/usr/local/bin/ingitdb) = %+v, want Manual", got)
+		}
+	})
+	t.Run("posix: /opt/tool/bin is explicitly manual", func(t *testing.T) {
+		withHostOS(t, "linux", nil)
+		got := Classify("/opt/ingitdb/bin/ingitdb", nil)
+		if got.Method != Manual {
+			t.Errorf("Classify(/opt/ingitdb/bin/ingitdb) = %+v, want Manual", got)
+		}
+	})
+	t.Run("posix: $HOME/.local/bin is explicitly manual", func(t *testing.T) {
+		withHostOS(t, "linux", nil)
+		got := Classify("/home/alex/.local/bin/ingitdb", nil)
+		if got.Method != Manual {
+			t.Errorf("Classify($HOME/.local/bin/ingitdb) = %+v, want Manual", got)
+		}
+	})
+	t.Run("windows: ProgramFilesX is not Program Files", func(t *testing.T) {
+		withHostOS(t, "windows", map[string]string{"ProgramFiles": `C:\Program Files`})
+		got := Classify(`C:\ProgramFilesX\ingitdb\ingitdb.exe`, nil)
+		if got.Method == Managed {
+			t.Errorf(`Classify(C:\ProgramFilesX\...) = %+v, want NOT Managed`, got)
+		}
+	})
+	t.Run("windows: Program Files subpath does match", func(t *testing.T) {
+		withHostOS(t, "windows", map[string]string{"ProgramFiles": `C:\Program Files`})
+		got := Classify(`C:\Program Files\x\ingitdb.exe`, nil)
+		if got.Method != Managed {
+			t.Errorf(`Classify(C:\Program Files\x\...) = %+v, want Managed`, got)
+		}
+	})
+}
+
+// DetectSelf's symlink resolution feeds Classify the RESOLVED path, so a
+// shim outside a system directory that resolves into one is still caught,
+// and a path that merely looks like a system directory but resolves
+// elsewhere is correctly released from it.
+func TestDetectSelf_SymlinkIntoSystemPackageDir(t *testing.T) {
+	withHostOS(t, "linux", nil)
+	origExe, origEval := osExecutable, evalSymlinksFunc
+	t.Cleanup(func() { osExecutable, evalSymlinksFunc = origExe, origEval })
+	osExecutable = func() (string, error) { return "/usr/local/bin/ingitdb", nil } // looks manual
+	evalSymlinksFunc = func(string) (string, error) { return "/usr/bin/ingitdb", nil }
+
+	cfg := Config{}
+	got, err := cfg.DetectSelf()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Method != Managed || got.Manager == nil || got.Manager.Name != systemPackageManagerName {
+		t.Fatalf("DetectSelf via symlink into system dir = %+v, want Managed/%q", got, systemPackageManagerName)
+	}
+	if got.Path != "/usr/bin/ingitdb" {
+		t.Errorf("DetectSelf.Path = %q, want the resolved path", got.Path)
+	}
+}
+
+func TestDetectSelf_SymlinkOutOfSystemPackageDir(t *testing.T) {
+	withHostOS(t, "linux", nil)
+	origExe, origEval := osExecutable, evalSymlinksFunc
+	t.Cleanup(func() { osExecutable, evalSymlinksFunc = origExe, origEval })
+	osExecutable = func() (string, error) { return "/usr/bin/ingitdb", nil } // looks system
+	evalSymlinksFunc = func(string) (string, error) { return "/opt/ingitdb/bin/ingitdb", nil }
+
+	cfg := Config{}
+	got, err := cfg.DetectSelf()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Method != Manual {
+		t.Fatalf("DetectSelf via symlink out of system dir = %+v, want Manual (/opt is explicitly excluded)", got)
+	}
+}
+
+// A catalog manager whose own PathMarkers match still takes precedence over
+// the built-in system-directory check, even when its marker happens to fall
+// inside what would otherwise be a system directory.
+func TestClassify_CatalogManagerPrecedesSystemPackageDir(t *testing.T) {
+	withHostOS(t, "linux", nil)
+	overlapping := Manager{Name: "Custom", UpgradeCommand: "custom upgrade", PathMarkers: []string{"/usr/bin/"}}
+	got := Classify("/usr/bin/ingitdb", []Manager{overlapping})
+	if got.Method != Managed || got.Manager == nil || got.Manager.Name != "Custom" {
+		t.Errorf("Classify(/usr/bin/ingitdb) with overlapping manager = %+v, want Managed/Custom", got)
+	}
+
+	// Realistic case: Snap's own "/snap/" marker, which never overlaps a
+	// system directory, still takes priority over (in this case, does not
+	// even reach) the built-in check.
+	snap := Manager{Name: "Snap", UpgradeCommand: "snap refresh ingitdb", PathMarkers: []string{"/snap/"}}
+	got = Classify("/snap/bin/ingitdb", []Manager{snap})
+	if got.Method != Managed || got.Manager == nil || got.Manager.Name != "Snap" {
+		t.Errorf("Classify(/snap/bin/ingitdb) = %+v, want Managed/Snap", got)
+	}
+}
+
+// No managers configured at all: the built-in system-directory check still
+// applies (REQ: system-package-dirs-are-managed — "regardless of the
+// consumer's configured Managers").
+func TestClassify_SystemPackageDir_AppliesWithNoManagersConfigured(t *testing.T) {
+	withHostOS(t, "linux", nil)
+	got := Classify("/usr/bin/ingitdb", nil)
+	if got.Method != Managed || got.Manager == nil || got.Manager.Name != systemPackageManagerName {
+		t.Errorf("Classify(/usr/bin/ingitdb, nil managers) = %+v, want Managed/%q", got, systemPackageManagerName)
+	}
+}
+
+// WinGet's machine-scope markers (added specifically so this case redirects
+// to winget rather than the generic built-in system-package message) still
+// take precedence over the built-in check, even though a machine-scope
+// WinGet install genuinely sits under %ProgramFiles%, a system directory.
+func TestClassify_WinGetMachineScopePrecedesSystemPackageDir(t *testing.T) {
+	withHostOS(t, "windows", map[string]string{"ProgramFiles": `C:\Program Files`})
+	got := Classify(`C:\Program Files\WinGet\Packages\Strongo.WB_abc\wb.exe`, testManagers())
+	if got.Method != Managed || got.Manager == nil || got.Manager.Name != "WinGet" {
+		t.Errorf("Classify(machine-scope WinGet path) = %+v, want Managed/WinGet", got)
+	}
+	got = Classify(`C:\Program Files\WinGet\Links\wb.exe`, testManagers())
+	if got.Method != Managed || got.Manager == nil || got.Manager.Name != "WinGet" {
+		t.Errorf("Classify(machine-scope WinGet links path) = %+v, want Managed/WinGet", got)
+	}
+}
+
+// --- ClassifyManagers ---
+
+// ClassifyManagers matches exactly what Classify's own manager-marker loop
+// does, but never falls through to the system-directory check or the
+// Manual/Ambiguous fallback: an unmatched path is always Ambiguous here,
+// even one that Classify itself would call Manual or Managed via the
+// built-in check.
+func TestClassifyManagers(t *testing.T) {
+	got := ClassifyManagers("/opt/homebrew/Cellar/wb/0.6.0/bin/wb", testManagers())
+	if got.Method != Managed || got.Manager == nil || got.Manager.Name != "Homebrew" {
+		t.Errorf("ClassifyManagers(homebrew path) = %+v, want Managed/Homebrew", got)
+	}
+
+	// A system-package-directory path with no manager marker: Classify
+	// would call this Managed via the built-in check; ClassifyManagers
+	// never applies that check, so it is Ambiguous, not Manual or Managed.
+	got = ClassifyManagers("/usr/bin/ingitdb", nil)
+	if got.Method != Ambiguous {
+		t.Errorf("ClassifyManagers(/usr/bin/ingitdb, no managers) = %+v, want Ambiguous", got)
+	}
+
+	// A plausible manual path: ClassifyManagers still reports Ambiguous,
+	// never Manual — that fallback belongs to Classify alone.
+	got = ClassifyManagers("/usr/local/bin/wb", testManagers())
+	if got.Method != Ambiguous {
+		t.Errorf("ClassifyManagers(/usr/local/bin/wb) = %+v, want Ambiguous (never Manual)", got)
+	}
+}
+
 // InstallMethod's token spelling is part of the machine-readable contract a
 // consumer's JSON output exposes, so it is pinned here rather than left to
 // whatever %v would print.

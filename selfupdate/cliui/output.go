@@ -25,6 +25,7 @@ type checkJSON struct {
 	InstallMethod           string `json:"install_method,omitempty"`
 	Manager                 string `json:"manager,omitempty"`
 	UpgradeCommand          string `json:"upgrade_command,omitempty"`
+	UpgradeHint             string `json:"upgrade_hint,omitempty"`
 	ManagedUpdateExecutable bool   `json:"managed_update_executable,omitempty"`
 }
 
@@ -36,6 +37,7 @@ type outcomeJSON struct {
 	Action              string `json:"action"`
 	Manager             string `json:"manager,omitempty"`
 	Command             string `json:"command,omitempty"`
+	Hint                string `json:"hint,omitempty"`
 	Current             string `json:"current,omitempty"`
 	Latest              string `json:"latest,omitempty"`
 	Target              string `json:"target,omitempty"`
@@ -55,6 +57,7 @@ func WriteOutcomeJSON(out io.Writer, outcome selfupdate.Outcome) error {
 	if m := outcome.Detection.Manager; m != nil {
 		oj.Manager = m.Name
 		oj.Command = m.UpgradeCommand
+		oj.Hint = m.UpgradeHint
 	}
 	oj.Current = outcome.Result.Current
 	oj.Latest = outcome.Result.Latest
@@ -88,7 +91,7 @@ func WriteOutcome(out, errOut io.Writer, cfg selfupdate.Config, outcome selfupda
 	switch outcome.Action {
 	case selfupdate.ActionRedirected:
 		if m := outcome.Detection.Manager; m != nil {
-			fmt.Fprintf(out, "%s is managed by %s. Run: %s\n", cfg.BinaryName, m.Name, m.UpgradeCommand) //nolint:errcheck
+			writeManagedRedirect(out, cfg.BinaryName, *m)
 		}
 	case selfupdate.ActionAlreadyCurrent:
 		writeStyled(out, successStyle, fmt.Sprintf("[OK] %s is already up to date (%s).\n", cfg.BinaryName, outcome.Result.Current))
@@ -130,6 +133,21 @@ func WriteOutcome(out, errOut io.Writer, cfg selfupdate.Config, outcome selfupda
 	}
 }
 
+// writeManagedRedirect writes the "is managed by" redirect line WriteOutcome
+// prints for ActionRedirected. When m carries no UpgradeCommand (the
+// built-in system-package manager, which only knows the CLASS of tool that
+// owns the install, never a copy-pasteable command — see Manager.UpgradeHint's
+// own doc comment) it falls back to m.UpgradeHint, rendered as a natural
+// sentence rather than after a "Run: " prefix, so the reader is never shown
+// "Run: <prose>".
+func writeManagedRedirect(out io.Writer, binaryName string, m selfupdate.Manager) {
+	if m.UpgradeCommand == "" && m.UpgradeHint != "" {
+		fmt.Fprintf(out, "%s is managed by %s. Update it with %s.\n", binaryName, m.Name, m.UpgradeHint) //nolint:errcheck
+		return
+	}
+	fmt.Fprintf(out, "%s is managed by %s. Run: %s\n", binaryName, m.Name, m.UpgradeCommand) //nolint:errcheck
+}
+
 // WriteAvailabilityWarning writes an advisory managed-release lookup warning
 // once, separately from the preview and any machine-readable outcome.
 func WriteAvailabilityWarning(errOut io.Writer, outcome selfupdate.Outcome) {
@@ -149,9 +167,11 @@ func renderAvailabilityPreview(cfg selfupdate.Config, availability selfupdate.Av
 	title := cfg.BinaryName + " self-update"
 	install := "Direct"
 	command := ""
+	hint := ""
 	if m := availability.Detection.Manager; m != nil {
 		install = m.Name
 		command = m.UpgradeCommand
+		hint = m.UpgradeHint
 	}
 
 	rows := []previewRow{{label: "Current", value: availability.Result.Current}}
@@ -163,8 +183,13 @@ func renderAvailabilityPreview(cfg selfupdate.Config, availability selfupdate.Av
 		rows = append(rows, previewRow{label: "Latest", value: availability.Result.Latest, style: previewSuccess})
 	}
 	rows = append(rows, previewRow{label: "Install", value: install})
-	if command != "" {
+	switch {
+	case command != "":
 		rows = append(rows, previewRow{label: "Command", value: command})
+	case hint != "":
+		// hint is prose, never a copy-pasteable command — labeled
+		// differently from "Command" so it never reads as one.
+		rows = append(rows, previewRow{label: "Update", value: hint})
 	}
 	width := lipgloss.Width(title)
 	for _, row := range rows {
@@ -303,6 +328,7 @@ func WriteCheckJSON(out io.Writer, cfg selfupdate.Config, result selfupdate.Chec
 	if m := detection.Manager; m != nil {
 		payload.Manager = m.Name
 		payload.UpgradeCommand = m.UpgradeCommand
+		payload.UpgradeHint = m.UpgradeHint
 		payload.ManagedUpdateExecutable = m.CanExecuteUpgrade()
 	}
 	return json.NewEncoder(out).Encode(payload)
@@ -321,6 +347,11 @@ func WriteNextStep(out io.Writer, cfg selfupdate.Config, detection selfupdate.De
 		if m := detection.Manager; m != nil {
 			if m.CanExecuteUpgrade() {
 				fmt.Fprintf(out, "To upgrade through %s, run: %s\n", m.Name, commandPath) //nolint:errcheck
+				return
+			}
+			if m.UpgradeCommand == "" && m.UpgradeHint != "" {
+				fmt.Fprintf(out, "%s was installed via %s. Update it with %s.\n", //nolint:errcheck
+					cfg.BinaryName, m.Name, m.UpgradeHint)
 				return
 			}
 			fmt.Fprintf(out, "%s was installed via %s. Run the following to upgrade:\n\n    %s\n", //nolint:errcheck

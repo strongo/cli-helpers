@@ -184,7 +184,12 @@ func explainPath(cmd *cobra.Command, managers []selfupdate.Manager, path string)
 
 	switch detection.Method {
 	case selfupdate.Managed:
-		_, err := fmt.Fprintf(out, "%s: managed by %s (upgrade command: %s)\n", path, detection.Manager.Name, detection.Manager.UpgradeCommand)
+		m := detection.Manager
+		if m.UpgradeCommand == "" && m.UpgradeHint != "" {
+			_, err := fmt.Fprintf(out, "%s: managed by %s (update via %s)\n", path, m.Name, m.UpgradeHint)
+			return err
+		}
+		_, err := fmt.Fprintf(out, "%s: managed by %s (upgrade command: %s)\n", path, m.Name, m.UpgradeCommand)
 		return err
 	case selfupdate.Manual:
 		_, err := fmt.Fprintf(out, "%s: manual install (eligible for self-replace)\n", path)

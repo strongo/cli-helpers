@@ -147,6 +147,11 @@ func TestExplainPath_ClassifiesWithoutNetworkOrRealPath(t *testing.T) {
 		{"winget", `C:\Users\u\AppData\Local\Microsoft\WinGet\Links\selfupdate.exe`, "managed by WinGet"},
 		{"manual", "/usr/local/bin/selfupdate", "manual install"},
 		{"ambiguous", "/tmp/wherever/selfupdate", "ambiguous"},
+		// No configured manager matches, but the built-in system-package
+		// check does (REQ: system-package-dirs-are-managed) — it has no
+		// single UpgradeCommand, so explainPath falls back to "update via"
+		// with the hint text rather than an empty "upgrade command: ".
+		{"system package directory", "/usr/bin/selfupdate", "update via"},
 	}
 
 	for _, tt := range tests {

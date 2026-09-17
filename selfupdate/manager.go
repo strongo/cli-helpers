@@ -24,8 +24,22 @@ type Manager struct {
 	Name string
 	// UpgradeCommand is the exact command printed for the user to run,
 	// e.g. "brew upgrade --cask wb". It is display-only and is never parsed
-	// or passed to a shell.
+	// or passed to a shell. Leave it empty when there is no single
+	// copy-pasteable command — e.g. a built-in manager that only knows the
+	// CLASS of tool that owns the install, not which one — and set
+	// UpgradeHint instead; a renderer MUST NOT print an empty UpgradeCommand
+	// after a "Run:"-style prefix.
 	UpgradeCommand string
+	// UpgradeHint is a human-readable sentence fragment naming how to update
+	// this install when there is no single UpgradeCommand to print, e.g.
+	// "the package manager that installed it (e.g. apt, dnf, pacman/AUR,
+	// apk, or nix)". It is prose, never copy-pasteable argv: a renderer
+	// shows it in a natural sentence ("<binary> is managed by <name>.
+	// Update it with <hint>."), never after a "Run:" prefix the way
+	// UpgradeCommand is. At most one of UpgradeCommand and UpgradeHint is
+	// normally set; a manager with neither is redirect-only and names only
+	// itself.
+	UpgradeHint string
 	// UpgradeExecutable is the program invoked for an executable managed
 	// update. Empty keeps this manager redirect-only for backward
 	// compatibility. Configure it through WithExecutableUpgrade so its argv
@@ -164,12 +178,24 @@ func Scoop(upgradeCommand string) Manager {
 	}
 }
 
-// WinGet describes a WinGet-managed install (Windows Package Manager),
-// under the user's local Microsoft\WinGet packages or links directory.
+// WinGet describes a WinGet-managed install (Windows Package Manager), under
+// either the user's own per-user Microsoft\WinGet packages/links directory,
+// or the machine-wide install WinGet uses for `winget install --scope
+// machine` (and for some packages by default): WinGet\Packages and
+// WinGet\Links directly under %ProgramFiles% (no "Microsoft\" segment there,
+// unlike the per-user location). Without the second pair of markers, a
+// machine-scope WinGet install would fall through to this package's own
+// built-in system-package-directory check (REQ: system-package-dirs-are-
+// managed) — it genuinely does sit under %ProgramFiles% — and redirect to a
+// generic "Windows Update" message instead of `winget upgrade`, since
+// Classify has no way to know WinGet owns it without this marker.
 func WinGet(upgradeCommand string) Manager {
 	return Manager{
 		Name:           "WinGet",
 		UpgradeCommand: upgradeCommand,
-		PathMarkers:    []string{"/microsoft/winget/packages/", "/microsoft/winget/links/"},
+		PathMarkers: []string{
+			"/microsoft/winget/packages/", "/microsoft/winget/links/",
+			"/winget/packages/", "/winget/links/",
+		},
 	}
 }

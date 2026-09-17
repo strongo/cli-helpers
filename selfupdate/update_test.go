@@ -248,7 +248,10 @@ func TestUpdate_ManagedExecutable_Ahead(t *testing.T) {
 
 	run := false
 	outcome, err := h.cfg.Update(context.Background(), Options{
-		Confirm:    func(string) (bool, error) { t.Fatal("Confirm was called for an ahead-of-latest managed install"); return true, nil },
+		Confirm: func(string) (bool, error) {
+			t.Fatal("Confirm was called for an ahead-of-latest managed install")
+			return true, nil
+		},
 		RunManaged: func(context.Context, string, []string) error { run = true; return nil },
 		VerifyManaged: func(context.Context, Detection, string, []string, string) (ExecutableIdentity, error) {
 			return ExecutableIdentity{}, nil
@@ -295,6 +298,84 @@ func TestUpdate_ManagedAvailabilityLookupHasBoundedDeadline(t *testing.T) {
 	outcome, err := h.cfg.Update(context.Background(), Options{})
 	if err != nil || outcome.Action != ActionRedirected || outcome.ReleaseCheckWarning == nil {
 		t.Fatalf("Outcome/error = %+v/%v, want redirected advisory timeout", outcome, err)
+	}
+}
+
+// A resolved copy inside an OS-package-manager directory (REQ: system-
+// package-dirs-are-managed) redirects exactly like any other managed
+// install — no download, no write, no replacement — even though the
+// consumer configured no Managers at all. The target file is never even
+// created on disk: a redirect touches nothing.
+// Review round 1 item 8: the "system directory" here is a REAL, but
+// entirely synthetic, directory t.TempDir() created — never a literal
+// "/usr/bin" or any other real path on the machine running this test, not
+// even for a read. It is injected through Windows's env-derived
+// SystemPackageDirs branch (goosName="windows", getenv("SystemRoot") = the
+// harness's own target directory): the exact same boundary-aware match
+// Classify performs against a real Windows host applies identically to any
+// string getenv returns, which is what makes this a safe seam rather than
+// a special case.
+func TestUpdate_SystemPackageDirRedirectsWithNoManagersConfigured(t *testing.T) {
+	h := newUpdateHarness(t, "sysroot/wb", "old binary")
+	withHostOS(t, "windows", map[string]string{"SystemRoot": filepath.Dir(h.target)})
+
+	before, err := os.Stat(h.target)
+	if err != nil {
+		t.Fatalf("stat target before Update: %v", err)
+	}
+
+	h.setReleases(stableReleaseJSON("v1.1.0"))
+
+	outcome, err := h.cfg.Update(context.Background(), Options{
+		Confirm: func(string) (bool, error) { t.Fatal("Confirm was called for a managed install"); return true, nil },
+	})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	if outcome.Action != ActionRedirected {
+		t.Fatalf("Action = %v, want ActionRedirected", outcome.Action)
+	}
+	if outcome.Detection.Method != Managed || outcome.Detection.Manager == nil || outcome.Detection.Manager.Name != systemPackageManagerName {
+		t.Fatalf("Detection = %+v, want Managed/%q", outcome.Detection, systemPackageManagerName)
+	}
+	if outcome.Detection.Manager.CanExecuteUpgrade() {
+		t.Error("built-in system package manager unexpectedly executes an upgrade")
+	}
+	// Exactly one HTTP request — the advisory availability lookup — proves
+	// no download was ever attempted despite the redirect.
+	if atomic.LoadInt32(&h.hits) != 1 {
+		t.Errorf("HTTP requests = %d, want exactly 1 (the advisory availability lookup; no download)", h.hits)
+	}
+	if h.targetBytes() != "old binary" {
+		t.Error("target file content changed; redirect must write nothing")
+	}
+	after, err := os.Stat(h.target)
+	if err != nil {
+		t.Fatalf("stat target after Update: %v", err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Errorf("target mtime changed from %v to %v; redirect must not touch the file", before.ModTime(), after.ModTime())
+	}
+}
+
+// UpdateAt reaches the identical outcome for a copy the caller already
+// classified, without calling DetectSelf itself (REQ: update-at-classified-
+// copy applies to a system-directory copy exactly as it does to any other).
+func TestUpdateAt_SystemPackageDirRedirects(t *testing.T) {
+	h := newUpdateHarness(t, "unused/wb", "old binary")
+	h.setReleases(stableReleaseJSON("v1.1.0"))
+
+	builtin := systemPackageManagerFor("linux")
+	detection := Detection{Method: Managed, Manager: &builtin, Path: "/usr/bin/wb"}
+	outcome, err := h.cfg.UpdateAt(context.Background(), detection, Options{})
+	if err != nil {
+		t.Fatalf("UpdateAt() error = %v", err)
+	}
+	if outcome.Action != ActionRedirected || outcome.Detection.Manager == nil || outcome.Detection.Manager.Name != systemPackageManagerName {
+		t.Fatalf("Outcome = %+v, want redirected/%q", outcome, systemPackageManagerName)
+	}
+	if h.targetBytes() != "old binary" {
+		t.Error("target file was modified for a system-directory install")
 	}
 }
 
@@ -739,7 +820,10 @@ func TestUpdate_Manual_Ahead(t *testing.T) {
 
 	afterUpdateCalled := false
 	outcome, err := h.cfg.Update(context.Background(), Options{
-		Confirm:     func(string) (bool, error) { t.Fatal("Confirm was called for an ahead-of-latest build"); return true, nil },
+		Confirm: func(string) (bool, error) {
+			t.Fatal("Confirm was called for an ahead-of-latest build")
+			return true, nil
+		},
 		AfterUpdate: func(context.Context, AfterUpdate) error { afterUpdateCalled = true; return nil },
 	})
 	if err != nil {

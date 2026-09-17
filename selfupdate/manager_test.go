@@ -137,7 +137,10 @@ func TestWinGet(t *testing.T) {
 	if m.Name != "WinGet" {
 		t.Errorf("Name = %q, want WinGet", m.Name)
 	}
-	want := []string{"/microsoft/winget/packages/", "/microsoft/winget/links/"}
+	want := []string{
+		"/microsoft/winget/packages/", "/microsoft/winget/links/",
+		"/winget/packages/", "/winget/links/",
+	}
 	if !reflect.DeepEqual(m.PathMarkers, want) {
 		t.Errorf("PathMarkers = %v, want %v", m.PathMarkers, want)
 	}

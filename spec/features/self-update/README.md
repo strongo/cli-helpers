@@ -60,6 +60,90 @@ lies inside a configured manager's layout, following symlinks first so a
 symlinked shim resolves to its real location. A managed classification MUST
 route to that manager's configured policy and MUST NOT self-replace.
 
+#### REQ: system-package-dirs-are-managed
+
+The package MUST classify a resolved executable path as package-managed, using a
+built-in redirect-only "system package manager", when it lies inside the host
+OS's own package-manager directories — `/usr/bin`, `/usr/sbin`, `/usr/lib`,
+`/usr/lib64`, `/usr/libexec`, `/usr/share`, `/bin`, `/sbin`, `/lib`, `/lib64`,
+`/nix/store`, `/run/current-system` on Linux and other Unix; `/usr/bin`,
+`/usr/sbin`, `/usr/libexec`, `/bin`, `/sbin`, `/System`, `/nix/store` (nix-darwin),
+`/run/current-system` (nix-darwin) on macOS, which has no bare `/lib` the way
+Linux does — its C libraries live under `/usr/lib` and `/System` instead, so
+there is no separate `/lib` entry to list for it; and the environment-derived
+`%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` on Windows — regardless
+of the consumer's configured `Managers`, and boundary-aware so a sibling
+directory whose name merely starts with the same characters (for example
+`/usr/binx`) never matches. Each Windows value MUST be normalized before it
+anchors that boundary match: a trailing separator MUST be stripped, and a
+value that is nothing but a bare drive root (`C:` or `C:\`, once trimmed) MUST
+be skipped entirely — an unstripped trailing separator would silently break
+the match, and treating a whole drive as a system directory would be a
+catastrophic false positive from a misconfigured or unusual environment.
+
+`/usr/local/**` and any path under the user's home directory (including
+`~/go/bin`) are explicitly excluded: both are the conventional locations for
+software placed by hand, not package-manager-owned ones, and a Homebrew
+Intel-Mac prefix under `/usr/local` is already recognized through
+`Manager.PathMarkers`. `/opt/**` is excluded too, but as a deliberate
+trade-off rather than a certainty: the Filesystem Hierarchy Standard defines
+`/opt` for add-on application software, so a vendor's own `.deb`/`.rpm` MAY
+legitimately install there and a path under it is not reliably a hand-placed
+manual install the way one under `/usr/local` or `$HOME` is. It is excluded
+anyway because manual/tarball installs commonly live under `/opt` too, and
+there is no way to tell the two apart from the path alone; a consumer whose
+catalog target really is `/opt`-installed by a package manager should declare
+that manager's own `Manager.PathMarkers` instead of relying on this built-in,
+path-only check.
+
+Files under these directories are tracked by the OS package manager's own
+database (dpkg/apt, rpm/dnf, pacman including the AUR, apk, or the Nix store).
+Overwriting one does not typically make the manager refuse anything: the next
+ordinary upgrade of that package (`apt upgrade`, `dnf upgrade`, `pacman -Syu`)
+silently overwrites it again with the package's own bytes — undoing the
+self-update without any error — while `dpkg --verify`, `rpm -V`, and
+`pacman -Qkk` report the file as modified against what the manager's database
+recorded in the meantime. The Nix store (`/nix/store`) is the same rule under
+a different mechanism: it is content-addressed and nothing but Nix is meant to
+write into it. Only NixOS mounts it read-only; elsewhere root (or the owning
+user of a single-user install) can overwrite a file, which breaks the store
+path's content hash and makes `nix-store --verify --check-contents` report it
+as corrupted. This is the same principle the package
+already applies to Homebrew, Scoop, WinGet, and Snap: never overwrite a
+manager-owned install in place, redirect to that manager's own upgrade command
+instead. On a typical multi-user install these directories are writable only
+by root (Administrator/TrustedInstaller on Windows), so a process able to
+replace a file there is normally running elevated, and doing so means
+replacing a file from the distribution's signed package channel with one
+downloaded outside it, as the machine's most privileged user — except a
+single-user Nix install, where the store belongs to the user and the reason to
+refuse is the store's content-addressing, not file ownership. This
+package's own installers never write into these directories in the first
+place, so any copy found inside one was placed by something else — almost
+always the OS's own package manager.
+
+The package's list of these directories, `SystemPackageDirs(goos, getenv)`, MUST
+be the single exported source of truth a consumer's own install/destination
+denylist reuses rather than duplicates.
+
+Because the built-in manager cannot know WHICH package manager actually owns a
+given file, it MUST carry no single `UpgradeCommand`; the redirect prose MUST
+instead be carried in a separate `Manager.UpgradeHint` field, naming the host
+OS's own real tooling family (POSIX package managers on Linux/other Unix,
+`macOS`/System Integrity Protection on macOS, Windows Update/the original
+installer on Windows) rather than one fixed string for every OS. A renderer
+MUST NOT print an empty `UpgradeCommand` after a "Run:"-style prefix; when
+`UpgradeCommand` is empty and `UpgradeHint` is set, it MUST render the hint as
+a natural sentence instead (`"<binary> is managed by <name>. Update it with
+<hint>."`), never as `"Run: <hint>"`. This applies to every manager, not only
+the built-in one: a WinGet machine-scope install (`%ProgramFiles%\WinGet\...`,
+which a machine-scope `winget install --scope machine` produces) would
+otherwise fall through to this built-in check and its generic Windows Update
+hint — `WinGet`'s own `PathMarkers` MUST also match that machine-scope layout
+(directly under `%ProgramFiles%`, without the per-user location's
+`Microsoft\` segment) so it is instead recognized as WinGet-managed and
+redirects to `winget upgrade`.
+
 #### REQ: detect-manual
 
 The package MUST classify the running binary as manual when it is not recognized
@@ -337,9 +421,10 @@ that one exists: the self-update command for an executable managed install, the
 manager's upgrade command for a redirect-only managed install, the self-update
 command itself for a manual one, and the manual-update guidance for an ambiguous
 one. Machine-readable check output MUST carry the same facts — the install
-method, the manager and its upgrade command when there is one, and whether that
-manager is executable through self-update — so a caller need not parse prose to
-reach the same conclusion. Classifying the
+method, the manager and its upgrade command or upgrade hint (whichever is set
+— see self-update#req:system-package-dirs-are-managed) when there is one, and
+whether that manager is executable through self-update — so a caller need not
+parse prose to reach the same conclusion. Classifying the
 install reads no network and writes nothing, so this costs the read-only
 guarantee nothing; a classification failure MUST NOT fail the check, which
 still reports the version comparison. An up-to-date result MUST NOT print a
@@ -459,6 +544,22 @@ behavior above is inherited, not restated.
 **Given** a binary whose resolved path lies inside a configured manager's layout, reached through a symlink
 **When** an update is requested first with a redirect-only manager, then with executable argv, then as a dry run and with a version pin
 **Then** redirect-only reports the manager command without executing it; executable mode confirms and invokes every configured program and argv in order without a shell, stops on the first failure, streams its output, and proves the installed CLI reports the exact known target version; dry-run reports but does not execute; the pin is refused; and no branch downloads, writes, or directly replaces the manager-owned executable.
+
+### AC: system-directories-redirect-without-a-configured-manager
+
+**Requirements:** self-update#req:system-package-dirs-are-managed, self-update#req:managed-no-overwrite, self-update#req:managed-redirect-command
+
+**Given** a binary resolved inside an OS package-manager directory such as `/usr/bin`, with no `Managers` configured, and sibling paths that merely resemble one, such as `/usr/binx`, `/usr/local/bin`, or `/opt/tool/bin`
+**When** an update is requested
+**Then** the system-directory copy is classified managed by the built-in system package manager and redirected — its `UpgradeCommand` empty and `UpgradeHint` naming that OS's own real tooling, never a wrong-OS example, rendered as a natural sentence and never as `"Run: "` followed by prose — with no download, write, or replacement, while the sibling paths remain classified manual or ambiguous exactly as they were before this check existed, and a WinGet machine-scope install under `%ProgramFiles%` is recognized as WinGet-managed rather than falling through to this built-in check.
+
+### AC: upgrade-classifies-a-symlink-identically-to-self-update
+
+**Requirements:** self-update#req:system-package-dirs-are-managed, cli-install#req:self-update-equals-upgrade-self
+
+**Given** a symlink whose unresolved PATH entry sits in a system directory but whose real file resolves to a manual `/opt` install, and the mirror case (a manual-looking unresolved entry resolving into a system directory)
+**When** `self-update` (via `DetectSelf`, which classifies only the resolved path) and `upgrade <self>`/a non-host target's classification (which checks the unresolved PATH entry against manager markers only, then classifies the resolved path in full) both run
+**Then** both reach the identical install-method verdict for the identical binary in either direction — the file's actual resolved location decides, never which symlink happened to point at it.
 
 ### AC: ambiguity-never-becomes-manual
 

@@ -176,8 +176,18 @@ type UpgradeResult struct {
 	Verdict selfupdate.Verdict
 
 	// Command is the manager's display upgrade command, set whenever
-	// Manager is non-nil, regardless of Outcome.
+	// Manager is non-nil, regardless of Outcome. Empty for a manager that
+	// carries only Hint instead — e.g. the built-in system-package manager,
+	// which has no single copy-pasteable command (see selfupdate.Manager.
+	// UpgradeHint). A renderer MUST NOT print an empty Command after a
+	// "Run:"-style prefix.
 	Command string
+	// Hint is the manager's UpgradeHint — human-readable prose naming how
+	// to update when there is no single Command to print — set whenever
+	// Manager is non-nil, regardless of Outcome. At most one of Command and
+	// Hint is normally non-empty; a renderer shows Hint in a natural
+	// sentence, never after a "Run:" prefix the way Command is.
+	Hint string
 	// AssetURL is the exact release-asset URL a pending manual upgrade
 	// would fetch, taken from selfupdate.Outcome.PlannedURL
 	// (cli-install#req:upgrade-batch-semantics: "version transition, asset
@@ -514,12 +524,30 @@ func namedUpgradeCandidates(ctx context.Context, names []string, opts UpgradeOpt
 // collapse to whichever one allCatalogManagers happened to keep; reusing
 // that value here would pick a foreign target's upgrade command by
 // accident, so this recomputes classification from scratch using only
-// managers, the target's own list. This function reuses selfupdate's own
-// exported Classify — the SAME classifier DetectSelf itself calls — twice
-// (raw path, then resolved path); it never re-derives Managed/Manual/
-// Ambiguous decision logic of its own.
+// managers, the target's own list.
+//
+// The UNRESOLVED, PATH-found status.Path is checked ONLY against manager
+// markers, via selfupdate.ClassifyManagers rather than the full
+// selfupdate.Classify — this is deliberately narrower than the resolved-
+// path check below. It exists for a Snap-dispatched binary
+// (`/snap/bin/ingitdb`, itself a symlink to `/usr/bin/snap`), which must be
+// recognized as Snap-managed from its unresolved PATH entry before symlink
+// resolution obscures it. Running the FULL Classify (which also applies the
+// built-in system-package-directory check, self-update#req:system-package-
+// dirs-are-managed) against that same unresolved path would diverge from
+// DetectSelf, which only ever classifies the RESOLVED path: a shim at
+// `/usr/bin/foo` symlinked out to a manual `/opt/foo/bin/foo` would then
+// classify Managed here but Manual via self-update for the identical
+// binary, breaking cli-install#req:self-update-equals-upgrade-self. The
+// trade-off this accepts is the mirror image of that gap: a target whose
+// UNRESOLVED PATH entry sits in a system directory but whose REAL file
+// lives elsewhere (an `/opt` install, say) is classified by where the file
+// actually is, not by the symlink someone happens to have pointed at it —
+// exactly what DetectSelf itself would do. The resolved-path check below
+// uses the full selfupdate.Classify — including the system-directory check
+// — because that IS the resolved path DetectSelf itself classifies.
 func classifyForUpgrade(status Status, managers []selfupdate.Manager) selfupdate.Detection {
-	if det := selfupdate.Classify(status.Path, managers); det.Method == selfupdate.Managed {
+	if det := selfupdate.ClassifyManagers(status.Path, managers); det.Method == selfupdate.Managed {
 		return det
 	}
 	resolved := status.ResolvedPath
@@ -814,6 +842,7 @@ func resolveCheckRow(ctx context.Context, row *checkRow, timeout time.Duration) 
 	row.result.ResolvedPath = det.Path
 	if det.Manager != nil {
 		row.result.Command = det.Manager.UpgradeCommand
+		row.result.Hint = det.Manager.UpgradeHint
 	}
 	if row.isHost && row.hostStatus.Path != "" && !samePath(row.hostStatus.Path, det.Path, goosName) {
 		row.result.Warnings = append(row.result.Warnings, fmt.Sprintf("another copy of %s is on PATH at %s; it was left untouched", row.hostID, row.hostStatus.Path))
@@ -937,6 +966,7 @@ func buildPlanTargetRow(c upgradeCandidate, target Entry, status Status, opts Up
 	r.ResolvedPath = det.Path
 	if det.Manager != nil {
 		r.Command = det.Manager.UpgradeCommand
+		r.Hint = det.Manager.UpgradeHint
 	}
 	r.Current = status.Version
 
@@ -978,6 +1008,7 @@ func buildPlanHostRow(c upgradeCandidate, hostStatus Status, opts UpgradeOptions
 	r.ResolvedPath = det.Path
 	if det.Manager != nil {
 		r.Command = det.Manager.UpgradeCommand
+		r.Hint = det.Manager.UpgradeHint
 	}
 	if hostStatus.Path != "" && !samePath(hostStatus.Path, det.Path, goosName) {
 		r.Warnings = append(r.Warnings, fmt.Sprintf("another copy of %s is on PATH at %s; it was left untouched", c.id, hostStatus.Path))

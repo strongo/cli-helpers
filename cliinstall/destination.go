@@ -183,17 +183,44 @@ func normalizeSlashes(s string) string {
 // on any host and deterministic in tests; an unset Windows env var is
 // simply skipped rather than guessed at, since a real Windows process
 // always has it set.
+//
+// The OS-package-manager directories (%SystemRoot%/%ProgramFiles%/
+// %ProgramFiles(x86)% on Windows; /usr/bin, /bin, /lib, ... on POSIX) come
+// from selfupdate.SystemPackageDirs(goos, getenv) — the single source of
+// truth self-update#req:system-package-dirs-are-managed defines them in —
+// rather than being re-listed here. This library's own denylist stays
+// broader than that shared list on both platforms, and deliberately so:
+//
+//   - POSIX: plain "/usr" and "/nix" are refused here even though
+//     SystemPackageDirs only lists their subdirectories (e.g. "/usr/bin",
+//     "/nix/store"), and that difference is intentional, not an oversight.
+//     Installing INTO "/usr/local" is refused here (it falls under the
+//     broader "/usr" root) because this library never writes system-wide —
+//     there is no legitimate destination for a fresh install under "/usr"
+//     at all. But SystemPackageDirs excludes "/usr/local" on purpose (see
+//     its own doc comment): an EXISTING manual copy already sitting in
+//     "/usr/local/bin" is not package-manager-owned and remains eligible
+//     for self-update. The two lists answer different questions — "where
+//     may I create a new file" versus "is this existing file owned by a
+//     package manager" — and only happen to overlap under plain "/usr".
+//     "/opt/homebrew", "/home/linuxbrew/.linuxbrew", and "/snap" are
+//     catalog-manager territory (Homebrew, Snap) that SystemPackageDirs
+//     has no reason to know about; they stay as this library's own extra
+//     roots.
+//   - Windows: "%ProgramData%" is refused here as a general do-not-write
+//     convention for this library's own installs, even though it is not an
+//     OS-package-manager-owned directory SystemPackageDirs would protect
+//     from self-update.
 func deniedRoots(goos string, getenv func(string) string) []string {
 	var roots []string
 	if goos == "windows" {
-		for _, name := range []string{"ProgramData", "ProgramFiles", "ProgramFiles(x86)", "SystemRoot"} {
-			if v := getenv(name); v != "" {
-				roots = append(roots, v)
-			}
+		if v := getenv("ProgramData"); v != "" {
+			roots = append(roots, v)
 		}
+		roots = append(roots, selfupdate.SystemPackageDirs(goos, getenv)...)
 	} else {
-		roots = append(roots, "/usr", "/bin", "/sbin", "/lib",
-			"/opt/homebrew", "/home/linuxbrew/.linuxbrew", "/snap", "/nix")
+		roots = append(roots, selfupdate.SystemPackageDirs(goos, getenv)...)
+		roots = append(roots, "/usr", "/opt/homebrew", "/home/linuxbrew/.linuxbrew", "/snap", "/nix")
 	}
 	// $GOROOT is usually unset for an installed toolchain (the toolchain
 	// itself knows its own root without it) — falling back to

@@ -35,6 +35,24 @@ func TestWriteOutcome_ManagedRedirect(t *testing.T) {
 	}
 }
 
+// A manager with no UpgradeCommand (the built-in system-package manager)
+// renders its UpgradeHint as a natural sentence — never "Run: " followed by
+// prose, and the hint text still reaches the reader.
+func TestWriteOutcome_ManagedRedirectWithHintFallsBackFromEmptyCommand(t *testing.T) {
+	mgr := selfupdate.Manager{Name: "the system package manager", UpgradeHint: "apt, dnf, or pacman"}
+	var out bytes.Buffer
+	WriteOutcome(&out, &bytes.Buffer{}, testConfig(), selfupdate.Outcome{
+		Action:    selfupdate.ActionRedirected,
+		Detection: selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr},
+	})
+	if strings.Contains(out.String(), "Run:") {
+		t.Errorf("stdout %q must not say \"Run:\" for prose, not a command", out.String())
+	}
+	if !strings.Contains(out.String(), "the system package manager") || !strings.Contains(out.String(), "Update it with apt, dnf, or pacman.") {
+		t.Errorf("stdout %q does not render the hint as a natural sentence", out.String())
+	}
+}
+
 func TestWriteAvailabilityPreview_PlainAsciiContainsManagedVersionsAndCommand(t *testing.T) {
 	mgr := selfupdate.Homebrew("brew upgrade --cask tool")
 	availability := selfupdate.Availability{
@@ -54,6 +72,27 @@ func TestWriteAvailabilityPreview_PlainAsciiContainsManagedVersionsAndCommand(t 
 	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
 		if len(line) > 80 {
 			t.Errorf("preview line width = %d, want <= 80: %q", len(line), line)
+		}
+	}
+}
+
+// A manager with only an UpgradeHint (no UpgradeCommand) gets an "Update"
+// preview row carrying the hint's prose, never a "Command" row — that label
+// is reserved for an actual copy-pasteable command.
+func TestWriteAvailabilityPreview_HintWithoutCommandUsesUpdateRow(t *testing.T) {
+	mgr := selfupdate.Manager{Name: "the system package manager", UpgradeHint: "apt, dnf, or pacman"}
+	availability := selfupdate.Availability{
+		Result:    selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0"},
+		Detection: selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr},
+	}
+	var out bytes.Buffer
+	WriteAvailabilityPreview(&out, testConfig(), availability)
+	if strings.Contains(out.String(), "Command") {
+		t.Errorf("preview %q must not label prose as Command", out.String())
+	}
+	for _, want := range []string{"Update", "apt, dnf, or pacman"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("preview %q missing %q", out.String(), want)
 		}
 	}
 }
@@ -517,6 +556,26 @@ func TestWriteCheckJSON_ExecutableManagerIsMachineReadable(t *testing.T) {
 	}
 }
 
+func TestWriteCheckJSON_CarriesUpgradeHint(t *testing.T) {
+	mgr := selfupdate.Manager{Name: "the system package manager", UpgradeHint: "apt, dnf, or pacman"}
+	var out bytes.Buffer
+	if err := WriteCheckJSON(&out, testConfig(),
+		selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0", Verdict: selfupdate.UpdateAvailable},
+		selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("check JSON does not parse: %v\n%s", err, out.String())
+	}
+	if got["upgrade_hint"] != "apt, dnf, or pacman" {
+		t.Errorf("check JSON[upgrade_hint] = %v, want %q\n%s", got["upgrade_hint"], "apt, dnf, or pacman", out.String())
+	}
+	if _, ok := got["upgrade_command"]; ok {
+		t.Errorf("check JSON unexpectedly contains upgrade_command with none set:\n%s", out.String())
+	}
+}
+
 func TestWriteCheckJSON_WriteError(t *testing.T) {
 	err := WriteCheckJSON(errWriter{err: errors.New("write fail")}, testConfig(),
 		selfupdate.CheckResult{Verdict: selfupdate.UpToDate}, selfupdate.Detection{})
@@ -548,6 +607,14 @@ func TestWriteNextStep_PerInstallMethod(t *testing.T) {
 			want: []string{"through Homebrew", "tool self-update"},
 		},
 		{
+			name: "redirect-only manager with only a hint renders a natural sentence, never Run:",
+			detection: func() selfupdate.Detection {
+				hintOnly := selfupdate.Manager{Name: "the system package manager", UpgradeHint: "apt, dnf, or pacman"}
+				return selfupdate.Detection{Method: selfupdate.Managed, Manager: &hintOnly}
+			}(),
+			want: []string{"the system package manager", "Update it with apt, dnf, or pacman."},
+		},
+		{
 			name:      "manual names this very command",
 			detection: selfupdate.Detection{Method: selfupdate.Manual},
 			want:      []string{"To upgrade, run: tool self-update"},
@@ -573,6 +640,18 @@ func TestWriteNextStep_PerInstallMethod(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// WriteNextStep's redirect-only branch must not print "Run:" (or the
+// multi-line "Run the following to upgrade:" form) when there is no
+// UpgradeCommand — only the natural-sentence hint form.
+func TestWriteNextStep_RedirectOnlyHintNeverSaysRun(t *testing.T) {
+	hintOnly := selfupdate.Manager{Name: "the system package manager", UpgradeHint: "apt, dnf, or pacman"}
+	var out bytes.Buffer
+	WriteNextStep(&out, testConfig(), selfupdate.Detection{Method: selfupdate.Managed, Manager: &hintOnly}, "tool self-update")
+	if strings.Contains(out.String(), "Run") {
+		t.Errorf("next-step output %q must not say \"Run\" for prose, not a command", out.String())
 	}
 }
 
