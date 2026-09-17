@@ -5,3 +5,6 @@ project:
     host: github.com
     org: strongo
     repo: cli-helpers
+
+# Plans live in this repository (same-repository Plan storage).
+plans_repo: strongo/cli-helpers
