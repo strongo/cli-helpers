@@ -16,10 +16,14 @@
 // changes its GoReleaser archive or checksum naming must first update its
 // catalog entry here.
 //
-// # What this package does not do
+// # Built on the catalog
 //
-// cliinstall carries data and validates it against recorded snapshots
-// (see the gen subpackage and TestCatalog*); it does not locate installed
-// binaries, plan a destination, or install anything. Those are later
-// pieces of the cli-install Feature, built on top of this catalog.
+// cliinstall carries the catalog's data and validates it against recorded
+// snapshots (see the gen subpackage and TestCatalog*), locates and probes
+// installed copies ([Probe]), plans a destination and install method
+// ([Install]'s own planning, unexported), and performs a direct or
+// Homebrew install. It has no command framework or terminal dependency
+// (cli-install#req:core-framework-neutral); the optional text/JSON writers
+// and Cobra adapter are a later piece of the cli-install Feature, built on
+// top of this package.
 package cliinstall

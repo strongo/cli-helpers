@@ -1,0 +1,515 @@
+package cliinstall
+
+import (
+	"errors"
+	"path/filepath"
+	"testing"
+
+	"github.com/strongo/cli-helpers/selfupdate"
+)
+
+// --- isAbsPath / joinPath / installFilePath -----------------------------
+
+func TestIsAbsPath(t *testing.T) {
+	cases := []struct {
+		goos string
+		path string
+		want bool
+	}{
+		{"linux", "/usr/bin", true},
+		{"linux", "usr/bin", false},
+		{"linux", "", false},
+		{"darwin", "/opt/homebrew/bin", true},
+		{"windows", `C:\Users\alex`, true},
+		{"windows", "C:/Users/alex", true},
+		{"windows", `\\server\share`, true},
+		{"windows", "//server/share", true},
+		{"windows", `Users\alex`, false},
+		{"windows", "C", false},
+	}
+	for _, c := range cases {
+		if got := isAbsPath(c.goos, c.path); got != c.want {
+			t.Errorf("isAbsPath(%q, %q) = %v, want %v", c.goos, c.path, got, c.want)
+		}
+	}
+}
+
+func TestJoinPath(t *testing.T) {
+	if got := joinPath("linux", "/home/alex", ".local", "bin"); got != "/home/alex/.local/bin" {
+		t.Errorf("joinPath posix = %q", got)
+	}
+	if got := joinPath("windows", `C:\Users\alex\AppData\Local\`, "Programs", "strongo", "bin"); got != `C:\Users\alex\AppData\Local\Programs\strongo\bin` {
+		t.Errorf("joinPath windows = %q", got)
+	}
+	if got := joinPath("linux", "/a/", "", "/b/"); got != "/a/b" {
+		t.Errorf("joinPath drops empty parts and duplicate separators = %q", got)
+	}
+}
+
+func TestInstallFilePath(t *testing.T) {
+	if got := installFilePath("linux", "/home/alex/.local/bin", "ovdb"); got != "/home/alex/.local/bin/ovdb" {
+		t.Errorf("installFilePath posix = %q", got)
+	}
+	if got := installFilePath("windows", `C:\bin`, "ovdb"); got != `C:\bin\ovdb.exe` {
+		t.Errorf("installFilePath windows = %q", got)
+	}
+}
+
+// --- resolveDir -----------------------------------------------------------
+
+func TestResolveDir_AbsoluteSymlinkResolved(t *testing.T) {
+	got := resolveDir("/opt/homebrew/bin", "linux", func(p string) (string, error) {
+		if p == "/opt/homebrew/bin" {
+			return "/opt/homebrew/Cellar/actual", nil
+		}
+		return p, nil
+	})
+	if got != "/opt/homebrew/Cellar/actual" {
+		t.Errorf("resolveDir = %q", got)
+	}
+}
+
+func TestResolveDir_NilEvalSymlinksReturnsAbsolute(t *testing.T) {
+	if got := resolveDir("/some/dir", "linux", nil); got != "/some/dir" {
+		t.Errorf("resolveDir = %q", got)
+	}
+}
+
+func TestResolveDir_EvalSymlinksErrorFallsBackToUnresolved(t *testing.T) {
+	got := resolveDir("/some/dir", "linux", func(string) (string, error) {
+		return "", errors.New("boom")
+	})
+	if got != "/some/dir" {
+		t.Errorf("resolveDir = %q, want fallback to unresolved absolute path", got)
+	}
+}
+
+func TestResolveDir_RelativeJoinsWorkingDirectory(t *testing.T) {
+	tmp := t.TempDir()
+	t.Chdir(tmp)
+	got := resolveDir("sub/dir", "linux", nil)
+	want := filepath.Join(tmp, "sub", "dir")
+	if got != want {
+		t.Errorf("resolveDir = %q, want %q", got, want)
+	}
+}
+
+func TestResolveDir_RelativeGetwdFailureLeavesPathAsGiven(t *testing.T) {
+	orig := getwdFunc
+	t.Cleanup(func() { getwdFunc = orig })
+	getwdFunc = func() (string, error) { return "", errors.New("no cwd") }
+
+	got := resolveDir("sub/dir", "linux", nil)
+	if got != "sub/dir" {
+		t.Errorf("resolveDir = %q, want unchanged relative path when getwd fails", got)
+	}
+}
+
+func TestResolveDir_WindowsAbsoluteNeverCallsGetwd(t *testing.T) {
+	orig := getwdFunc
+	t.Cleanup(func() { getwdFunc = orig })
+	getwdFunc = func() (string, error) { t.Fatal("getwd should not be called for an absolute path"); return "", nil }
+
+	got := resolveDir(`C:\Program Files\Foo`, "windows", nil)
+	if got != `C:\Program Files\Foo` {
+		t.Errorf("resolveDir = %q", got)
+	}
+}
+
+// --- normalizeSlashes -----------------------------------------------------
+
+func TestNormalizeSlashes(t *testing.T) {
+	if got := normalizeSlashes(`C:\Program Files\Foo`); got != "c:/program files/foo" {
+		t.Errorf("normalizeSlashes = %q", got)
+	}
+}
+
+// --- deniedRoots / destinationDenylistFailure ------------------------------
+
+func TestDeniedRoots_Posix(t *testing.T) {
+	getenv := func(k string) string {
+		if k == "GOROOT" {
+			return "/usr/local/go"
+		}
+		return ""
+	}
+	got := deniedRoots("linux", getenv)
+	wantContains := []string{"/usr", "/bin", "/sbin", "/lib", "/opt/homebrew", "/home/linuxbrew/.linuxbrew", "/snap", "/nix", "/usr/local/go"}
+	for _, w := range wantContains {
+		found := false
+		for _, g := range got {
+			if g == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("deniedRoots(linux) = %v, missing %q", got, w)
+		}
+	}
+}
+
+func TestDeniedRoots_PosixNoGoroot(t *testing.T) {
+	got := deniedRoots("linux", func(string) string { return "" })
+	for _, g := range got {
+		if g == "" {
+			t.Errorf("deniedRoots must not include an empty GOROOT: %v", got)
+		}
+	}
+}
+
+func TestDeniedRoots_WindowsOnlySetVars(t *testing.T) {
+	getenv := func(k string) string {
+		switch k {
+		case "ProgramData":
+			return `C:\ProgramData`
+		case "SystemRoot":
+			return `C:\Windows`
+		default:
+			return ""
+		}
+	}
+	got := deniedRoots("windows", getenv)
+	want := []string{`C:\ProgramData`, `C:\Windows`}
+	if len(got) != len(want) {
+		t.Fatalf("deniedRoots(windows) = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("deniedRoots(windows)[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestDestinationDenylistFailure_ExactRoot(t *testing.T) {
+	f := destinationDenylistFailure("/usr", "linux", func(string) string { return "" })
+	if f == nil || f.Kind != selfupdate.KindNoInstallDir {
+		t.Fatalf("destinationDenylistFailure(/usr) = %v, want KindNoInstallDir", f)
+	}
+}
+
+func TestDestinationDenylistFailure_Subdirectory(t *testing.T) {
+	f := destinationDenylistFailure("/usr/local/bin", "linux", func(string) string { return "" })
+	if f == nil || f.Kind != selfupdate.KindNoInstallDir {
+		t.Fatalf("destinationDenylistFailure(/usr/local/bin) = %v, want KindNoInstallDir", f)
+	}
+}
+
+func TestDestinationDenylistFailure_ManagerMarker(t *testing.T) {
+	// /snap is also a static root, so use a manager-only marker: Scoop's
+	// "/scoop/apps/" is declared by ingitdb's catalog entry and by nothing
+	// in the static root list.
+	f := destinationDenylistFailure(`C:\Users\alex\scoop\apps\ingitdb\current`, "windows", func(k string) string {
+		return "" // no Windows static roots configured, isolating the manager-marker branch
+	})
+	if f == nil || f.Kind != selfupdate.KindNoInstallDir {
+		t.Fatalf("destinationDenylistFailure(scoop path) = %v, want KindNoInstallDir", f)
+	}
+}
+
+func TestDestinationDenylistFailure_Allowed(t *testing.T) {
+	f := destinationDenylistFailure("/home/alex/.local/bin", "linux", func(string) string { return "" })
+	if f != nil {
+		t.Errorf("destinationDenylistFailure(allowed dir) = %v, want nil", f)
+	}
+}
+
+// --- perUserBinDir ----------------------------------------------------------
+
+func TestPerUserBinDir_Posix(t *testing.T) {
+	got, err := perUserBinDir("linux", func() (string, error) { return "/home/alex", nil }, func(string) string { return "" })
+	if err != nil {
+		t.Fatalf("perUserBinDir error = %v", err)
+	}
+	if got != "/home/alex/.local/bin" {
+		t.Errorf("perUserBinDir = %q", got)
+	}
+}
+
+func TestPerUserBinDir_PosixHomeError(t *testing.T) {
+	_, err := perUserBinDir("linux", func() (string, error) { return "", errors.New("no home") }, func(string) string { return "" })
+	if err == nil {
+		t.Fatal("perUserBinDir error = nil, want an error when UserHomeDir fails")
+	}
+}
+
+func TestPerUserBinDir_Windows(t *testing.T) {
+	got, err := perUserBinDir("windows", nil, func(k string) string {
+		if k == "LOCALAPPDATA" {
+			return `C:\Users\alex\AppData\Local`
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("perUserBinDir error = %v", err)
+	}
+	if want := `C:\Users\alex\AppData\Local\Programs\strongo\bin`; got != want {
+		t.Errorf("perUserBinDir = %q, want %q", got, want)
+	}
+}
+
+func TestPerUserBinDir_WindowsLocalAppDataUnset(t *testing.T) {
+	_, err := perUserBinDir("windows", nil, func(string) string { return "" })
+	if err == nil {
+		t.Fatal("perUserBinDir error = nil, want an error when %LOCALAPPDATA% is unset")
+	}
+}
+
+// --- cleanForCompare / dirOnPath -------------------------------------------
+
+func TestCleanForCompare(t *testing.T) {
+	if got := cleanForCompare("/home/alex/.local/bin/", "linux"); got != "/home/alex/.local/bin" {
+		t.Errorf("cleanForCompare posix = %q", got)
+	}
+	if got := cleanForCompare(`C:/Users/Alex/AppData/Local/Programs/strongo/bin`, "windows"); got != `c:\users\alex\appdata\local\programs\strongo\bin` {
+		t.Errorf("cleanForCompare windows = %q", got)
+	}
+}
+
+func TestDirOnPath(t *testing.T) {
+	dirs := []string{"/usr/bin", "/home/alex/.local/bin/"}
+	if !dirOnPath(dirs, "/home/alex/.local/bin", "linux") {
+		t.Error("dirOnPath = false, want true")
+	}
+	if dirOnPath(dirs, "/nowhere", "linux") {
+		t.Error("dirOnPath = true, want false")
+	}
+}
+
+func TestDirOnPath_WindowsCaseInsensitive(t *testing.T) {
+	dirs := []string{`c:\users\alex\appdata\local\programs\strongo\bin`}
+	if !dirOnPath(dirs, `C:\Users\Alex\AppData\Local\Programs\strongo\bin`, "windows") {
+		t.Error("dirOnPath = false, want case-insensitive match on windows")
+	}
+}
+
+// --- caskSupportsOS ---------------------------------------------------------
+
+func TestCaskSupportsOS(t *testing.T) {
+	e := Entry{CaskOS: []string{"darwin", "linux"}}
+	if !caskSupportsOS(e, "darwin") {
+		t.Error("caskSupportsOS(darwin) = false, want true")
+	}
+	if caskSupportsOS(e, "windows") {
+		t.Error("caskSupportsOS(windows) = true, want false")
+	}
+	if caskSupportsOS(Entry{}, "linux") {
+		t.Error("caskSupportsOS with no CaskOS = true, want false")
+	}
+}
+
+// --- planMethod -------------------------------------------------------------
+
+func installTestOpts(pathDirs []string, homeDir string, homeErr error, getenv func(string) string) Options {
+	return Options{
+		Env: InstallEnv{
+			Env: Env{
+				PathDirs:     func() []string { return pathDirs },
+				EvalSymlinks: func(p string) (string, error) { return p, nil },
+			},
+			UserHomeDir: func() (string, error) { return homeDir, homeErr },
+			Getenv:      getenv,
+		},
+	}
+}
+
+func TestPlanMethod_DirGivenAllowed(t *testing.T) {
+	host := Entry{ID: "host"}
+	opts := installTestOpts(nil, "", nil, func(string) string { return "" })
+	opts.Dir = "/home/alex/bin"
+
+	method, destDir, caskToken, createIfMissing, failure := planMethod(host, "", Entry{ID: "ovdb"}, opts)
+	if failure != nil {
+		t.Fatalf("planMethod failure = %v", failure)
+	}
+	if method != MethodDirect || destDir != "/home/alex/bin" || caskToken != "" || createIfMissing {
+		t.Errorf("planMethod = (%v, %q, %q, %v)", method, destDir, caskToken, createIfMissing)
+	}
+}
+
+func TestPlanMethod_DirGivenDenylistedNoFallback(t *testing.T) {
+	host := Entry{ID: "host"}
+	opts := installTestOpts(nil, "", nil, func(string) string { return "" })
+	opts.Dir = "/usr/local/bin"
+
+	_, _, _, _, failure := planMethod(host, "", Entry{ID: "ovdb"}, opts)
+	if failure == nil || failure.Kind != selfupdate.KindNoInstallDir {
+		t.Fatalf("planMethod failure = %v, want KindNoInstallDir", failure)
+	}
+}
+
+func TestPlanMethod_HomebrewHostCaskSupportsOS(t *testing.T) {
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "linux"
+
+	host := Entry{ID: "wb", Managers: []selfupdate.Manager{selfupdate.HomebrewCask("wb")}}
+	target := Entry{ID: "ovdb", CaskToken: "openvaultdb/tap/ovdb", CaskOS: []string{"darwin", "linux"}}
+	opts := installTestOpts(nil, "", nil, func(string) string { return "" })
+
+	method, destDir, caskToken, createIfMissing, failure := planMethod(host, "/opt/homebrew/Caskroom/wb/1.0.0", target, opts)
+	if failure != nil {
+		t.Fatalf("planMethod failure = %v", failure)
+	}
+	if method != MethodHomebrew || caskToken != "openvaultdb/tap/ovdb" || destDir != "" || createIfMissing {
+		t.Errorf("planMethod = (%v, %q, %q, %v)", method, destDir, caskToken, createIfMissing)
+	}
+}
+
+func TestPlanMethod_HomebrewHostCaskDoesNotSupportOSFallsToPerUser(t *testing.T) {
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "linux"
+
+	host := Entry{ID: "wb", Managers: []selfupdate.Manager{selfupdate.HomebrewCask("wb")}}
+	target := Entry{ID: "ovdb", CaskToken: "openvaultdb/tap/ovdb", CaskOS: []string{"windows"}}
+	opts := installTestOpts([]string{"/home/alex/.local/bin"}, "/home/alex", nil, func(string) string { return "" })
+
+	method, destDir, caskToken, createIfMissing, failure := planMethod(host, "/opt/homebrew/Caskroom/wb/1.0.0", target, opts)
+	if failure != nil {
+		t.Fatalf("planMethod failure = %v", failure)
+	}
+	if method != MethodDirect || destDir != "/home/alex/.local/bin" || caskToken != "" || !createIfMissing {
+		t.Errorf("planMethod = (%v, %q, %q, %v)", method, destDir, caskToken, createIfMissing)
+	}
+}
+
+func TestPlanMethod_HomebrewHostTargetHasNoCaskFallsToPerUser(t *testing.T) {
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "linux"
+
+	host := Entry{ID: "wb", Managers: []selfupdate.Manager{selfupdate.HomebrewCask("wb")}}
+	target := Entry{ID: "cover100"}
+	opts := installTestOpts([]string{"/home/alex/.local/bin"}, "/home/alex", nil, func(string) string { return "" })
+
+	method, _, _, _, failure := planMethod(host, "/opt/homebrew/Caskroom/wb/1.0.0", target, opts)
+	if failure != nil {
+		t.Fatalf("planMethod failure = %v", failure)
+	}
+	if method != MethodDirect {
+		t.Errorf("method = %v, want MethodDirect (per-user bin dir)", method)
+	}
+}
+
+func TestPlanMethod_ManualHostAllowedDirectory(t *testing.T) {
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "linux"
+
+	host := Entry{ID: "wb"}
+	opts := installTestOpts(nil, "", nil, func(string) string { return "" })
+
+	method, destDir, _, createIfMissing, failure := planMethod(host, "/home/alex/go/bin", Entry{ID: "ovdb"}, opts)
+	if failure != nil {
+		t.Fatalf("planMethod failure = %v", failure)
+	}
+	if method != MethodDirect || destDir != "/home/alex/go/bin" || createIfMissing {
+		t.Errorf("planMethod = (%v, %q, %v)", method, destDir, createIfMissing)
+	}
+}
+
+func TestPlanMethod_ManualHostDenylistedFallsToPerUser(t *testing.T) {
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "linux"
+
+	host := Entry{ID: "wb"}
+	opts := installTestOpts([]string{"/home/alex/.local/bin"}, "/home/alex", nil, func(string) string { return "" })
+
+	method, destDir, _, createIfMissing, failure := planMethod(host, "/usr/bin", Entry{ID: "ovdb"}, opts)
+	if failure != nil {
+		t.Fatalf("planMethod failure = %v", failure)
+	}
+	if method != MethodDirect || destDir != "/home/alex/.local/bin" || !createIfMissing {
+		t.Errorf("planMethod = (%v, %q, %v)", method, destDir, createIfMissing)
+	}
+}
+
+func TestPlanMethod_ManualHostDenylistedPerUserNotOnPathFails(t *testing.T) {
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "linux"
+
+	host := Entry{ID: "wb"}
+	opts := installTestOpts(nil, "/home/alex", nil, func(string) string { return "" })
+
+	_, _, _, _, failure := planMethod(host, "/usr/bin", Entry{ID: "ovdb"}, opts)
+	if failure == nil || failure.Kind != selfupdate.KindNoInstallDir {
+		t.Fatalf("planMethod failure = %v, want KindNoInstallDir", failure)
+	}
+}
+
+func TestPlanMethod_AmbiguousHostFallsToPerUser(t *testing.T) {
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "linux"
+
+	host := Entry{ID: "wb"}
+	opts := installTestOpts([]string{"/home/alex/.local/bin"}, "/home/alex", nil, func(string) string { return "" })
+
+	method, destDir, _, createIfMissing, failure := planMethod(host, "/opt/weird/place", Entry{ID: "ovdb"}, opts)
+	if failure != nil {
+		t.Fatalf("planMethod failure = %v", failure)
+	}
+	if method != MethodDirect || destDir != "/home/alex/.local/bin" || !createIfMissing {
+		t.Errorf("planMethod = (%v, %q, %v)", method, destDir, createIfMissing)
+	}
+}
+
+func TestPlanMethod_EmptyHostDirTreatedAsAmbiguous(t *testing.T) {
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "linux"
+
+	host := Entry{ID: "wb"}
+	opts := installTestOpts([]string{"/home/alex/.local/bin"}, "/home/alex", nil, func(string) string { return "" })
+
+	method, _, _, _, failure := planMethod(host, "", Entry{ID: "ovdb"}, opts)
+	if failure != nil {
+		t.Fatalf("planMethod failure = %v", failure)
+	}
+	if method != MethodDirect {
+		t.Errorf("method = %v, want MethodDirect (per-user bin dir)", method)
+	}
+}
+
+func TestPlanMethod_PerUserBinDirDeterminationFails(t *testing.T) {
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "linux"
+
+	host := Entry{ID: "wb"}
+	opts := installTestOpts(nil, "", errors.New("no home"), func(string) string { return "" })
+
+	_, _, _, _, failure := planMethod(host, "/opt/weird/place", Entry{ID: "ovdb"}, opts)
+	if failure == nil || failure.Kind != selfupdate.KindNoInstallDir {
+		t.Fatalf("planMethod failure = %v, want KindNoInstallDir", failure)
+	}
+}
+
+func TestPlanMethod_WindowsPerUserBinDir(t *testing.T) {
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "windows"
+
+	host := Entry{ID: "wb"}
+	getenv := func(k string) string {
+		if k == "LOCALAPPDATA" {
+			return `C:\Users\alex\AppData\Local`
+		}
+		return ""
+	}
+	opts := installTestOpts([]string{`c:\users\alex\appdata\local\programs\strongo\bin`}, "", nil, getenv)
+
+	method, destDir, _, createIfMissing, failure := planMethod(host, `C:\Program Files\wb`, Entry{ID: "ovdb"}, opts)
+	if failure != nil {
+		t.Fatalf("planMethod failure = %v", failure)
+	}
+	if method != MethodDirect || !createIfMissing {
+		t.Errorf("planMethod = (%v, %v)", method, createIfMissing)
+	}
+	if want := `C:\Users\alex\AppData\Local\Programs\strongo\bin`; destDir != want {
+		t.Errorf("destDir = %q, want %q", destDir, want)
+	}
+}
