@@ -129,9 +129,9 @@ func upgradeLine(row UpgradeRow) string {
 	switch r.Outcome {
 	case cliinstall.UpgradeOutcomeDryRun:
 		if r.InstallMethod == selfupdate.Managed && r.Manager != nil {
-			return fmt.Sprintf("%s → %s  upgrade available (%s: %s)", r.Current, r.Latest, r.Manager.Name, r.Command)
+			return fmt.Sprintf("%s → %s  upgrade available (%s: %s)%s", r.Current, r.Latest, r.Manager.Name, r.Command, nonReleaseTag(r))
 		}
-		return fmt.Sprintf("%s → %s  upgrade available (%s, %s)", r.Current, r.Latest, upgradeMethodLabel(row), r.ResolvedPath)
+		return fmt.Sprintf("%s → %s  upgrade available (%s, %s%s)%s", r.Current, r.Latest, upgradeMethodLabel(row), r.ResolvedPath, assetSuffix(r), nonReleaseTag(r))
 	case cliinstall.UpgradeOutcomeRedirected:
 		manager := "package manager"
 		if r.Manager != nil {
@@ -149,6 +149,15 @@ func upgradeLine(row UpgradeRow) string {
 	case cliinstall.UpgradeOutcomeUnrecognized:
 		return fmt.Sprintf("unrecognized copy at %s — never touched", r.Status.Path)
 	case cliinstall.UpgradeOutcomeRefused:
+		// Latest is only ever known here when a separate lookup ran (--check
+		// via CheckUpgrades, which still resolves it for display even for a
+		// refused target); PlanUpgrade/ExecuteUpgrade's own ambiguous path
+		// never reaches a lookup at all (selfupdate.Config.UpdateAt's own
+		// ambiguous check fails before one), so Latest is empty there —
+		// shown as a bare current version rather than a dangling "→ ".
+		if r.Latest == "" {
+			return fmt.Sprintf("%s  ambiguous install at %s — update manually", r.Current, r.ResolvedPath)
+		}
 		return fmt.Sprintf("%s → %s  ambiguous install at %s — update manually", r.Current, r.Latest, r.ResolvedPath)
 	case cliinstall.UpgradeOutcomeDeclined:
 		return "declined; nothing upgraded"
@@ -180,6 +189,30 @@ func withFinishHint(line, hint string) string {
 		return line
 	}
 	return line + " (finish: `" + hint + "`)"
+}
+
+// assetSuffix appends the exact release-asset URL a pending manual
+// replacement would fetch, when one is known (cli-install#req:upgrade-
+// batch-semantics: "version transition, asset URL and path" — task-22
+// review S3). Empty for a managed pending row, which names its Command
+// instead, and for any row that never reached a planned manual
+// replacement.
+func assetSuffix(r cliinstall.UpgradeResult) string {
+	if r.AssetURL == "" {
+		return ""
+	}
+	return ", asset " + r.AssetURL
+}
+
+// nonReleaseTag marks a row that is only being offered because it was
+// explicitly named despite being a non-release build (cli-install#req:
+// upgrade-skips-non-release-builds: the confirmation "names it as a
+// non-release build" — task-22 review S3).
+func nonReleaseTag(r cliinstall.UpgradeResult) string {
+	if !r.NonReleaseBuild {
+		return ""
+	}
+	return " (non-release build)"
 }
 
 // writeUpgradeWarnings writes every row's warnings to errOut, one per line,
@@ -242,38 +275,51 @@ type upgradeTargetJSON struct {
 	Action       string `json:"action"`
 	Command      string `json:"command,omitempty"`
 	ResolvedPath string `json:"resolved_path,omitempty"`
-	InstallHint  string `json:"install_hint,omitempty"`
-	FinishHint   string `json:"finish_hint,omitempty"`
-	FailureKind  string `json:"failure_kind,omitempty"`
-	Error        string `json:"error,omitempty"`
+	// AssetURL and NonReleaseBuild carry the same facts the text preview
+	// shows (task-22 review S3): the exact asset URL a pending manual
+	// replacement would fetch, and whether this target is offered only
+	// because it was explicitly named despite being a non-release build.
+	AssetURL        string `json:"asset_url,omitempty"`
+	NonReleaseBuild bool   `json:"non_release_build,omitempty"`
+	InstallHint     string `json:"install_hint,omitempty"`
+	FinishHint      string `json:"finish_hint,omitempty"`
+	FailureKind     string `json:"failure_kind,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 func rowToUpgradeJSON(row UpgradeRow) upgradeTargetJSON {
 	r := row.Result
 	s := r.Status
 	t := upgradeTargetJSON{
-		Name:          UpgradeRowName(row),
-		Host:          r.Host,
-		Relevant:      row.Relevant,
-		Description:   row.Entry.Description,
-		Relevance:     row.Relevance,
-		Status:        upgradeStatusToken(row),
-		Version:       s.Version,
-		Commit:        s.Commit,
-		Date:          s.Date,
-		DateSource:    s.DateSource,
-		Path:          s.Path,
-		OtherPaths:    s.OtherPaths,
-		VersionSource: s.VersionSource.String(),
-		Warnings:      append([]string(nil), r.Warnings...),
-		Current:       r.Current,
-		Latest:        r.Latest,
-		Tag:           r.Tag,
-		Action:        r.Outcome.String(),
-		Command:       r.Command,
-		ResolvedPath:  r.ResolvedPath,
-		InstallHint:   r.InstallHint,
-		FinishHint:    r.FinishHint,
+		Name:        UpgradeRowName(row),
+		Host:        r.Host,
+		Relevant:    row.Relevant,
+		Description: row.Entry.Description,
+		Relevance:   row.Relevance,
+		Status:      upgradeStatusToken(row),
+		Version:     s.Version,
+		Commit:      s.Commit,
+		Date:        s.Date,
+		DateSource:  s.DateSource,
+		Path:        s.Path,
+		// Exactly one of s.OtherPaths (a non-host target's own probed
+		// Status) or r.OtherPaths (the host's own additional-PATH-copy
+		// list, Status being always zero for the host — task-22 review M2)
+		// is ever non-empty, so concatenating both carries whichever one
+		// applies.
+		OtherPaths:      append(append([]string(nil), s.OtherPaths...), r.OtherPaths...),
+		VersionSource:   s.VersionSource.String(),
+		Warnings:        append([]string(nil), r.Warnings...),
+		Current:         r.Current,
+		Latest:          r.Latest,
+		Tag:             r.Tag,
+		Action:          r.Outcome.String(),
+		Command:         r.Command,
+		ResolvedPath:    r.ResolvedPath,
+		AssetURL:        r.AssetURL,
+		NonReleaseBuild: r.NonReleaseBuild,
+		InstallHint:     r.InstallHint,
+		FinishHint:      r.FinishHint,
 	}
 	if r.Latest != "" {
 		// Latest is set only once resolveUpgradeRow's lookup actually
@@ -336,7 +382,11 @@ func UpgradeConfirm(opts ConfirmOptions) func(pending []cliinstall.UpgradeResult
 	return func(pending []cliinstall.UpgradeResult) (bool, error) {
 		names := make([]string, len(pending))
 		for i, r := range pending {
-			names[i] = r.Target
+			// task-22 review S3: the confirmation itself, not only a
+			// separate stderr warning, names a non-release build so the
+			// person answering "y" knows this target is being moved onto
+			// the latest release rather than merely refreshed.
+			names[i] = r.Target + nonReleaseTag(r)
 		}
 		if !interactive() {
 			return false, &selfupdate.Failure{

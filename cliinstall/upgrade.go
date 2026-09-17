@@ -20,24 +20,40 @@ import (
 // already current, ahead of latest, skipped non-release build, not
 // installed, unrecognized, refused, dry run, declined, or failed)" — this
 // type carries exactly those twelve tokens).
+//
+// Every non-terminal value below (everything except SkippedNonRelease,
+// NotInstalled, Unrecognized) is produced by mapping
+// selfupdate.Config.UpdateAt's own Outcome.Action or Failure — never by a
+// decision this package makes on its own (cli-install#req:upgrade-per-
+// target-policy: "handled by the Self-Update Library's policy"). See
+// mapAction and PlanUpgrade's own doc comment.
 type UpgradeOutcome int
 
 const (
 	// UpgradeOutcomeUpgraded means a manual install was verified,
-	// downloaded and atomically replaced.
+	// downloaded and atomically replaced (selfupdate.ActionUpdated).
 	UpgradeOutcomeUpgraded UpgradeOutcome = iota
 	// UpgradeOutcomeManagerExecuted means an executable package-manager
-	// update ran to completion (cli-install#req:upgrade-per-target-policy).
+	// update ran to completion (selfupdate.ActionManagerExecuted).
 	UpgradeOutcomeManagerExecuted
 	// UpgradeOutcomeRedirected means a redirect-only managed install's
-	// upgrade command was reported without running anything.
+	// upgrade command was reported without running anything
+	// (selfupdate.ActionRedirected).
 	UpgradeOutcomeRedirected
 	// UpgradeOutcomeAlreadyCurrent means the running version already equals
-	// the latest stable release; nothing changed.
+	// the latest stable release; nothing changed
+	// (selfupdate.ActionAlreadyCurrent). For the host, and only for a real
+	// (non-dry-run, non-check) run, ExecuteUpgrade makes one further real
+	// UpdateAt call for this row so its after-update hook still runs,
+	// exactly as self-update does (REQ: host-target-is-running-binary;
+	// task-22 review B2) — selfupdate.Config.UpdateAt's own runAfterUpdate
+	// skips the hook under DryRun, so PlanUpgrade's own DryRun(true) call
+	// alone never fires it.
 	UpgradeOutcomeAlreadyCurrent
 	// UpgradeOutcomeAhead means the installed version orders strictly above
 	// the latest stable release (self-update#req:ahead-of-latest); nothing
-	// changed and this never counts as an available upgrade.
+	// changed and this never counts as an available upgrade
+	// (selfupdate.ActionAhead).
 	UpgradeOutcomeAhead
 	// UpgradeOutcomeSkippedNonRelease means an --all- or report-sourced
 	// target was a non-release build and was never looked up
@@ -50,13 +66,20 @@ const (
 	// be confirmed; it is never touched
 	// (cli-install#req:unrecognized-copy-not-trusted).
 	UpgradeOutcomeUnrecognized
-	// UpgradeOutcomeRefused means the install method could not be
-	// classified (self-update#req:ambiguous-safe-default); nothing changed.
+	// UpgradeOutcomeRefused means the install method is ambiguous
+	// (selfupdate#req:ambiguous-safe-default): Failure always carries
+	// selfupdate.KindAmbiguous, and this counts as a batch failure exactly
+	// like UpgradeOutcomeFailed — see UpgradeBatchResult.Failed/Failure —
+	// because `self-update` itself fails outright for an ambiguous install,
+	// and `upgrade <self>`/`upgrade <name>` must reach the same verdict
+	// (cli-install#req:self-update-equals-upgrade-self). It is computed
+	// BEFORE any verdict is even considered: an ambiguous target is refused
+	// whether it is current, ahead, or has an update available.
 	UpgradeOutcomeRefused
 	// UpgradeOutcomeDryRun means this target would be upgraded: it is
 	// either --dry-run's own final answer, or PlanUpgrade's "still pending
 	// confirmation" marker that ExecuteUpgrade replaces with a terminal
-	// outcome (mirroring Result/OutcomeDryRun's own dual role in plan.go).
+	// outcome (selfupdate.ActionPlanned, mapped 1:1).
 	UpgradeOutcomeDryRun
 	// UpgradeOutcomeDeclined means the batch confirmation was asked and
 	// declined; nothing changed and this is not a failure.
@@ -100,8 +123,8 @@ func (o UpgradeOutcome) String() string {
 }
 
 // UpgradeResult is one target's outcome from a batch PlanUpgrade/
-// CheckUpgrades/ExecuteUpgrade/Upgrade call — the shape a future task-22
-// output writer flattens into cli-install#req:machine-readable-output's
+// CheckUpgrades/ExecuteUpgrade/Upgrade call — the shape cliinstall/cliui's
+// output writers flatten into cli-install#req:machine-readable-output's
 // added upgrade fields ("current, latest, verdict, action, command and
 // resolved_path").
 type UpgradeResult struct {
@@ -118,8 +141,10 @@ type UpgradeResult struct {
 	// per-target-policy): for a non-host target this follows DetectSelf's
 	// own rule (managed on either the PATH-found or symlink-resolved path,
 	// otherwise manual or ambiguous judged on the resolved path alone); for
-	// the host it is DetectSelf's own classification of the running
-	// executable. Meaningful only when Target was located and Installed.
+	// the host it is literally selfupdate.Config.DetectSelf's own
+	// classification of the running executable (REQ: host-target-is-
+	// running-binary — task-22 review S1), not a rebuilt path. Meaningful
+	// only when Target was located and Installed.
 	InstallMethod selfupdate.InstallMethod
 	// Manager identifies the owning package manager when InstallMethod is
 	// selfupdate.Managed; nil otherwise.
@@ -140,8 +165,11 @@ type UpgradeResult struct {
 	// set once a lookup has completed.
 	Latest string
 	// Tag is Latest's exact published tag, passed to
-	// selfupdate.Options.ResolvedTag so Execute never re-resolves "latest"
-	// a second time (cli-install#req:upgrade-resolves-release-once).
+	// selfupdate.Options.ResolvedTag so Execute never independently
+	// re-searches for "latest" a second time (cli-install#req:upgrade-
+	// resolves-release-once) — UpdateAt's own re-verification that this
+	// tag is STILL latest is a separate, deliberate check documented on
+	// that call, not a second search.
 	Tag string
 	// Verdict is the comparison between Current and Latest, set once a
 	// lookup has completed. Zero (selfupdate.UpToDate) when no lookup ran.
@@ -150,6 +178,18 @@ type UpgradeResult struct {
 	// Command is the manager's display upgrade command, set whenever
 	// Manager is non-nil, regardless of Outcome.
 	Command string
+	// AssetURL is the exact release-asset URL a pending manual upgrade
+	// would fetch, taken from selfupdate.Outcome.PlannedURL
+	// (cli-install#req:upgrade-batch-semantics: "version transition, asset
+	// URL and path" — task-22 review S3). Empty for a managed target (its
+	// Command already names the action) and for any terminal outcome that
+	// never reached a planned replacement.
+	AssetURL string
+	// NonReleaseBuild is true when Current was classified a non-release
+	// build (cli-install#req:upgrade-skips-non-release-builds) and this
+	// target was offered anyway because it was named explicitly — the
+	// confirmation prompt tags such a target by name (task-22 review S3).
+	NonReleaseBuild bool
 	// InstallHint names the remedy for UpgradeOutcomeNotInstalled:
 	// "<host> install <target>".
 	InstallHint string
@@ -162,10 +202,17 @@ type UpgradeResult struct {
 
 	// Status is Target's probed install state, as REQ: status-probe-order
 	// found it before this upgrade acted (or, for a target this upgrade
-	// never touches, its only state). Zero for the host: use Current, not
-	// Status.Version, for the host's own version.
+	// never touches, its only state). Always zero for the host: the host's
+	// classification and version come from DetectSelf/Config, never from a
+	// status probe of its own PATH copy (task-22 review M2) — a separate
+	// PATH copy, if one exists, is named only in Warnings and OtherPaths.
 	Status Status
-	// Failure is set exactly when Outcome is UpgradeOutcomeFailed.
+	// OtherPaths lists additional located copies of Target, exactly as
+	// Status.OtherPaths does for a non-host row; for the host row this is
+	// the probed PATH copy (if any) instead, since Status itself is zero.
+	OtherPaths []string
+	// Failure is set exactly when Outcome is UpgradeOutcomeFailed or
+	// UpgradeOutcomeRefused.
 	Failure *selfupdate.Failure
 	// Warnings are human-readable, non-fatal notes: a non-release-build
 	// notice, an ambiguous-install guidance message, another-PATH-copy
@@ -183,13 +230,27 @@ type UpgradeBatchResult struct {
 	Results []UpgradeResult
 }
 
-// Failed reports whether at least one Result has UpgradeOutcomeFailed —
-// mirroring BatchResult.Failed(), the only outcome that counts as a batch
-// failure; a refused, unrecognized, not-installed, ahead, or skipped target
-// is a descriptive state, not something that went wrong this run.
+// upgradeResultFailed reports whether r counts as a batch failure:
+// UpgradeOutcomeFailed always does, and so does UpgradeOutcomeRefused when
+// it carries a Failure (task-22 review B1 — an ambiguous install fails
+// `self-update` outright, so it must fail `upgrade` too). A refused row
+// with no Failure never occurs in practice — Refused always carries
+// selfupdate.KindAmbiguous — but the nil-guard keeps this symmetric with
+// BatchResult.Failure's own "only failures with a Failure count" rule.
+func upgradeResultFailed(r UpgradeResult) bool {
+	if r.Failure == nil {
+		return false
+	}
+	return r.Outcome == UpgradeOutcomeFailed || r.Outcome == UpgradeOutcomeRefused
+}
+
+// Failed reports whether at least one Result counts as a failure per
+// upgradeResultFailed — mirroring BatchResult.Failed(). An unrecognized,
+// not-installed, ahead, or skipped target is a descriptive state, not
+// something that went wrong this run; a refused (ambiguous) one is.
 func (b UpgradeBatchResult) Failed() bool {
 	for _, r := range b.Results {
-		if r.Outcome == UpgradeOutcomeFailed {
+		if upgradeResultFailed(r) {
 			return true
 		}
 	}
@@ -197,13 +258,14 @@ func (b UpgradeBatchResult) Failed() bool {
 }
 
 // Failure returns nil when b did not fail, and otherwise a *BatchFailure
-// carrying every failed target's typed *selfupdate.Failure — the same
-// aggregate type BatchResult.Failure returns, so a host's ErrorMapper
-// handles both install and upgrade batches through one code path.
+// carrying every failed target's typed *selfupdate.Failure (including every
+// refused/ambiguous one) — the same aggregate type BatchResult.Failure
+// returns, so a host's ErrorMapper handles both install and upgrade batches
+// through one code path.
 func (b UpgradeBatchResult) Failure() error {
 	var failures []*selfupdate.Failure
 	for _, r := range b.Results {
-		if r.Outcome == UpgradeOutcomeFailed && r.Failure != nil {
+		if upgradeResultFailed(r) {
 			failures = append(failures, r.Failure)
 		}
 	}
@@ -277,12 +339,41 @@ type UpgradeOptions struct {
 	HostConfig selfupdate.Config
 	// HostAfterUpdate is the host's own after-update hook, passed straight
 	// through to selfupdate.Options.AfterUpdate only for the host's own
-	// UpdateAt call — the SAME closure its `self-update` command
-	// configures, so `upgrade <self>` runs the identical hook `self-update`
-	// does (cli-install#req:self-update-equals-upgrade-self). Never used
-	// for any other target: v1 reports a FinishHint instead of running
-	// another CLI's hooks (cli-install#req:self-update-hook-hint).
+	// REAL (non-dry-run) UpdateAt call, in ExecuteUpgrade — the SAME
+	// closure its `self-update` command configures, so `upgrade <self>`
+	// runs the identical hook `self-update` does
+	// (cli-install#req:self-update-equals-upgrade-self), including when
+	// the host is already current (task-22 review B2: ExecuteUpgrade makes
+	// a second real UpdateAt call for an already-current host specifically
+	// because selfupdate.Config.UpdateAt's own runAfterUpdate skips the
+	// hook under DryRun, so PlanUpgrade's own DryRun(true) call alone never
+	// fires it — see ExecuteUpgrade's own doc comment). Never used for any
+	// other target: v1 reports a FinishHint instead of running another
+	// CLI's hooks (cli-install#req:self-update-hook-hint).
 	HostAfterUpdate selfupdate.AfterUpdateFunc
+	// DetectHost resolves the host's own install classification. Nil
+	// defaults to opts.HostConfig.DetectSelf — the real running executable
+	// — exactly matching what the host's own `self-update` command would
+	// call (cli-install#req:host-target-is-running-binary; task-22 review
+	// S1: classification MUST come from DetectSelf, not a rebuilt
+	// `<hostDir>/<hostID>` path, which can name the wrong file for a
+	// renamed or aliased binary). Tests inject a fake to avoid depending on
+	// the actual test binary's own location; production callers leave this
+	// nil.
+	DetectHost func() (selfupdate.Detection, error)
+	// VerifyManaged probes an executable managed target after its manager
+	// command completes, passed straight through to
+	// selfupdate.Options.VerifyManaged for every target including the host
+	// (task-22 review S2: this MUST be the same verifier `self-update`
+	// itself uses — filtering PATH candidates by the detected manager's own
+	// markers — never an ad hoc probe with no manager filter). cliinstall
+	// itself has no opinion on how verification works; a Cobra host
+	// defaults this to selfcliui.VerifyManagedBinary, exactly as its own
+	// self-update command does. Required whenever any candidate target
+	// might be an executable managed install; nil makes such an upgrade
+	// fail with selfupdate.KindManagedCommand, matching UpdateAt's own
+	// "not configured" failure.
+	VerifyManaged selfupdate.ManagedBinaryVerifier
 
 	// LookupConcurrency bounds how many targets' latest-release lookups run
 	// at once. Zero defaults to 4 (cli-install#req:upgrade-release-
@@ -304,6 +395,16 @@ func (o UpgradeOptions) withDefaults() UpgradeOptions {
 	return o
 }
 
+// detectHostFunc returns opts.DetectHost when set, otherwise
+// opts.HostConfig.DetectSelf — the production default (task-22 review S1).
+func detectHostFunc(opts UpgradeOptions) func() (selfupdate.Detection, error) {
+	if opts.DetectHost != nil {
+		return opts.DetectHost
+	}
+	cfg := upgradeHostConfig(opts)
+	return cfg.DetectSelf
+}
+
 // --- target selection --------------------------------------------------
 
 // upgradeCandidate is one target PlanUpgrade will resolve and (unless
@@ -323,7 +424,9 @@ type upgradeCandidate struct {
 // unconditionally, in one Probe call over the whole catalog. Candidate and
 // therefore result order is catalog (id-sorted) order with the host moved
 // to the end (cli-install#req:host-upgraded-last) — there is no caller-
-// given order to preserve for this set, unlike named targets.
+// given order to preserve for this set, unlike named targets. hostStatus is
+// used only to detect and warn about an additional PATH copy of the host —
+// never for the host's own classification or version (task-22 review M2).
 func allUpgradeCandidates(ctx context.Context, opts UpgradeOptions) ([]upgradeCandidate, map[string]Status, Status) {
 	entries := Entries()
 	statuses := Probe(ctx, entries, "", opts.Env.Env, opts.ProbeOptions)
@@ -411,7 +514,10 @@ func namedUpgradeCandidates(ctx context.Context, names []string, opts UpgradeOpt
 // collapse to whichever one allCatalogManagers happened to keep; reusing
 // that value here would pick a foreign target's upgrade command by
 // accident, so this recomputes classification from scratch using only
-// managers, the target's own list.
+// managers, the target's own list. This function reuses selfupdate's own
+// exported Classify — the SAME classifier DetectSelf itself calls — twice
+// (raw path, then resolved path); it never re-derives Managed/Manual/
+// Ambiguous decision logic of its own.
 func classifyForUpgrade(status Status, managers []selfupdate.Manager) selfupdate.Detection {
 	if det := selfupdate.Classify(status.Path, managers); det.Method == selfupdate.Managed {
 		return det
@@ -431,10 +537,14 @@ func classifyForUpgrade(status Status, managers []selfupdate.Manager) selfupdate
 
 // releaseVersionPattern matches a strict MAJOR.MINOR.PATCH version with an
 // optional -prerelease suffix and an optional leading "v" — REQ: upgrade-
-// skips-non-release-builds' own shape. No "+" build metadata is permitted
-// by this pattern at all, which is what makes the separate literal "+"
-// check below redundant-but-explicit rather than load-bearing on its own.
-var releaseVersionPattern = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$`)
+// skips-non-release-builds' own shape. The prerelease token allows hyphens
+// (task-22 review M1: a hyphenated prerelease like "1.2.0-rc-1" or
+// "0.5.0-beta-2" is valid semver and must not be misclassified as a
+// non-release build) alongside alphanumerics and dots. No "+" build
+// metadata is permitted by this pattern at all, which is what makes the
+// separate literal "+" check below redundant-but-explicit rather than
+// load-bearing on its own.
+var releaseVersionPattern = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$`)
 
 // pseudoVersionPattern matches a Go pseudo-version's own suffix shape: a
 // 14-digit timestamp and a 12-hex-digit short commit hash, joined by "-".
@@ -485,93 +595,324 @@ func containsString(list []string, s string) bool {
 	return false
 }
 
-// --- version comparison (mirrors selfupdate's own unexported checkAgainst,
-// using only its exported CompareVersions, so cli-install can resolve a
-// target's release EXACTLY ONCE via Config.LatestRelease during planning
-// rather than also calling the unexported-equivalent Config.Check, which
-// would be a second lookup for the same information) ----------------------
+// --- ambiguous (shared by CheckUpgrades and PlanUpgrade) -----------------
 
-// versionFromTag mirrors selfupdate.Config's own unexported versionFromTag:
-// strip tagPrefix, then a leading "v".
-func versionFromTag(tag, tagPrefix string) string {
-	return normalizeVersion(strings.TrimPrefix(tag, tagPrefix))
+// ambiguousRefusal calls the REAL selfupdate.Config.UpdateAt with an empty
+// Options for an ambiguous detection and returns the UpgradeOutcomeRefused
+// row it produces (task-22 review B1). This call makes no network request
+// and performs no I/O: UpdateAt's own ambiguous check
+// (self-update#req:ambiguous-safe-default) runs before any lookup, so
+// calling it here — rather than constructing a matching *selfupdate.Failure
+// by hand — is free and guarantees the exact same Failure a real
+// `self-update` would produce for this classification, with no drift
+// possible between the two. cfg is any Config classified against the same
+// detection; its release-endpoint fields are never reached.
+func ambiguousRefusal(cfg selfupdate.Config, detection selfupdate.Detection) (UpgradeOutcome, *selfupdate.Failure) {
+	_, err := cfg.UpdateAt(context.Background(), detection, selfupdate.Options{})
+	var f *selfupdate.Failure
+	errors.As(err, &f)
+	return UpgradeOutcomeRefused, f
 }
 
-// normalizeVersion mirrors selfupdate's own unexported normalize: strip a
-// single leading "v".
-func normalizeVersion(v string) string {
-	return strings.TrimPrefix(strings.TrimSpace(v), "v")
-}
-
-// compareVersion computes the same CheckResult triple selfupdate's own
-// checkAgainst would, given a Config and an already-resolved latest tag —
-// current version, latest version, and the verdict comparing them.
-func compareVersion(cfg selfupdate.Config, tag string) (current, latest string, verdict selfupdate.Verdict) {
-	latest = versionFromTag(tag, cfg.TagPrefix)
-	if containsString(effectiveUndetermined(cfg.UndeterminedVersions), cfg.CurrentVersion) {
-		return cfg.CurrentVersion, latest, selfupdate.Undetermined
+// mapAction maps a completed selfupdate Outcome/error onto the terminal (or
+// still-pending, for a DryRun call) UpgradeOutcome this package reports —
+// the ONLY place cli-install upgrade turns a library decision into its own
+// display token (cli-install#req:upgrade-per-target-policy). It never
+// decides anything UpdateAt did not already decide.
+func mapAction(outcome selfupdate.Outcome, err error) (UpgradeOutcome, *selfupdate.Failure, string, string) {
+	if err != nil {
+		var f *selfupdate.Failure
+		errors.As(err, &f)
+		return UpgradeOutcomeFailed, f, "", ""
 	}
-	current = normalizeVersion(cfg.CurrentVersion)
-	switch cmp := selfupdate.CompareVersions(current, latest); {
-	case cmp == 0:
-		verdict = selfupdate.UpToDate
-	case cmp > 0:
-		verdict = selfupdate.Ahead
+	switch outcome.Action {
+	case selfupdate.ActionUpdated:
+		return UpgradeOutcomeUpgraded, nil, "", ""
+	case selfupdate.ActionManagerExecuted:
+		return UpgradeOutcomeManagerExecuted, nil, "", ""
+	case selfupdate.ActionAlreadyCurrent:
+		return UpgradeOutcomeAlreadyCurrent, nil, "", ""
+	case selfupdate.ActionAhead:
+		return UpgradeOutcomeAhead, nil, "", ""
+	case selfupdate.ActionRedirected:
+		return UpgradeOutcomeRedirected, nil, "", ""
+	case selfupdate.ActionPlanned:
+		return UpgradeOutcomeDryRun, nil, outcome.PlannedURL, outcome.PlannedCommand
 	default:
-		verdict = selfupdate.UpdateAvailable
+		// ActionAborted never occurs here: Confirm is always nil for every
+		// UpdateAt call this package makes (the batch gate already asked).
+		return UpgradeOutcomeFailed, &selfupdate.Failure{
+			Kind: selfupdate.KindUnexpected,
+			Err:  fmt.Errorf("upgrade: unexpected action %v", outcome.Action),
+		}, "", ""
 	}
-	return current, latest, verdict
 }
 
-// decidePlan maps a resolved verdict and classification onto the
-// UpgradeOutcome PlanUpgrade reports, per cli-install#req:upgrade-per-
-// target-policy's table. nonReleaseProceeds is true only for an explicitly
-// named non-release build (cli-install#req:upgrade-skips-non-release-
-// builds): it is the one case an Undetermined verdict still proceeds
-// instead of being treated as a no-op, because there is no "current" to be
-// already equal to.
-func decidePlan(nonReleaseProceeds bool, verdict selfupdate.Verdict, method selfupdate.InstallMethod, manager *selfupdate.Manager) UpgradeOutcome {
-	proceed := verdict == selfupdate.UpdateAvailable || (nonReleaseProceeds && verdict == selfupdate.Undetermined)
-	if !proceed {
-		if verdict == selfupdate.Ahead {
-			return UpgradeOutcomeAhead
-		}
-		return UpgradeOutcomeAlreadyCurrent
+// --- read-only report / --check ------------------------------------------
+
+// checkRow is CheckUpgrades' own working state for one candidate.
+type checkRow struct {
+	result      UpgradeResult
+	needsLookup bool
+	cfg         selfupdate.Config
+}
+
+// buildCheckTargetRow builds a non-host candidate's row for CheckUpgrades:
+// classification and the non-release skip are identical to PlanUpgrade's
+// (both call classifyForUpgrade/isNonReleaseBuild, never a private
+// decision), but an ambiguous classification is resolved immediately here
+// too (task-22 review B1) and no UpdateAt(DryRun) call ever happens —
+// CheckUpgrades uses selfupdate.Config.Check instead, because Check is
+// self-update's OWN --check implementation and, unlike UpdateAt, never
+// risks running AfterUpdate (cli-install#req:upgrade-check: "MUST NOT
+// download, write, confirm or invoke a manager" — Check() call literally
+// cannot).
+func buildCheckTargetRow(c upgradeCandidate, target Entry, status Status, opts UpgradeOptions) checkRow {
+	r := UpgradeResult{Target: c.id, Status: status, Warnings: append([]string(nil), status.Warnings...)}
+
+	switch status.State {
+	case NotInstalled:
+		r.Outcome = UpgradeOutcomeNotInstalled
+		r.InstallHint = opts.HostID + " install " + c.id
+		return checkRow{result: r}
+	case Unrecognized:
+		r.Outcome = UpgradeOutcomeUnrecognized
+		return checkRow{result: r}
 	}
-	switch method {
-	case selfupdate.Ambiguous:
-		return UpgradeOutcomeRefused
-	case selfupdate.Managed:
+
+	det := classifyForUpgrade(status, target.Managers)
+	r.InstallMethod = det.Method
+	r.Manager = det.Manager
+	r.ResolvedPath = det.Path
+	if det.Manager != nil {
+		r.Command = det.Manager.UpgradeCommand
+	}
+	r.Current = status.Version
+
+	nonRelease := isNonReleaseBuild(status.Version, target.UndeterminedVersions)
+	if nonRelease && !c.explicit {
+		r.Outcome = UpgradeOutcomeSkippedNonRelease
+		return checkRow{result: r}
+	}
+	r.NonReleaseBuild = nonRelease
+
+	cfg := upgradeTargetConfig(target, status.Version, opts)
+	if det.Method == selfupdate.Ambiguous {
+		r.Outcome, r.Failure = ambiguousRefusal(cfg, det)
+		return checkRow{result: r, needsLookup: true, cfg: cfg}
+	}
+	return checkRow{result: r, needsLookup: true, cfg: cfg}
+}
+
+// buildCheckHostRow is buildCheckTargetRow's host counterpart: classified
+// via detectHostFunc (task-22 review S1), never by rebuilding a
+// `<hostDir>/<hostID>` path, and with Status always left zero
+// (task-22 review M2) — hostStatus is consulted only to warn about an
+// additional PATH copy.
+func buildCheckHostRow(c upgradeCandidate, hostStatus Status, opts UpgradeOptions) checkRow {
+	r := UpgradeResult{Target: c.id, Host: true}
+
+	det, derr := detectHostFunc(opts)()
+	if derr != nil {
+		r.Outcome = UpgradeOutcomeFailed
+		r.Failure = &selfupdate.Failure{Kind: selfupdate.KindUnexpected, Err: fmt.Errorf("resolve running executable: %w", derr)}
+		return checkRow{result: r}
+	}
+	r.InstallMethod = det.Method
+	r.Manager = det.Manager
+	r.ResolvedPath = det.Path
+	if det.Manager != nil {
+		r.Command = det.Manager.UpgradeCommand
+	}
+	if hostStatus.Path != "" && !samePath(hostStatus.Path, det.Path, goosName) {
+		r.Warnings = append(r.Warnings, fmt.Sprintf("another copy of %s is on PATH at %s; it was left untouched", c.id, hostStatus.Path))
+		r.OtherPaths = append(r.OtherPaths, hostStatus.Path)
+	}
+
+	current := opts.HostConfig.CurrentVersion
+	r.Current = current
+
+	nonRelease := isNonReleaseBuild(current, opts.HostConfig.UndeterminedVersions)
+	if nonRelease && !c.explicit {
+		r.Outcome = UpgradeOutcomeSkippedNonRelease
+		return checkRow{result: r}
+	}
+	r.NonReleaseBuild = nonRelease
+
+	cfg := upgradeHostConfig(opts)
+	if det.Method == selfupdate.Ambiguous {
+		r.Outcome, r.Failure = ambiguousRefusal(cfg, det)
+		return checkRow{result: r, needsLookup: true, cfg: cfg}
+	}
+	return checkRow{result: r, needsLookup: true, cfg: cfg}
+}
+
+// checkDisplayOutcome labels a non-ambiguous row for the read-only
+// report/--check view from Check's own CheckResult and this target's
+// classification. It is DISPLAY ONLY: CheckUpgrades never confirms,
+// downloads, writes or runs a manager command regardless of what this
+// returns (cli-install#req:upgrade-check), so — unlike PlanUpgrade's
+// mapAction — a wrong label here could not cause an unwanted mutation, only
+// a misleading report. Ahead is checked first, matching self-update's own
+// ordering (self-update#req:ahead-of-latest short-circuits before a
+// managed/manual branch is ever considered).
+func checkDisplayOutcome(verdict selfupdate.Verdict, method selfupdate.InstallMethod, manager *selfupdate.Manager) UpgradeOutcome {
+	if verdict == selfupdate.Ahead {
+		return UpgradeOutcomeAhead
+	}
+	if method == selfupdate.Managed {
 		if manager == nil || !manager.CanExecuteUpgrade() {
 			return UpgradeOutcomeRedirected
 		}
 		return UpgradeOutcomeDryRun
-	default: // selfupdate.Manual
-		return UpgradeOutcomeDryRun
 	}
+	if verdict == selfupdate.UpToDate {
+		return UpgradeOutcomeAlreadyCurrent
+	}
+	return UpgradeOutcomeDryRun
 }
 
-// --- planning -------------------------------------------------------------
+// resolveCheckRow calls selfupdate.Config.Check — the exact library call
+// self-update's own --check makes — and fills in row's version facts and
+// display outcome. A lookup failure fails the row uniformly
+// (cli-install#req:upgrade-release-lookups-bounded), regardless of install
+// method: Check itself does not take a Detection and so cannot apply
+// UpdateAt's own managed-lookup-failure leniency (task-22 review B3 is
+// scoped to UpdateAt/execution, not Check/report — self-update's own
+// `self-update --check` fails the same way on a lookup error for a managed
+// install).
+func resolveCheckRow(ctx context.Context, row *checkRow, timeout time.Duration) {
+	lookupCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	// An ambiguous row already carries its final Outcome/Failure from
+	// ambiguousRefusal (task-22 review B1); the lookup below runs only so
+	// its Current/Latest/Verdict can still be shown ("keep the lookup only
+	// so --check can show latest/verdict"), and must NOT overwrite that
+	// refusal even on a successful Check() call. A failed lookup here is
+	// reported as a warning, not a second failure: the row is already
+	// terminal.
+	ambiguous := row.result.Outcome == UpgradeOutcomeRefused
+
+	result, err := row.cfg.Check(lookupCtx)
+	if err != nil {
+		if ambiguous {
+			var f *selfupdate.Failure
+			errors.As(err, &f)
+			msg := "latest release unavailable"
+			if f != nil {
+				msg = f.Error()
+			}
+			row.result.Warnings = append(row.result.Warnings, msg)
+			return
+		}
+		var f *selfupdate.Failure
+		errors.As(err, &f)
+		row.result.Outcome = UpgradeOutcomeFailed
+		row.result.Failure = f
+		return
+	}
+	row.result.Current = result.Current
+	row.result.Latest = result.Latest
+	row.result.Verdict = result.Verdict
+	if ambiguous {
+		return
+	}
+	row.result.Outcome = checkDisplayOutcome(result.Verdict, row.result.InstallMethod, row.result.Manager)
+}
+
+func runCheckLookups(ctx context.Context, rows []checkRow, opts UpgradeOptions) {
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, opts.LookupConcurrency)
+	for i := range rows {
+		if !rows[i].needsLookup {
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			resolveCheckRow(ctx, &rows[i], opts.LookupTimeout)
+		}(i)
+	}
+	wg.Wait()
+}
+
+// resolveUpgradeCandidates runs the shared target-selection step both
+// CheckUpgrades and PlanUpgrade need: validate/probe names or build the
+// --all set, and resolve the host's own directory (used only for
+// diagnostics; never for the host's classification — see buildCheckHostRow/
+// buildPlanHostRow).
+func resolveUpgradeCandidates(ctx context.Context, names []string, opts UpgradeOptions) ([]upgradeCandidate, map[string]Status, Status, error) {
+	if opts.All || len(names) == 0 {
+		candidates, statusByID, hostStatus := allUpgradeCandidates(ctx, opts)
+		return candidates, statusByID, hostStatus, nil
+	}
+	return namedUpgradeCandidates(ctx, names, opts)
+}
+
+// CheckUpgrades is `--check`'s and the bare report's own entry point
+// (cli-install#req:upgrade-check, cli-install#req:upgrade-no-args-reports).
+// It resolves every candidate's classification and, for every installed,
+// not-skipped target, calls selfupdate.Config.Check — self-update's own
+// read-only comparison, the SAME call `self-update --check` makes — never
+// selfupdate.Config.UpdateAt, so it can never download, write, confirm, run
+// a manager command, or invoke an AfterUpdate hook, regardless of Verdict
+// or install method. An ambiguous classification is still reported as
+// UpgradeOutcomeRefused (task-22 review B1), but — unlike PlanUpgrade/
+// ExecuteUpgrade — CheckUpgrades' own caller (cobracmd's read-only report)
+// never fails the command merely because a target is refused; only a real
+// lookup failure (UpgradeOutcomeFailed) does that (self-update's own
+// --check never fails for an ambiguous install either).
+func CheckUpgrades(ctx context.Context, names []string, opts UpgradeOptions) (UpgradeBatchResult, error) {
+	opts = opts.withDefaults()
+	if _, ok := ByID(opts.HostID); !ok {
+		panic("cliinstall: host id " + opts.HostID + " is not in the compiled catalog")
+	}
+
+	candidates, statusByID, hostStatus, err := resolveUpgradeCandidates(ctx, names, opts)
+	if err != nil {
+		return UpgradeBatchResult{Host: opts.HostID}, err
+	}
+
+	rows := make([]checkRow, len(candidates))
+	for i, c := range candidates {
+		if c.isHost {
+			rows[i] = buildCheckHostRow(c, hostStatus, opts)
+			continue
+		}
+		e, _ := ByID(c.id)
+		rows[i] = buildCheckTargetRow(c, e, statusByID[c.id], opts)
+	}
+
+	runCheckLookups(ctx, rows, opts)
+
+	results := make([]UpgradeResult, len(rows))
+	for i, row := range rows {
+		results[i] = row.result
+	}
+	return UpgradeBatchResult{Host: opts.HostID, Results: results}, nil
+}
+
+// --- planning (--dry-run and the confirm/execute pipeline) ---------------
 
 // upgradePlanRow is PlanUpgrade's own working state for one candidate,
-// before and after its (possible) release lookup — result is the row
-// PlanUpgrade ultimately returns; the rest is this function's own
-// plan-to-lookup handoff.
+// before and after its (possible) release lookup and UpdateAt(DryRun) call.
 type upgradePlanRow struct {
 	result      UpgradeResult
 	needsLookup bool
 	cfg         selfupdate.Config
-	explicit    bool
-	nonRelease  bool
+	detection   selfupdate.Detection
 }
 
-// planTargetRow builds a non-host candidate's row up to (but not including)
-// its release lookup: NotInstalled and Unrecognized targets, and an
-// implicitly-selected non-release build, are already terminal and never
-// need one (cli-install#req:upgrade-release-lookups-bounded: "MUST NOT look
-// up releases for targets that are not installed, unrecognized, or
-// skipped").
-func planTargetRow(c upgradeCandidate, target Entry, status Status, opts UpgradeOptions) upgradePlanRow {
+// buildPlanTargetRow builds a non-host candidate's row up to (but not
+// including) its release lookup and UpdateAt call: NotInstalled and
+// Unrecognized targets, and an implicitly-selected non-release build, are
+// already terminal and never need one (cli-install#req:upgrade-release-
+// lookups-bounded); an ambiguous classification is resolved immediately,
+// for free, via the real UpdateAt (task-22 review B1).
+func buildPlanTargetRow(c upgradeCandidate, target Entry, status Status, opts UpgradeOptions) upgradePlanRow {
 	r := UpgradeResult{Target: c.id, Status: status, Warnings: append([]string(nil), status.Warnings...)}
 
 	switch status.State {
@@ -598,126 +939,130 @@ func planTargetRow(c upgradeCandidate, target Entry, status Status, opts Upgrade
 		r.Outcome = UpgradeOutcomeSkippedNonRelease
 		return upgradePlanRow{result: r}
 	}
-	if det.Method == selfupdate.Ambiguous {
-		r.Warnings = append(r.Warnings, fmt.Sprintf("%s's install method is ambiguous at %s; update it manually", c.id, det.Path))
-	}
-	if nonRelease {
-		r.Warnings = append(r.Warnings, fmt.Sprintf("%s is a non-release build (%s); upgrading will move it to the latest release", c.id, status.Version))
-	}
+	r.NonReleaseBuild = nonRelease
 
-	return upgradePlanRow{result: r, needsLookup: true, cfg: upgradeTargetConfig(target, status.Version, opts), explicit: c.explicit, nonRelease: nonRelease}
+	cfg := upgradeTargetConfig(target, status.Version, opts)
+	if det.Method == selfupdate.Ambiguous {
+		r.Outcome, r.Failure = ambiguousRefusal(cfg, det)
+		return upgradePlanRow{result: r}
+	}
+	return upgradePlanRow{result: r, needsLookup: true, cfg: cfg, detection: det}
 }
 
-// planHostRow is planTargetRow's host counterpart: the host is never
-// NotInstalled or Unrecognized (it is, by definition, the running
-// executable), is classified by the running executable's own path rather
-// than a probed Status, and — when the first PATH copy of the host id
-// differs from that running executable — carries a warning naming that
-// other copy, which is reported but never upgraded
-// (cli-install#req:host-target-is-running-binary).
-func planHostRow(c upgradeCandidate, hostStatus Status, hostDir string, opts UpgradeOptions) upgradePlanRow {
-	r := UpgradeResult{Target: c.id, Host: true, Status: hostStatus}
+// buildPlanHostRow is buildPlanTargetRow's host counterpart: detected via
+// detectHostFunc (task-22 review S1), never a rebuilt path; Status stays
+// zero (task-22 review M2). Its UpdateAt(DryRun) call does NOT wire
+// opts.HostAfterUpdate: selfupdate.Config.UpdateAt's own runAfterUpdate
+// skips the hook whenever Options.DryRun is set, so passing it here would
+// never fire anyway — ExecuteUpgrade wires it for the host's own real,
+// non-dry-run call instead, including a second such call for an
+// already-current host (task-22 review B2; see ExecuteUpgrade's own doc
+// comment).
+func buildPlanHostRow(c upgradeCandidate, hostStatus Status, opts UpgradeOptions) upgradePlanRow {
+	r := UpgradeResult{Target: c.id, Host: true}
 
-	hostPath := installFilePath(goosName, hostDir, opts.HostID)
-	det := selfupdate.Classify(hostPath, opts.HostConfig.Managers)
+	det, derr := detectHostFunc(opts)()
+	if derr != nil {
+		r.Outcome = UpgradeOutcomeFailed
+		r.Failure = &selfupdate.Failure{Kind: selfupdate.KindUnexpected, Err: fmt.Errorf("resolve running executable: %w", derr)}
+		return upgradePlanRow{result: r}
+	}
 	r.InstallMethod = det.Method
 	r.Manager = det.Manager
 	r.ResolvedPath = det.Path
 	if det.Manager != nil {
 		r.Command = det.Manager.UpgradeCommand
 	}
-	if hostStatus.Path != "" && !samePath(hostStatus.Path, hostPath, goosName) {
+	if hostStatus.Path != "" && !samePath(hostStatus.Path, det.Path, goosName) {
 		r.Warnings = append(r.Warnings, fmt.Sprintf("another copy of %s is on PATH at %s; it was left untouched", c.id, hostStatus.Path))
+		r.OtherPaths = append(r.OtherPaths, hostStatus.Path)
 	}
 
 	current := opts.HostConfig.CurrentVersion
 	r.Current = current
-	if det.Method == selfupdate.Ambiguous {
-		r.Warnings = append(r.Warnings, fmt.Sprintf("%s's install method is ambiguous at %s; update it manually", c.id, det.Path))
-	}
 
 	nonRelease := isNonReleaseBuild(current, opts.HostConfig.UndeterminedVersions)
 	if nonRelease && !c.explicit {
 		r.Outcome = UpgradeOutcomeSkippedNonRelease
 		return upgradePlanRow{result: r}
 	}
-	if nonRelease {
-		r.Warnings = append(r.Warnings, fmt.Sprintf("%s is a non-release build (%s); upgrading will move it to the latest release", c.id, current))
-	}
+	r.NonReleaseBuild = nonRelease
 
-	return upgradePlanRow{result: r, needsLookup: true, cfg: upgradeHostConfig(opts), explicit: c.explicit, nonRelease: nonRelease}
+	cfg := upgradeHostConfig(opts)
+	if det.Method == selfupdate.Ambiguous {
+		r.Outcome, r.Failure = ambiguousRefusal(cfg, det)
+		return upgradePlanRow{result: r}
+	}
+	return upgradePlanRow{result: r, needsLookup: true, cfg: cfg, detection: det}
 }
 
-// PlanUpgrade validates and locates every target, and — for each one that
-// is installed and not skipped — resolves its latest stable release exactly
-// once, at most opts.LookupConcurrency at a time, each bounded by
-// opts.LookupTimeout (cli-install#req:upgrade-release-lookups-bounded). It
-// asks no confirmation, replaces nothing, and runs no manager command:
-// PlanUpgrade alone is both `--check`'s and `--dry-run`'s complete answer
-// (cli-install#req:upgrade-check, cli-install#req:upgrade-batch-semantics),
-// and it is the SAME plan ExecuteUpgrade later acts on — the version and
-// tag a caller shows before confirming are never re-resolved by this
-// package a second time (cli-install#req:upgrade-resolves-release-once;
-// UpdateAt's own ResolvedTag verification inside ExecuteUpgrade is a
-// separate, deliberate re-check documented on that call, not a second
-// search).
-//
-// names selects explicit targets; opts.All, or an empty names with
-// opts.All false, selects cli-install#req:upgrade-targets' "--all" set
-// instead (every installed catalog id, plus the host). An unknown name
-// fails the WHOLE batch before anything is probed or looked up
-// (cli-install#req:unknown-target-refused), exactly as Plan does; that
-// case is the returned error, with an empty BatchResult. Every other
-// outcome, including every per-target failure, is reported only in
-// BatchResult.Results.
-func PlanUpgrade(ctx context.Context, names []string, opts UpgradeOptions) (UpgradeBatchResult, error) {
-	opts = opts.withDefaults()
-	if _, ok := ByID(opts.HostID); !ok {
-		panic("cliinstall: host id " + opts.HostID + " is not in the compiled catalog")
+// resolveUpgradeRow resolves row's own single latest-release lookup
+// (cli-install#req:upgrade-release-lookups-bounded, cli-install#req:
+// upgrade-resolves-release-once), then calls the REAL selfupdate.Config.
+// UpdateAt with DryRun set — the same call `self-update --dry-run` makes —
+// and maps its Outcome/error onto row's terminal or still-pending
+// UpgradeOutcome via mapAction. A lookup failure here is NOT translated
+// into a row failure directly: ResolvedTag is simply left empty and
+// UpdateAt performs its OWN internal lookup attempt, which fails or warns
+// exactly as self-update's own unpinned path would for this classification
+// (task-22 review B3: a manual install fails, a managed one proceeds with
+// an advisory warning) — cliinstall makes no method-aware judgment of its
+// own about lookup-failure severity.
+func resolveUpgradeRow(ctx context.Context, row *upgradePlanRow, timeout time.Duration) {
+	lookupCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	tag, lookupErr := row.cfg.LatestRelease(lookupCtx)
+	if lookupErr != nil {
+		tag = ""
 	}
 
-	var (
-		candidates []upgradeCandidate
-		statusByID map[string]Status
-		hostStatus Status
-		err        error
-	)
-	if opts.All || len(names) == 0 {
-		candidates, statusByID, hostStatus = allUpgradeCandidates(ctx, opts)
-	} else {
-		candidates, statusByID, hostStatus, err = namedUpgradeCandidates(ctx, names, opts)
-	}
-	if err != nil {
-		return UpgradeBatchResult{Host: opts.HostID}, err
-	}
+	// UpdateAt performs its OWN internal lookup/re-verification whenever tag
+	// is empty or stale (see its own doc comment), so it MUST run under the
+	// SAME bounded lookupCtx as the LatestRelease call above — passing the
+	// outer, unbounded ctx here would let a slow or hanging release
+	// endpoint block past opts.LookupTimeout entirely
+	// (cli-install#req:upgrade-release-lookups-bounded).
+	// AfterUpdate is deliberately never wired here, host or not:
+	// selfupdate.Config.UpdateAt's own runAfterUpdate skips the hook
+	// whenever Options.DryRun is set (see its own guard), so passing one
+	// would never fire under this DryRun(true) call — see ExecuteUpgrade's
+	// own doc comment for where the host's hook actually runs.
+	outcome, err := row.cfg.UpdateAt(lookupCtx, row.detection, selfupdate.Options{
+		ResolvedTag:   tag,
+		DryRun:        true,
+		VerifyManaged: nil, // never reached under DryRun: updateManaged returns ActionPlanned first
+	})
 
-	hostDir, herr := opts.Env.HostDir()
-	if herr != nil {
-		hostDir = ""
+	row.result.Outcome, row.result.Failure, row.result.AssetURL, row.result.Command = applyMappedAction(row.result, outcome, err)
+	if row.result.Failure != nil {
+		return
 	}
-
-	rows := make([]upgradePlanRow, len(candidates))
-	for i, c := range candidates {
-		if c.isHost {
-			rows[i] = planHostRow(c, hostStatus, hostDir, opts)
-			continue
-		}
-		e, _ := ByID(c.id) // guaranteed valid: candidates come only from validated names or the catalog itself
-		rows[i] = planTargetRow(c, e, statusByID[c.id], opts)
+	row.result.Current = outcome.Result.Current
+	row.result.Latest = outcome.Result.Latest
+	row.result.Tag = tag
+	row.result.Verdict = outcome.Result.Verdict
+	// PostSwapWarning and AfterUpdateWarning are set only by ActionUpdated/
+	// ActionManagerExecuted/a real AfterUpdate invocation, none of which
+	// this DryRun(true) call ever reaches — only ReleaseCheckWarning (a
+	// managed target's advisory lookup failure, task-22 review B3) is ever
+	// populated here.
+	if outcome.ReleaseCheckWarning != nil {
+		row.result.Warnings = append(row.result.Warnings, fmt.Sprintf("latest release unavailable: %v", outcome.ReleaseCheckWarning))
 	}
-
-	runUpgradeLookups(ctx, rows, opts)
-
-	results := make([]UpgradeResult, len(rows))
-	for i, row := range rows {
-		results[i] = row.result
-	}
-	return UpgradeBatchResult{Host: opts.HostID, Results: results}, nil
 }
 
-// runUpgradeLookups resolves every row that needs one concurrently
-// (cli-install#req:upgrade-release-lookups-bounded), mutating each row's
-// own result in place.
+// applyMappedAction wraps mapAction so a managed row's already-known
+// Command survives even when mapAction itself returns none (mapAction only
+// returns a command for ActionPlanned's own PlannedCommand).
+func applyMappedAction(r UpgradeResult, outcome selfupdate.Outcome, err error) (UpgradeOutcome, *selfupdate.Failure, string, string) {
+	action, failure, assetURL, command := mapAction(outcome, err)
+	if command == "" {
+		command = r.Command
+	}
+	return action, failure, assetURL, command
+}
+
 func runUpgradeLookups(ctx context.Context, rows []upgradePlanRow, opts UpgradeOptions) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, opts.LookupConcurrency)
@@ -736,27 +1081,71 @@ func runUpgradeLookups(ctx context.Context, rows []upgradePlanRow, opts UpgradeO
 	wg.Wait()
 }
 
-// resolveUpgradeRow performs row's own single latest-release lookup and
-// turns it into a terminal or pending UpgradeOutcome.
-func resolveUpgradeRow(ctx context.Context, row *upgradePlanRow, timeout time.Duration) {
-	lookupCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	tag, err := row.cfg.LatestRelease(lookupCtx)
-	if err != nil {
-		var f *selfupdate.Failure
-		errors.As(err, &f)
-		row.result.Outcome = UpgradeOutcomeFailed
-		row.result.Failure = f
-		return
+// PlanUpgrade validates and locates every target and, for each one that is
+// installed and not skipped, calls the REAL selfupdate.Config.UpdateAt with
+// DryRun set — exactly the call `self-update --dry-run` makes for the same
+// classified copy (cli-install#req:upgrade-per-target-policy: "Each target
+// MUST be handled by the Self-Update Library's policy"). PlanUpgrade itself
+// makes no ambiguous/managed/current/ahead decision: mapAction only
+// translates UpdateAt's own Outcome.Action and Failure into this package's
+// display vocabulary.
+//
+// PlanUpgrade's own UpdateAt(DryRun) call never runs the host's after-
+// update hook, even for an already-current host: selfupdate.Config.
+// UpdateAt's own runAfterUpdate skips it whenever Options.DryRun is set
+// (self-update's own, pre-existing behavior — there being nothing to
+// preview for a no-op), and PlanUpgrade's call always sets DryRun. A real
+// (non-dry-run, non-check) run's after-update hook fires from
+// ExecuteUpgrade's own real UpdateAt call instead — including a SECOND
+// such call for an already-current host, since that row is otherwise
+// terminal after planning and would not reach a real call at all
+// (task-22 review B2; see ExecuteUpgrade's own doc comment). `--check` and
+// the bare, no-argument report do not call PlanUpgrade at all — they call
+// CheckUpgrades, which uses the strictly read-only selfupdate.Config.Check
+// instead (cli-install#req:upgrade-check, cli-install#req:upgrade-no-args-
+// reports).
+//
+// PlanUpgrade alone is `--dry-run`'s complete answer, and it is the SAME
+// plan ExecuteUpgrade later acts on for whatever is still pending — the
+// tag a caller shows before confirming is the SAME tag ExecuteUpgrade
+// passes to UpdateAt's own ResolvedTag (cli-install#req:upgrade-resolves-
+// release-once).
+//
+// names selects explicit targets; opts.All, or an empty names with
+// opts.All false, selects cli-install#req:upgrade-targets' "--all" set
+// instead (every installed catalog id, plus the host). An unknown name
+// fails the WHOLE batch before anything is probed or looked up
+// (cli-install#req:unknown-target-refused); that case is the returned
+// error, with an empty BatchResult. Every other outcome, including every
+// per-target failure, is reported only in BatchResult.Results.
+func PlanUpgrade(ctx context.Context, names []string, opts UpgradeOptions) (UpgradeBatchResult, error) {
+	opts = opts.withDefaults()
+	if _, ok := ByID(opts.HostID); !ok {
+		panic("cliinstall: host id " + opts.HostID + " is not in the compiled catalog")
 	}
 
-	current, latest, verdict := compareVersion(row.cfg, tag)
-	row.result.Current = current
-	row.result.Latest = latest
-	row.result.Tag = tag
-	row.result.Verdict = verdict
-	row.result.Outcome = decidePlan(row.nonRelease && row.explicit, verdict, row.result.InstallMethod, row.result.Manager)
+	candidates, statusByID, hostStatus, err := resolveUpgradeCandidates(ctx, names, opts)
+	if err != nil {
+		return UpgradeBatchResult{Host: opts.HostID}, err
+	}
+
+	rows := make([]upgradePlanRow, len(candidates))
+	for i, c := range candidates {
+		if c.isHost {
+			rows[i] = buildPlanHostRow(c, hostStatus, opts)
+			continue
+		}
+		e, _ := ByID(c.id) // guaranteed valid: candidates come only from validated names or the catalog itself
+		rows[i] = buildPlanTargetRow(c, e, statusByID[c.id], opts)
+	}
+
+	runUpgradeLookups(ctx, rows, opts)
+
+	results := make([]UpgradeResult, len(rows))
+	for i, row := range rows {
+		results[i] = row.result
+	}
+	return UpgradeBatchResult{Host: opts.HostID, Results: results}, nil
 }
 
 // --- execution --------------------------------------------------------
@@ -764,13 +1153,19 @@ func resolveUpgradeRow(ctx context.Context, row *upgradePlanRow, timeout time.Du
 var errNoUpgradeConfirmCallback = errors.New("no confirmation callback configured; pass --yes for non-interactive use")
 
 // ExecuteUpgrade upgrades every still-pending target in plan (Outcome ==
-// UpgradeOutcomeDryRun) — asking at most one confirmation covering all of
-// them (unless opts.Yes) — then applies EXACTLY the release PlanUpgrade
-// already resolved for each one via selfupdate.Options.ResolvedTag, with no
-// per-target Confirm callback (the batch gate already asked). Every other
-// Result in plan (a terminal outcome PlanUpgrade already decided) passes
-// through unchanged. Targets execute in plan's own order, which already
-// carries the host last (cli-install#req:host-upgraded-last).
+// UpgradeOutcomeDryRun — the rows whose PlanUpgrade UpdateAt(DryRun) call
+// returned ActionPlanned) — asking at most one confirmation covering all of
+// them (unless opts.Yes) — then calls the REAL selfupdate.Config.UpdateAt
+// (DryRun false) for each one, passing EXACTLY the release tag PlanUpgrade
+// already resolved via selfupdate.Options.ResolvedTag, with no per-target
+// Confirm callback (the batch gate already asked; UpdateAt with a nil
+// Confirm proceeds immediately). Every other Result in plan — already
+// current, ahead, redirected, refused, skipped, not installed, unrecognized
+// or failed — is a terminal outcome PlanUpgrade's own UpdateAt call already
+// decided, including any AfterUpdate invocation, and passes through
+// unchanged: ExecuteUpgrade never calls UpdateAt a second time for it
+// (task-22 review B2, B3). Targets execute in plan's own order, which
+// already carries the host last (cli-install#req:host-upgraded-last).
 //
 // ExecuteUpgrade always returns a fully populated UpgradeBatchResult, one
 // Result per target, even for a batch-level confirmation refusal — mirroring
@@ -815,24 +1210,42 @@ func ExecuteUpgrade(ctx context.Context, plan UpgradeBatchResult, opts UpgradeOp
 				return UpgradeBatchResult{Host: plan.Host, Results: results}, confirmErr
 			}
 		}
-		if !proceed {
+		if proceed {
+			for _, i := range pendingIdx {
+				r := results[i]
+				if r.Host {
+					results[i] = executeHostUpgrade(ctx, r, opts)
+					continue
+				}
+				e, _ := ByID(r.Target) // guaranteed valid: only PlanUpgrade's own rows, all built from a catalog Entry, ever reach here
+				results[i] = executeTargetUpgrade(ctx, e, r, opts)
+			}
+		} else {
 			for _, i := range pendingIdx {
 				r := results[i]
 				r.Outcome = UpgradeOutcomeDeclined
 				results[i] = r
 			}
-			return UpgradeBatchResult{Host: plan.Host, Results: results}, nil
 		}
 	}
 
-	for _, i := range pendingIdx {
-		r := results[i]
-		if r.Host {
+	// task-22 review B2: selfupdate.Config.UpdateAt's own runAfterUpdate
+	// skips AfterUpdate whenever Options.DryRun is set (see its own guard),
+	// so PlanUpgrade's DryRun(true) call — which decided this row is
+	// already current — never fires the host's after-update hook, exactly
+	// as `self-update --dry-run` itself never does. `self-update --yes` on
+	// an already-current binary makes exactly ONE UpdateAt call with
+	// DryRun false, and THAT call's runAfterUpdate does fire — reaching
+	// the identical outcome requires this second, real call here, for the
+	// host only (AfterUpdate is never wired for any other target, so
+	// re-calling UpdateAt for a non-host AlreadyCurrent row would only
+	// waste a lookup for an identical result). This runs regardless of
+	// whether any OTHER target was declined: self-update itself never
+	// confirms a no-op, so a batch decline elsewhere must not suppress it.
+	for i, r := range results {
+		if r.Host && r.Outcome == UpgradeOutcomeAlreadyCurrent {
 			results[i] = executeHostUpgrade(ctx, r, opts)
-			continue
 		}
-		e, _ := ByID(r.Target) // guaranteed valid: only PlanUpgrade's own rows, all built from a catalog Entry, ever reach here
-		results[i] = executeTargetUpgrade(ctx, e, r, opts)
 	}
 
 	return UpgradeBatchResult{Host: plan.Host, Results: results}, nil
@@ -866,7 +1279,7 @@ func executeTargetUpgrade(ctx context.Context, target Entry, r UpgradeResult, op
 	updateOpts := selfupdate.Options{
 		ResolvedTag:   r.Tag,
 		RunManaged:    opts.Env.RunManaged,
-		VerifyManaged: upgradeVerifyManaged(target, opts),
+		VerifyManaged: opts.VerifyManaged,
 	}
 	outcome, err := cfg.UpdateAt(ctx, detection, updateOpts)
 	return finalizeUpgradeResult(r, target.SelfUpdateHooks, outcome, err)
@@ -881,12 +1294,11 @@ func executeTargetUpgrade(ctx context.Context, target Entry, r UpgradeResult, op
 // something left to finish.
 func executeHostUpgrade(ctx context.Context, r UpgradeResult, opts UpgradeOptions) UpgradeResult {
 	cfg := upgradeHostConfig(opts)
-	hostEntry, _ := ByID(opts.HostID) // guaranteed valid: PlanUpgrade already panicked otherwise
 	detection := selfupdate.Detection{Method: r.InstallMethod, Manager: r.Manager, Path: r.ResolvedPath}
 	updateOpts := selfupdate.Options{
 		ResolvedTag:   r.Tag,
 		RunManaged:    opts.Env.RunManaged,
-		VerifyManaged: upgradeVerifyManaged(hostEntry, opts),
+		VerifyManaged: opts.VerifyManaged,
 		AfterUpdate:   opts.HostAfterUpdate,
 	}
 	outcome, err := cfg.UpdateAt(ctx, detection, updateOpts)
@@ -894,35 +1306,13 @@ func executeHostUpgrade(ctx context.Context, r UpgradeResult, opts UpgradeOption
 }
 
 // finalizeUpgradeResult turns a completed UpdateAt call into r's terminal
-// UpgradeOutcome, carrying its warnings and — for a non-host target whose
-// catalog entry declares SelfUpdateHooks — the finish hint
+// UpgradeOutcome via mapAction, carrying its warnings and — for a non-host
+// target whose catalog entry declares SelfUpdateHooks — the finish hint
 // (cli-install#req:self-update-hook-hint: "When such a target other than
 // the host is upgraded or has its manager command executed").
 func finalizeUpgradeResult(r UpgradeResult, hooks bool, outcome selfupdate.Outcome, err error) UpgradeResult {
-	if err != nil {
-		var f *selfupdate.Failure
-		errors.As(err, &f)
-		r.Outcome = UpgradeOutcomeFailed
-		r.Failure = f
-		return r
-	}
-
-	switch outcome.Action {
-	case selfupdate.ActionUpdated:
-		r.Outcome = UpgradeOutcomeUpgraded
-	case selfupdate.ActionManagerExecuted:
-		r.Outcome = UpgradeOutcomeManagerExecuted
-	case selfupdate.ActionAlreadyCurrent:
-		r.Outcome = UpgradeOutcomeAlreadyCurrent
-	case selfupdate.ActionAhead:
-		r.Outcome = UpgradeOutcomeAhead
-	case selfupdate.ActionRedirected:
-		r.Outcome = UpgradeOutcomeRedirected
-	default:
-		// ActionAborted/ActionPlanned never occur here: Confirm is always
-		// nil and DryRun is always false for this call.
-		r.Outcome = UpgradeOutcomeFailed
-		r.Failure = &selfupdate.Failure{Kind: selfupdate.KindUnexpected, Err: fmt.Errorf("upgrade: unexpected action %v", outcome.Action)}
+	r.Outcome, r.Failure, _, _ = applyMappedAction(r, outcome, err)
+	if r.Failure != nil {
 		return r
 	}
 
@@ -936,40 +1326,13 @@ func finalizeUpgradeResult(r UpgradeResult, hooks bool, outcome selfupdate.Outco
 		r.FinishHint = r.Target + " self-update"
 		r.Warnings = append(r.Warnings, fmt.Sprintf("finish updating %s by running `%s self-update`", r.Target, r.Target))
 	}
+	// AssetURL is meaningful only for a still-pending preview; a terminal
+	// execute result never carries one.
+	r.AssetURL = ""
 	return r
 }
 
-// upgradeVerifyManaged builds the selfupdate.ManagedBinaryVerifier UpdateAt
-// requires alongside RunManaged for an executable managed update: it
-// re-probes target via this package's own Probe (never a second, ad hoc
-// process check) and confirms the located copy reports expectedVersion,
-// mirroring install.go's own verifyInstalled for the identical purpose.
-// Status.ResolvedPath is always populated alongside Status.Path for an
-// Installed copy (probeOne sets both together — see status.go's own
-// resolvePath), so there is no empty-ResolvedPath case to fall back on
-// here.
-func upgradeVerifyManaged(target Entry, opts UpgradeOptions) selfupdate.ManagedBinaryVerifier {
-	return func(ctx context.Context, _ selfupdate.Detection, _ string, _ []string, expectedVersion string) (selfupdate.ExecutableIdentity, error) {
-		statuses := Probe(ctx, []Entry{target}, "", opts.Env.Env, opts.ProbeOptions)
-		status := statuses[0]
-		if status.State != Installed {
-			return selfupdate.ExecutableIdentity{}, fmt.Errorf("could not confirm %s after the manager command completed", target.ID)
-		}
-		if expectedVersion != "" && status.Version != expectedVersion {
-			return selfupdate.ExecutableIdentity{}, fmt.Errorf("%s reports version %s, expected the newly installed %s", target.ID, status.Version, expectedVersion)
-		}
-		return selfupdate.ExecutableIdentity{Path: status.Path, ResolvedPath: status.ResolvedPath}, nil
-	}
-}
-
 // --- convenience entry points -------------------------------------------
-
-// CheckUpgrades is `--check`'s own entry point: PlanUpgrade's read-only
-// report, unchanged (cli-install#req:upgrade-check: "MUST NOT download,
-// write, confirm or invoke a manager").
-func CheckUpgrades(ctx context.Context, names []string, opts UpgradeOptions) (UpgradeBatchResult, error) {
-	return PlanUpgrade(ctx, names, opts)
-}
 
 // Upgrade is the PlanUpgrade + confirm + ExecuteUpgrade convenience: it
 // plans the whole batch, and — unless opts.DryRun — executes it, mirroring
@@ -1010,11 +1373,18 @@ func upgradeHostConfig(opts UpgradeOptions) selfupdate.Config {
 
 // withGitHubAuth defaults cfg.HTTPClient to githubHTTPClient's bearer-
 // authenticated client, leaving an already-configured one (a test's fake
-// release server, or a host's own explicit choice) untouched.
+// release server, or a host's own explicit choice) untouched EXCEPT for
+// wrapping its existing Transport so the bearer-auth/rate-limit behavior
+// still applies (task-22 review M5: a host or ConfigureRelease that sets
+// its own HTTPClient must not silently lose the GH_TOKEN message).
 func withGitHubAuth(cfg selfupdate.Config, getenv func(string) string) selfupdate.Config {
 	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = githubHTTPClient(getenv)
+		cfg.HTTPClient = githubHTTPClient(getenv, nil)
+		return cfg
 	}
+	wrapped := *cfg.HTTPClient
+	wrapped.Transport = githubAuthTransportFor(getenv, cfg.HTTPClient.Transport)
+	cfg.HTTPClient = &wrapped
 	return cfg
 }
 
@@ -1033,8 +1403,13 @@ const githubAPIHost = "api.github.com"
 // selfupdate's own release lookups' "least exposure" posture for the token
 // they don't need. getenv nil, or both variables unset, yields an
 // unauthenticated client identical to selfupdate's own http.DefaultClient
-// fallback.
-func githubHTTPClient(getenv func(string) string) *http.Client {
+// fallback. base wraps an existing RoundTripper (nil for the plain
+// http.DefaultTransport fallback) — see githubAuthTransportFor.
+func githubHTTPClient(getenv func(string) string, base http.RoundTripper) *http.Client {
+	return &http.Client{Transport: githubAuthTransportFor(getenv, base)}
+}
+
+func githubAuthTransportFor(getenv func(string) string, base http.RoundTripper) http.RoundTripper {
 	var token string
 	if getenv != nil {
 		token = getenv("GH_TOKEN")
@@ -1042,24 +1417,30 @@ func githubHTTPClient(getenv func(string) string) *http.Client {
 			token = getenv("GITHUB_TOKEN")
 		}
 	}
-	return &http.Client{Transport: &githubAuthTransport{token: token}}
+	return &githubAuthTransport{base: base, token: token}
 }
 
 // githubRateLimitError is returned by githubAuthTransport.RoundTrip in
 // place of a response GitHub's own rate-limit headers mark as exhausted, so
 // the message cli-install#req:upgrade-release-lookups-bounded requires
-// ("the message MUST say the API rate limit was reached" and name
-// GH_TOKEN) survives all the way through selfupdate.Config.LatestRelease's
-// own *Failure wrapping. That package exposes no response headers to its
-// own callers — only a status-code-and-body-derived message — which cannot
-// by itself distinguish an exhausted rate limit from any other 403;
+// ("the message MUST say the API rate limit was reached") survives all the
+// way through selfupdate.Config.LatestRelease's own *Failure wrapping. The
+// GH_TOKEN remedy is named only when no token was actually sent
+// (task-22 review M6): a caller that already set one and is still
+// rate-limited needs a different remedy (a higher-limit token, or simply
+// waiting), and telling them to "set GH_TOKEN" when they already did is
+// actively misleading. That package exposes no response headers to its own
+// callers — only a status-code-and-body-derived message — which cannot by
+// itself distinguish an exhausted rate limit from any other 403;
 // substituting this error at the transport level, before selfupdate's own
 // status-code handling ever runs, is what makes the distinction visible to
-// cliinstall without changing selfupdate itself (out of this task's own
-// scope: "cliinstall upgrade files only").
-type githubRateLimitError struct{}
+// cliinstall without changing selfupdate itself.
+type githubRateLimitError struct{ hadToken bool }
 
-func (*githubRateLimitError) Error() string {
+func (e *githubRateLimitError) Error() string {
+	if e.hadToken {
+		return "GitHub API rate limit reached even with a bearer token set"
+	}
 	return "GitHub API rate limit reached; set GH_TOKEN or GITHUB_TOKEN to raise it"
 }
 
@@ -1076,7 +1457,12 @@ func (t *githubAuthTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	if t.token != "" && req.URL.Host == githubAPIHost {
+	// task-22 review M4: the token is a bearer credential and MUST NOT be
+	// sent in cleartext — only ever attached over https, even though every
+	// production ReleasesAPIURL default already is https; a caller that
+	// points ConfigureRelease at a plain-http test double should never see
+	// the token either.
+	if t.token != "" && req.URL.Host == githubAPIHost && req.URL.Scheme == "https" {
 		req = req.Clone(req.Context())
 		req.Header.Set("Authorization", "Bearer "+t.token)
 	}
@@ -1088,7 +1474,7 @@ func (t *githubAuthTransport) RoundTrip(req *http.Request) (*http.Response, erro
 		resp.Header.Get("X-RateLimit-Remaining") == "0" {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
-		return nil, &githubRateLimitError{}
+		return nil, &githubRateLimitError{hadToken: t.token != ""}
 	}
 	return resp, nil
 }

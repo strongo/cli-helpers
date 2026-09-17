@@ -214,10 +214,16 @@ func TestUpgradeReport_Bare_FailsOnLookupFailure(t *testing.T) {
 	// release-shaped version is required here so the host is actually
 	// looked up and can fail that lookup. ReleasesAPIURL points at an
 	// unreachable local address so the failure is fast and fully offline
-	// (cli-install#req:no-network-in-tests).
+	// (cli-install#req:no-network-in-tests). DetectHost is forced Manual
+	// (never Ambiguous, which would fold this lookup failure into a mere
+	// warning on an already-Refused row — task-22 review B1) so the
+	// failure this test cares about is the one that actually surfaces.
 	cmd := newUpgradeCmd(t, UpgradeCommandOptions{
 		HostID: "datatug", Env: env, Errors: wbStyleErrors{},
 		HostConfig: selfupdate.Config{BinaryName: "datatug", CurrentVersion: "1.0.0", ReleasesAPIURL: "http://127.0.0.1:1/releases"},
+		DetectHost: func() (selfupdate.Detection, error) {
+			return selfupdate.Detection{Method: selfupdate.Manual, Path: "/host/bin/datatug"}, nil
+		},
 	})
 
 	_, _, err := runCmd(t, cmd)

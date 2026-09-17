@@ -72,6 +72,23 @@ type UpgradeCommandOptions struct {
 	// identical hook `self-update` does
 	// (cli-install#req:self-update-equals-upgrade-self).
 	HostAfterUpdate selfupdate.AfterUpdateFunc
+	// DetectHost overrides how the host's own install is classified,
+	// passed straight through to cliinstall.UpgradeOptions.DetectHost. Nil
+	// (the production default) uses opts.HostConfig.DetectSelf, exactly
+	// what the host's own `self-update` command calls (cli-install#req:
+	// host-target-is-running-binary; task-22 review S1). Tests inject a
+	// fake here so they never depend on the real running test binary's own
+	// path.
+	DetectHost func() (selfupdate.Detection, error)
+	// VerifyManaged probes an executable managed target after its manager
+	// command completes, passed straight through to cliinstall.
+	// UpgradeOptions.VerifyManaged. Nil defaults to
+	// selfcliui.VerifyManagedBinary — the SAME verifier the host's own
+	// `self-update` command uses, which filters PATH candidates by the
+	// detected manager's own markers (task-22 review S2: a bespoke,
+	// manager-blind probe could hand AfterUpdate the wrong executable's
+	// identity).
+	VerifyManaged selfupdate.ManagedBinaryVerifier
 
 	// LookupConcurrency and LookupTimeout tune PlanUpgrade's own release-
 	// lookup bounds (cli-install#req:upgrade-release-lookups-bounded); zero
@@ -165,6 +182,10 @@ func NewUpgrade(opts UpgradeCommandOptions) *cobra.Command {
 func upgradeOptionsFrom(cmd *cobra.Command, opts UpgradeCommandOptions, all bool, previewOut, errOut io.Writer) cliinstall.UpgradeOptions {
 	env := resolveEnv(opts.Env)
 	env.RunManaged = selfcliui.ManagedCommandRunner(cmd.InOrStdin(), previewOut, errOut)
+	verifyManaged := opts.VerifyManaged
+	if verifyManaged == nil {
+		verifyManaged = selfcliui.VerifyManagedBinary
+	}
 	return cliinstall.UpgradeOptions{
 		HostID:            opts.HostID,
 		All:               all,
@@ -173,6 +194,8 @@ func upgradeOptionsFrom(cmd *cobra.Command, opts UpgradeCommandOptions, all bool
 		ProbeOptions:      opts.ProbeOptions,
 		HostConfig:        opts.HostConfig,
 		HostAfterUpdate:   opts.HostAfterUpdate,
+		DetectHost:        opts.DetectHost,
+		VerifyManaged:     verifyManaged,
 		LookupConcurrency: opts.LookupConcurrency,
 		LookupTimeout:     opts.LookupTimeout,
 	}
@@ -200,20 +223,26 @@ func upgradeRows(hostID string, results []cliinstall.UpgradeResult) []cliui.Upgr
 // runUpgradeReport implements the read-only report: the bare, no-argument
 // invocation (names nil, all false — REQ: upgrade-no-args-reports) and an
 // explicit --check over named targets or --all (REQ: upgrade-check). Both
-// call PlanUpgrade only — CheckUpgrades is defined as exactly that call, so
-// this uses PlanUpgrade directly rather than adding a second, identical
-// entry point — and never Execute, never confirm, never download or write.
+// call cliinstall.CheckUpgrades — self-update's own read-only Check call,
+// never selfupdate.Config.UpdateAt — so neither ever downloads, writes,
+// confirms, runs a manager command, or invokes an AfterUpdate hook.
 //
 // bare distinguishes the two: only the bare report prints REQ: upgrade-no-
-// args-reports' own next-step line and skips the upgrades-available signal;
-// an explicit --check does the opposite (cli-install#req:upgrade-check).
+// args-reports' own next-step line and skips the upgrades-available signal.
+// Per REQ: upgrade-no-args-reports ("MUST exit successfully... whether or
+// not upgrades are available") the bare report also never fails merely
+// because a target is refused as ambiguous — self-update's own --check
+// never fails for that either (task-22 review B1) — only a genuine lookup
+// failure (UpgradeOutcomeFailed) fails either shape; reportLookupFailed
+// below is deliberately narrower than UpgradeBatchResult.Failed(), which
+// also counts a refused/ambiguous row for the EXECUTE path's own exit code.
 func runUpgradeReport(cmd *cobra.Command, opts UpgradeCommandOptions, names []string, all bool, format string) error {
 	bare := names == nil && !all
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
 
 	upOpts := upgradeOptionsFrom(cmd, opts, all, out, errOut)
-	plan, err := cliinstall.PlanUpgrade(cmd.Context(), names, upOpts)
+	plan, err := cliinstall.CheckUpgrades(cmd.Context(), names, upOpts)
 	rows := upgradeRows(opts.HostID, plan.Results)
 
 	if err != nil {
@@ -242,8 +271,8 @@ func runUpgradeReport(cmd *cobra.Command, opts UpgradeCommandOptions, names []st
 	// failed lookup fails the command regardless of report shape, taking
 	// precedence over the upgrades-available signal below (REQ: upgrade-
 	// check).
-	if plan.Failed() {
-		return mapFailure(opts.Errors, plan.Failure())
+	if failure := reportLookupFailure(plan.Results); failure != nil {
+		return mapFailure(opts.Errors, failure)
 	}
 	if bare {
 		// REQ: upgrade-no-args-reports: "MUST exit successfully... whether
@@ -267,6 +296,25 @@ func runUpgradeReport(cmd *cobra.Command, opts UpgradeCommandOptions, names []st
 		}
 	}
 	return nil
+}
+
+// reportLookupFailure returns a *cliinstall.BatchFailure over every row
+// whose Outcome is UpgradeOutcomeFailed — a genuine release-lookup failure
+// — deliberately excluding UpgradeOutcomeRefused (ambiguous) rows, which
+// UpgradeBatchResult.Failed()/Failure() count for the EXECUTE path's exit
+// code but which self-update's own --check never fails for
+// (task-22 review B1). Returns nil when nothing genuinely failed.
+func reportLookupFailure(results []cliinstall.UpgradeResult) error {
+	var failures []*selfupdate.Failure
+	for _, r := range results {
+		if r.Outcome == cliinstall.UpgradeOutcomeFailed && r.Failure != nil {
+			failures = append(failures, r.Failure)
+		}
+	}
+	if len(failures) == 0 {
+		return nil
+	}
+	return &cliinstall.BatchFailure{Failures: failures}
 }
 
 // runUpgrade implements `upgrade <name>...`/`upgrade --all` without --check:

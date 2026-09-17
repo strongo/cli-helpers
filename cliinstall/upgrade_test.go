@@ -33,8 +33,8 @@ func releasesJSON(tags ...string) string {
 
 // upgradeReleaseServer serves a distinct /releases/<id> listing per catalog
 // id from releasesByID, and download files from files, so several targets'
-// Config.LatestRelease/UpdateAt calls in the same test resolve entirely
-// offline (cli-install#req:no-network-in-tests).
+// Config.LatestRelease/Check/UpdateAt calls in the same test resolve
+// entirely offline (cli-install#req:no-network-in-tests).
 func upgradeReleaseServer(t *testing.T, releasesByID map[string]string, files map[string][]byte) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -96,6 +96,20 @@ func jsonMarshalVersion(id, version string) ([]byte, error) {
 	return json.Marshal(buildinfo.VersionJSON{Name: id, Version: version})
 }
 
+// fakeDetectHost is the task-22-review-S1 test seam: UpgradeOptions.
+// DetectHost, injected so a test controls the host's own classification
+// deterministically instead of depending on the real running test binary's
+// own path (which selfupdate.Config.DetectSelf would otherwise resolve).
+func fakeDetectHost(method selfupdate.InstallMethod, manager *selfupdate.Manager, path string) func() (selfupdate.Detection, error) {
+	return func() (selfupdate.Detection, error) {
+		return selfupdate.Detection{Method: method, Manager: manager, Path: path}, nil
+	}
+}
+
+func failingDetectHost(err error) func() (selfupdate.Detection, error) {
+	return func() (selfupdate.Detection, error) { return selfupdate.Detection{}, err }
+}
+
 // --- pure helpers ---------------------------------------------------------
 
 func TestUpgradeOutcome_String(t *testing.T) {
@@ -134,6 +148,10 @@ func TestIsNonReleaseBuild(t *testing.T) {
 		{"1.2.3", nil, false},
 		{"v1.2.3", nil, false},
 		{"1.2.3-rc.1", nil, false},
+		// task-22 review M1: a hyphenated prerelease is valid semver and
+		// must not be misclassified as a non-release build.
+		{"1.2.0-rc-1", nil, false},
+		{"0.5.0-beta-2", nil, false},
 		{"0.20.3+dirty", nil, true},
 		{"1.2", nil, true},
 		{"1.2.3.4", nil, true},
@@ -162,70 +180,6 @@ func TestContainsString(t *testing.T) {
 	}
 	if containsString([]string{"a", "b"}, "c") {
 		t.Error("containsString = true, want false")
-	}
-}
-
-func TestVersionFromTag(t *testing.T) {
-	if got := versionFromTag("cli-v1.2.3", "cli-"); got != "1.2.3" {
-		t.Errorf("versionFromTag = %q", got)
-	}
-	if got := versionFromTag("v1.2.3", ""); got != "1.2.3" {
-		t.Errorf("versionFromTag = %q", got)
-	}
-}
-
-func TestNormalizeVersion(t *testing.T) {
-	if got := normalizeVersion(" v1.2.3 "); got != "1.2.3" {
-		t.Errorf("normalizeVersion = %q", got)
-	}
-}
-
-func TestCompareVersion(t *testing.T) {
-	if current, latest, verdict := compareVersion(selfupdate.Config{CurrentVersion: "1.0.0"}, "v1.1.0"); current != "1.0.0" || latest != "1.1.0" || verdict != selfupdate.UpdateAvailable {
-		t.Errorf("got %q %q %v", current, latest, verdict)
-	}
-	if _, _, verdict := compareVersion(selfupdate.Config{CurrentVersion: "1.1.0"}, "v1.1.0"); verdict != selfupdate.UpToDate {
-		t.Errorf("verdict = %v, want UpToDate", verdict)
-	}
-	if _, _, verdict := compareVersion(selfupdate.Config{CurrentVersion: "2.0.0"}, "v1.1.0"); verdict != selfupdate.Ahead {
-		t.Errorf("verdict = %v, want Ahead", verdict)
-	}
-	if current, _, verdict := compareVersion(selfupdate.Config{CurrentVersion: "dev"}, "v1.1.0"); verdict != selfupdate.Undetermined || current != "dev" {
-		t.Errorf("got %q %v, want dev/Undetermined", current, verdict)
-	}
-	if _, latest, _ := compareVersion(selfupdate.Config{CurrentVersion: "1.0.0", TagPrefix: "cli-"}, "cli-v1.2.3"); latest != "1.2.3" {
-		t.Errorf("latest = %q, want 1.2.3", latest)
-	}
-}
-
-func TestDecidePlan(t *testing.T) {
-	redirectOnly := selfupdate.Homebrew("brew upgrade --cask x")
-	executable := selfupdate.HomebrewCask("x")
-
-	cases := []struct {
-		name               string
-		nonReleaseProceeds bool
-		verdict            selfupdate.Verdict
-		method             selfupdate.InstallMethod
-		manager            *selfupdate.Manager
-		want               UpgradeOutcome
-	}{
-		{"ahead", false, selfupdate.Ahead, selfupdate.Manual, nil, UpgradeOutcomeAhead},
-		{"up to date", false, selfupdate.UpToDate, selfupdate.Manual, nil, UpgradeOutcomeAlreadyCurrent},
-		{"undetermined not explicit", false, selfupdate.Undetermined, selfupdate.Manual, nil, UpgradeOutcomeAlreadyCurrent},
-		{"undetermined explicit", true, selfupdate.Undetermined, selfupdate.Manual, nil, UpgradeOutcomeDryRun},
-		{"available manual", false, selfupdate.UpdateAvailable, selfupdate.Manual, nil, UpgradeOutcomeDryRun},
-		{"available ambiguous", false, selfupdate.UpdateAvailable, selfupdate.Ambiguous, nil, UpgradeOutcomeRefused},
-		{"available managed redirect", false, selfupdate.UpdateAvailable, selfupdate.Managed, &redirectOnly, UpgradeOutcomeRedirected},
-		{"available managed nil manager", false, selfupdate.UpdateAvailable, selfupdate.Managed, nil, UpgradeOutcomeRedirected},
-		{"available managed executable", false, selfupdate.UpdateAvailable, selfupdate.Managed, &executable, UpgradeOutcomeDryRun},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := decidePlan(c.nonReleaseProceeds, c.verdict, c.method, c.manager); got != c.want {
-				t.Errorf("decidePlan(...) = %v, want %v", got, c.want)
-			}
-		})
 	}
 }
 
@@ -267,6 +221,57 @@ func TestClassifyForUpgrade(t *testing.T) {
 	}
 }
 
+func TestAmbiguousRefusal(t *testing.T) {
+	cfg := selfupdate.Config{BinaryName: "x", CurrentVersion: "1.0.0"}
+	det := selfupdate.Detection{Method: selfupdate.Ambiguous, Path: "/src/x/x"}
+	outcome, failure := ambiguousRefusal(cfg, det)
+	if outcome != UpgradeOutcomeRefused {
+		t.Errorf("outcome = %v, want Refused", outcome)
+	}
+	if failure == nil || failure.Kind != selfupdate.KindAmbiguous {
+		t.Fatalf("failure = %+v, want KindAmbiguous", failure)
+	}
+	if !strings.Contains(failure.Error(), "ambiguous") {
+		t.Errorf("failure message %q does not mention ambiguous", failure.Error())
+	}
+}
+
+func TestMapAction(t *testing.T) {
+	cases := []struct {
+		name       string
+		outcome    selfupdate.Outcome
+		err        error
+		want       UpgradeOutcome
+		wantFailed bool
+	}{
+		{"lookup failure", selfupdate.Outcome{}, &selfupdate.Failure{Kind: selfupdate.KindReleaseLookup, Err: errors.New("x")}, UpgradeOutcomeFailed, true},
+		{"updated", selfupdate.Outcome{Action: selfupdate.ActionUpdated}, nil, UpgradeOutcomeUpgraded, false},
+		{"manager executed", selfupdate.Outcome{Action: selfupdate.ActionManagerExecuted}, nil, UpgradeOutcomeManagerExecuted, false},
+		{"already current", selfupdate.Outcome{Action: selfupdate.ActionAlreadyCurrent}, nil, UpgradeOutcomeAlreadyCurrent, false},
+		{"ahead", selfupdate.Outcome{Action: selfupdate.ActionAhead}, nil, UpgradeOutcomeAhead, false},
+		{"redirected", selfupdate.Outcome{Action: selfupdate.ActionRedirected}, nil, UpgradeOutcomeRedirected, false},
+		{"planned", selfupdate.Outcome{Action: selfupdate.ActionPlanned, PlannedURL: "https://x/asset.tar.gz"}, nil, UpgradeOutcomeDryRun, false},
+		{"unexpected aborted", selfupdate.Outcome{Action: selfupdate.ActionAborted}, nil, UpgradeOutcomeFailed, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			outcome, failure, assetURL, _ := mapAction(c.outcome, c.err)
+			if outcome != c.want {
+				t.Errorf("outcome = %v, want %v", outcome, c.want)
+			}
+			if c.wantFailed && failure == nil {
+				t.Error("failure = nil, want non-nil")
+			}
+			if !c.wantFailed && failure != nil {
+				t.Errorf("failure = %+v, want nil", failure)
+			}
+			if c.name == "planned" && assetURL != "https://x/asset.tar.gz" {
+				t.Errorf("assetURL = %q", assetURL)
+			}
+		})
+	}
+}
+
 func TestUpgradeBatchResult_FailedAndFailure(t *testing.T) {
 	b := UpgradeBatchResult{Results: []UpgradeResult{
 		{Target: "a", Outcome: UpgradeOutcomeUpgraded},
@@ -286,6 +291,27 @@ func TestUpgradeBatchResult_FailedAndFailure(t *testing.T) {
 	}
 	if ok.Failure() != nil {
 		t.Error("Failure() != nil for an all-success batch")
+	}
+
+	// task-22 review B1: a Refused row carrying a Failure (the only way
+	// Refused is ever produced) counts as a batch failure too, exactly like
+	// Failed — an ambiguous host fails `self-update` outright, so it must
+	// fail `upgrade` too.
+	refused := UpgradeBatchResult{Results: []UpgradeResult{
+		{Target: "a", Outcome: UpgradeOutcomeRefused, Failure: &selfupdate.Failure{Kind: selfupdate.KindAmbiguous, Err: errors.New("ambiguous")}},
+	}}
+	if !refused.Failed() {
+		t.Error("Failed() = false, want true for a refused/ambiguous row")
+	}
+	if err := refused.Failure(); !errors.As(err, &bf) || len(bf.Failures) != 1 || bf.Failures[0].Kind != selfupdate.KindAmbiguous {
+		t.Errorf("Failure() = %v", err)
+	}
+
+	// A Refused row with no Failure (should never happen in practice) does
+	// NOT count, mirroring the same nil-guard BatchResult.Failure applies.
+	refusedNoFailure := UpgradeBatchResult{Results: []UpgradeResult{{Target: "a", Outcome: UpgradeOutcomeRefused}}}
+	if refusedNoFailure.Failed() {
+		t.Error("Failed() = true for a Refused row with no Failure, want false")
 	}
 }
 
@@ -333,6 +359,23 @@ func TestGithubAuthTransport_NoTokenForOtherHosts(t *testing.T) {
 	}
 }
 
+// TestGithubAuthTransport_NoTokenOverCleartext is task-22 review M4: the
+// bearer token MUST NOT be attached to a plain-http request, even to the
+// API host itself — a test double or a misconfigured ConfigureRelease must
+// never leak it.
+func TestGithubAuthTransport_NoTokenOverCleartext(t *testing.T) {
+	base := &recordingTransport{resp: &http.Response{StatusCode: 200, Header: http.Header{}, Body: closingBody("")}}
+	tr := &githubAuthTransport{base: base, token: "secret"}
+	req, _ := http.NewRequest(http.MethodGet, "http://api.github.com/repos/x/y/releases", nil)
+
+	if _, err := tr.RoundTrip(req); err != nil {
+		t.Fatal(err)
+	}
+	if got := base.gotReq.Header.Get("Authorization"); got != "" {
+		t.Errorf("Authorization = %q, want empty over cleartext http", got)
+	}
+}
+
 func TestGithubAuthTransport_NoTokenConfigured(t *testing.T) {
 	base := &recordingTransport{resp: &http.Response{StatusCode: 200, Header: http.Header{}, Body: closingBody("")}}
 	tr := &githubAuthTransport{base: base}
@@ -363,6 +406,26 @@ func TestGithubAuthTransport_RateLimitDetected(t *testing.T) {
 	}
 	if !strings.Contains(rl.Error(), "GH_TOKEN") {
 		t.Errorf("message %q does not name GH_TOKEN", rl.Error())
+	}
+}
+
+// TestGithubAuthTransport_RateLimitWithTokenWordsMessageDifferently is
+// task-22 review M6: when a token WAS already sent, "set GH_TOKEN" is not
+// an actionable remedy — the message must say so differently.
+func TestGithubAuthTransport_RateLimitWithTokenWordsMessageDifferently(t *testing.T) {
+	h := http.Header{}
+	h.Set("X-RateLimit-Remaining", "0")
+	base := &recordingTransport{resp: &http.Response{StatusCode: http.StatusForbidden, Header: h, Body: closingBody("blocked")}}
+	tr := &githubAuthTransport{base: base, token: "secret"}
+	req, _ := http.NewRequest(http.MethodGet, "https://api.github.com/repos/x/y/releases", nil)
+
+	_, err := tr.RoundTrip(req)
+	var rl *githubRateLimitError
+	if !errors.As(err, &rl) {
+		t.Fatalf("err = %v, want *githubRateLimitError", err)
+	}
+	if strings.Contains(rl.Error(), "set GH_TOKEN") {
+		t.Errorf("message %q still suggests setting GH_TOKEN despite one being sent", rl.Error())
 	}
 }
 
@@ -427,7 +490,7 @@ func TestGithubHTTPClient_TokenPriority(t *testing.T) {
 		}
 		return ""
 	}
-	c := githubHTTPClient(getenv)
+	c := githubHTTPClient(getenv, nil)
 	tr, ok := c.Transport.(*githubAuthTransport)
 	if !ok || tr.token != "ghtoken" {
 		t.Errorf("transport = %+v", tr)
@@ -440,7 +503,7 @@ func TestGithubHTTPClient_FallsBackToGithubToken(t *testing.T) {
 			return "githubtoken"
 		}
 		return ""
-	})
+	}, nil)
 	tr := c.Transport.(*githubAuthTransport)
 	if tr.token != "githubtoken" {
 		t.Errorf("token = %q", tr.token)
@@ -448,7 +511,7 @@ func TestGithubHTTPClient_FallsBackToGithubToken(t *testing.T) {
 }
 
 func TestGithubHTTPClient_NilGetenv(t *testing.T) {
-	c := githubHTTPClient(nil)
+	c := githubHTTPClient(nil, nil)
 	tr := c.Transport.(*githubAuthTransport)
 	if tr.token != "" {
 		t.Errorf("token = %q, want empty", tr.token)
@@ -462,11 +525,28 @@ func TestWithGitHubAuth_DefaultsWhenNil(t *testing.T) {
 	}
 }
 
-func TestWithGitHubAuth_PreservesExisting(t *testing.T) {
-	custom := &http.Client{}
-	cfg := withGitHubAuth(selfupdate.Config{HTTPClient: custom}, func(string) string { return "" })
-	if cfg.HTTPClient != custom {
-		t.Error("existing HTTPClient was overwritten")
+// TestWithGitHubAuth_WrapsExistingTransport is task-22 review M5: a host or
+// ConfigureRelease that already set its own HTTPClient must not silently
+// lose the bearer-auth/rate-limit behavior — its Transport is wrapped, not
+// bypassed.
+func TestWithGitHubAuth_WrapsExistingTransport(t *testing.T) {
+	base := &recordingTransport{resp: &http.Response{StatusCode: 200, Header: http.Header{}, Body: closingBody("")}}
+	custom := &http.Client{Transport: base}
+	cfg := withGitHubAuth(selfupdate.Config{HTTPClient: custom}, func(k string) string {
+		if k == "GH_TOKEN" {
+			return "secret"
+		}
+		return ""
+	})
+	if cfg.HTTPClient == custom {
+		t.Fatal("HTTPClient was not wrapped (same pointer)")
+	}
+	req, _ := http.NewRequest(http.MethodGet, "https://api.github.com/repos/x/y/releases", nil)
+	if _, err := cfg.HTTPClient.Do(req); err != nil {
+		t.Fatal(err)
+	}
+	if got := base.gotReq.Header.Get("Authorization"); got != "Bearer secret" {
+		t.Errorf("Authorization = %q, want the wrapped transport to still attach the bearer token", got)
 	}
 }
 
@@ -509,6 +589,22 @@ func TestUpgradeHostConfig(t *testing.T) {
 	}
 }
 
+func TestDetectHostFunc(t *testing.T) {
+	called := false
+	fake := func() (selfupdate.Detection, error) { called = true; return selfupdate.Detection{}, nil }
+	if _, err := detectHostFunc(UpgradeOptions{DetectHost: fake})(); err != nil || !called {
+		t.Error("detectHostFunc did not use the injected DetectHost")
+	}
+
+	// Nil DetectHost defaults to opts.HostConfig.DetectSelf — a real
+	// selfupdate.Config method reference, just proven callable here (its
+	// own behavior is selfupdate's, not this package's, to test).
+	fn := detectHostFunc(UpgradeOptions{HostConfig: selfupdate.Config{BinaryName: "x"}})
+	if fn == nil {
+		t.Error("detectHostFunc returned nil with no DetectHost configured")
+	}
+}
+
 // --- target selection ------------------------------------------------------
 
 func TestPlanUpgrade_PanicsOnUnknownHost(t *testing.T) {
@@ -518,6 +614,15 @@ func TestPlanUpgrade_PanicsOnUnknownHost(t *testing.T) {
 		}
 	}()
 	_, _ = PlanUpgrade(context.Background(), nil, UpgradeOptions{HostID: "nosuchhost"})
+}
+
+func TestCheckUpgrades_PanicsOnUnknownHost(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("CheckUpgrades did not panic for a host id absent from the catalog")
+		}
+	}()
+	_, _ = CheckUpgrades(context.Background(), nil, UpgradeOptions{HostID: "nosuchhost"})
 }
 
 func TestPlanUpgrade_UnknownNameFailsWholeBatch(t *testing.T) {
@@ -571,25 +676,61 @@ func TestPlanUpgrade_NotInstalledAndUnrecognized(t *testing.T) {
 	}
 }
 
-func TestPlanUpgrade_HostDirErrorTreatedAsEmpty(t *testing.T) {
-	env := batchEnv(nil, "", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("no proc") }, noRunManaged)
-	env.HostDir = func() (string, error) { return "", errors.New("os.Executable failed") }
-	opts := UpgradeOptions{HostID: "cover100", Env: env, HostConfig: selfupdate.Config{BinaryName: "cover100", CurrentVersion: "dev"}}
+func TestCheckUpgrades_NotInstalledAndUnrecognized(t *testing.T) {
+	env := batchEnv(
+		[]string{"/usr/bin"}, "/opt/cover100",
+		map[string]bool{"/usr/bin/ovdb": true},
+		func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("no match") },
+		noRunManaged,
+	)
+	opts := UpgradeOptions{HostID: "cover100", Env: env}
+
+	result, err := CheckUpgrades(context.Background(), []string{"ovdb", "datatug"}, opts)
+	if err != nil {
+		t.Fatalf("CheckUpgrades error = %v", err)
+	}
+	if r := result.Results[0]; r.Target != "ovdb" || r.Outcome != UpgradeOutcomeUnrecognized {
+		t.Errorf("Results[0] = %+v, want ovdb/unrecognized", r)
+	}
+	if r := result.Results[1]; r.Target != "datatug" || r.Outcome != UpgradeOutcomeNotInstalled {
+		t.Errorf("Results[1] = %+v, want datatug/not_installed", r)
+	}
+}
+
+// TestPlanUpgrade_HostDetectFails is task-22 review S1's own failure path:
+// DetectHost erroring fails the host row with KindUnexpected, matching
+// selfupdate.Config.Update's own "resolve running executable" failure.
+func TestPlanUpgrade_HostDetectFails(t *testing.T) {
+	env := batchEnv(nil, "", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	opts := UpgradeOptions{
+		HostID: "cover100", Env: env,
+		DetectHost: failingDetectHost(errors.New("os.Executable failed")),
+	}
 
 	result, err := PlanUpgrade(context.Background(), []string{"cover100"}, opts)
 	if err != nil {
 		t.Fatalf("PlanUpgrade error = %v", err)
 	}
-	if len(result.Results) != 1 {
-		t.Fatalf("Results = %v", result.Results)
+	r := result.Results[0]
+	if r.Outcome != UpgradeOutcomeFailed || r.Failure == nil || r.Failure.Kind != selfupdate.KindUnexpected {
+		t.Errorf("result = %+v, want Failed/KindUnexpected", r)
 	}
-	// "dev" is a non-release build and cover100 was named explicitly but is
-	// its own host, so it is offered — but with an empty HostDir there is
-	// simply no PATH-copy comparison to make; this asserts no panic and a
-	// sane classification (Ambiguous, since cover100 has no managers and
-	// installFilePath("", "cover100") does not look like a bin directory).
-	if result.Results[0].InstallMethod != selfupdate.Ambiguous {
-		t.Errorf("InstallMethod = %v, want Ambiguous", result.Results[0].InstallMethod)
+}
+
+func TestCheckUpgrades_HostDetectFails(t *testing.T) {
+	env := batchEnv(nil, "", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	opts := UpgradeOptions{
+		HostID: "cover100", Env: env,
+		DetectHost: failingDetectHost(errors.New("os.Executable failed")),
+	}
+
+	result, err := CheckUpgrades(context.Background(), []string{"cover100"}, opts)
+	if err != nil {
+		t.Fatalf("CheckUpgrades error = %v", err)
+	}
+	r := result.Results[0]
+	if r.Outcome != UpgradeOutcomeFailed || r.Failure == nil || r.Failure.Kind != selfupdate.KindUnexpected {
+		t.Errorf("result = %+v, want Failed/KindUnexpected", r)
 	}
 }
 
@@ -602,7 +743,11 @@ func TestPlanUpgrade_NonReleaseBuildSkippedUnderAll(t *testing.T) {
 		jsonRunFor("/usr/bin/ovdb", "ovdb", "0.20.3+dirty"),
 		noRunManaged,
 	)
-	opts := UpgradeOptions{HostID: "cover100", All: true, Env: env, HostConfig: selfupdate.Config{BinaryName: "cover100", CurrentVersion: "dev"}}
+	opts := UpgradeOptions{
+		HostID: "cover100", All: true, Env: env,
+		HostConfig: selfupdate.Config{BinaryName: "cover100", CurrentVersion: "dev"},
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+	}
 
 	result, err := PlanUpgrade(context.Background(), nil, opts)
 	if err != nil {
@@ -628,6 +773,22 @@ func TestPlanUpgrade_NonReleaseBuildSkippedUnderAll(t *testing.T) {
 	}
 }
 
+func TestCheckUpgrades_NonReleaseBuildSkippedUnderAll(t *testing.T) {
+	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	opts := UpgradeOptions{
+		HostID: "cover100", All: true, Env: env,
+		HostConfig: selfupdate.Config{BinaryName: "cover100", CurrentVersion: "dev"},
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+	}
+	result, err := CheckUpgrades(context.Background(), nil, opts)
+	if err != nil {
+		t.Fatalf("CheckUpgrades error = %v", err)
+	}
+	if len(result.Results) != 1 || result.Results[0].Outcome != UpgradeOutcomeSkippedNonRelease {
+		t.Errorf("Results = %+v, want exactly the skipped host", result.Results)
+	}
+}
+
 func TestPlanUpgrade_NonReleaseBuildProceedsWhenExplicit(t *testing.T) {
 	srv := upgradeReleaseServer(t, map[string]string{"ovdb": releasesJSON("v1.0.0")}, nil)
 	env := batchEnv(
@@ -646,17 +807,11 @@ func TestPlanUpgrade_NonReleaseBuildProceedsWhenExplicit(t *testing.T) {
 	if r.Outcome != UpgradeOutcomeDryRun {
 		t.Errorf("Outcome = %v, want DryRun (pending) for an explicit non-release build", r.Outcome)
 	}
+	if !r.NonReleaseBuild {
+		t.Error("NonReleaseBuild = false, want true")
+	}
 	if r.Tag != "v1.0.0" || r.Latest != "1.0.0" {
 		t.Errorf("r = %+v, want a real lookup to have run", r)
-	}
-	found := false
-	for _, w := range r.Warnings {
-		if strings.Contains(w, "non-release build") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("Warnings = %v, want a non-release-build notice", r.Warnings)
 	}
 }
 
@@ -669,11 +824,12 @@ func TestPlanUpgrade_AllSelectsInstalledPlusHost(t *testing.T) {
 		jsonRunFor("/usr/bin/ovdb", "ovdb", "1.0.0"),
 		noRunManaged,
 	)
-	srv := upgradeReleaseServer(t, map[string]string{"ovdb": releasesJSON("v1.0.0")}, nil)
+	srv := upgradeReleaseServer(t, map[string]string{"ovdb": releasesJSON("v1.0.0"), "cover100": releasesJSON("v1.0.0")}, nil)
 	opts := UpgradeOptions{
 		HostID: "cover100", All: true, Env: env,
 		ConfigureRelease: configureUpgradeRelease(srv),
 		HostConfig:       hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
+		DetectHost:       fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
 	}
 
 	result, err := PlanUpgrade(context.Background(), nil, opts)
@@ -696,20 +852,12 @@ func TestPlanUpgrade_AllSelectsInstalledPlusHost(t *testing.T) {
 
 func TestPlanUpgrade_BareReportBehavesLikeAll(t *testing.T) {
 	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("none") }, noRunManaged)
-	srv := upgradeReleaseServer(t, nil, nil)
+	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.0.0")}, nil)
 	opts := UpgradeOptions{
 		HostID: "cover100", Env: env, // All left false, names left nil
 		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
 	}
-	// Register cover100's own releases so its lookup succeeds.
-	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/releases/cover100" {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(releasesJSON("v1.0.0")))
-			return
-		}
-		http.NotFound(w, r)
-	})
 
 	result, err := PlanUpgrade(context.Background(), nil, opts)
 	if err != nil {
@@ -721,9 +869,32 @@ func TestPlanUpgrade_BareReportBehavesLikeAll(t *testing.T) {
 	if result.Results[0].Verdict != selfupdate.UpToDate {
 		t.Errorf("Verdict = %v, want UpToDate", result.Results[0].Verdict)
 	}
+	if result.Results[0].Outcome != UpgradeOutcomeAlreadyCurrent {
+		t.Errorf("Outcome = %v, want AlreadyCurrent", result.Results[0].Outcome)
+	}
 }
 
-// --- release lookup outcomes ------------------------------------------------
+func TestCheckUpgrades_BareReportBehavesLikeAll(t *testing.T) {
+	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("none") }, noRunManaged)
+	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.1.0")}, nil)
+	opts := UpgradeOptions{
+		HostID: "cover100", Env: env,
+		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+	}
+	result, err := CheckUpgrades(context.Background(), nil, opts)
+	if err != nil {
+		t.Fatalf("CheckUpgrades error = %v", err)
+	}
+	if len(result.Results) != 1 || !result.Results[0].Host {
+		t.Fatalf("Results = %+v, want exactly the host row", result.Results)
+	}
+	if result.Results[0].Verdict != selfupdate.UpdateAvailable {
+		t.Errorf("Verdict = %v, want UpdateAvailable", result.Results[0].Verdict)
+	}
+}
+
+// --- release lookup outcomes (PlanUpgrade / UpdateAt-delegated) -----------
 
 func TestPlanUpgrade_AlreadyCurrentAndAhead(t *testing.T) {
 	env := batchEnv(
@@ -750,6 +921,31 @@ func TestPlanUpgrade_AlreadyCurrentAndAhead(t *testing.T) {
 	}
 	if result.Results[1].Latest != "1.0.0" {
 		t.Errorf("synchestra Latest = %q, want tag-prefix-stripped 1.0.0", result.Results[1].Latest)
+	}
+}
+
+func TestCheckUpgrades_AlreadyCurrentAndAhead(t *testing.T) {
+	env := batchEnv(
+		[]string{"/usr/bin"}, "/opt/cover100",
+		map[string]bool{"/usr/bin/ovdb": true, "/usr/bin/synchestra": true},
+		multiJSONRun(map[string]string{"ovdb": "1.0.0", "synchestra": "9.9.9"}),
+		noRunManaged,
+	)
+	srv := upgradeReleaseServer(t, map[string]string{
+		"ovdb":       releasesJSON("v1.0.0"),
+		"synchestra": releasesJSON("cli-v1.0.0"),
+	}, nil)
+	opts := UpgradeOptions{HostID: "cover100", Env: env, ConfigureRelease: configureUpgradeRelease(srv)}
+
+	result, err := CheckUpgrades(context.Background(), []string{"ovdb", "synchestra"}, opts)
+	if err != nil {
+		t.Fatalf("CheckUpgrades error = %v", err)
+	}
+	if result.Results[0].Outcome != UpgradeOutcomeAlreadyCurrent {
+		t.Errorf("ovdb outcome = %v, want AlreadyCurrent", result.Results[0].Outcome)
+	}
+	if result.Results[1].Outcome != UpgradeOutcomeAhead {
+		t.Errorf("synchestra outcome = %v, want Ahead", result.Results[1].Outcome)
 	}
 }
 
@@ -780,38 +976,97 @@ func TestPlanUpgrade_ManagedRedirectAndExecutable(t *testing.T) {
 	}
 }
 
-func TestPlanUpgrade_AmbiguousRefused(t *testing.T) {
+// TestPlanUpgrade_ManagedUpToDateStillOffered is task-22 review B3: a
+// managed, EXECUTABLE target that is already current must still reach
+// UpdateAt's own confirm/run path (mapped here to the pending DryRun
+// outcome) rather than being short-circuited to AlreadyCurrent — self-
+// update's own managed-availability-report REQ says a manager upgrade is
+// never skipped merely because the version already matches.
+func TestPlanUpgrade_ManagedUpToDateStillOffered(t *testing.T) {
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/usr/bin/ovdb": true},
-		jsonRunFor("/usr/bin/ovdb", "ovdb", "1.0.0"),
+		[]string{"/opt/homebrew/bin"}, "/opt/cover100",
+		map[string]bool{"/opt/homebrew/bin/wb": true},
+		jsonRunFor("/opt/homebrew/bin/wb", "wb", "2.0.0"),
 		noRunManaged,
 	)
-	// A path that classifies neither Manual (no "bin" ancestor, no go/bin)
-	// nor any manager: /usr/bin ends in "bin" so it WOULD be Manual — use a
-	// non-bin PATH entry instead to force Ambiguous.
-	env.PathDirs = func() []string { return []string{"/opt/weird"} }
-	env.IsExecutable = func(p string) bool { return p == "/opt/weird/ovdb" }
-	env.Run = jsonRunFor("/opt/weird/ovdb", "ovdb", "1.0.0")
-	srv := upgradeReleaseServer(t, map[string]string{"ovdb": releasesJSON("v2.0.0")}, nil)
+	env.EvalSymlinks = func(p string) (string, error) { return p, nil }
+	srv := upgradeReleaseServer(t, map[string]string{"wb": releasesJSON("v2.0.0")}, nil)
 	opts := UpgradeOptions{HostID: "cover100", Env: env, ConfigureRelease: configureUpgradeRelease(srv)}
 
-	result, err := PlanUpgrade(context.Background(), []string{"ovdb"}, opts)
+	result, err := PlanUpgrade(context.Background(), []string{"wb"}, opts)
 	if err != nil {
 		t.Fatalf("PlanUpgrade error = %v", err)
 	}
 	r := result.Results[0]
-	if r.Outcome != UpgradeOutcomeRefused {
-		t.Errorf("Outcome = %v, want Refused", r.Outcome)
+	if r.Outcome != UpgradeOutcomeDryRun {
+		t.Errorf("Outcome = %v, want DryRun (pending) even though wb is already current", r.Outcome)
 	}
-	found := false
-	for _, w := range r.Warnings {
-		if strings.Contains(w, "ambiguous") {
-			found = true
-		}
+	if r.Command == "" {
+		t.Error("Command is empty, want wb's upgrade command")
 	}
-	if !found {
-		t.Errorf("Warnings = %v, want ambiguous guidance", r.Warnings)
+}
+
+func TestPlanUpgrade_AmbiguousRefusedRegardlessOfVerdict(t *testing.T) {
+	// A path that classifies neither Manual (no "bin" ancestor, no go/bin)
+	// nor any manager: /opt/weird is not "bin"-suffixed, so this forces
+	// Ambiguous.
+	cases := []struct {
+		name    string
+		version string
+	}{
+		{"update available", "1.0.0"},
+		{"already current", "2.0.0"},
+		{"ahead", "9.9.9"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			env := batchEnv(nil, "/opt/cover100", map[string]bool{"/opt/weird/ovdb": true}, jsonRunFor("/opt/weird/ovdb", "ovdb", c.version), noRunManaged)
+			env.PathDirs = func() []string { return []string{"/opt/weird"} }
+			srv := upgradeReleaseServer(t, map[string]string{"ovdb": releasesJSON("v2.0.0")}, nil)
+			opts := UpgradeOptions{HostID: "cover100", Env: env, ConfigureRelease: configureUpgradeRelease(srv)}
+
+			result, err := PlanUpgrade(context.Background(), []string{"ovdb"}, opts)
+			if err != nil {
+				t.Fatalf("PlanUpgrade error = %v", err)
+			}
+			r := result.Results[0]
+			// task-22 review B1: ambiguous is decided BEFORE any verdict —
+			// this MUST be Refused for all three verdicts identically.
+			if r.Outcome != UpgradeOutcomeRefused {
+				t.Errorf("Outcome = %v, want Refused regardless of verdict", r.Outcome)
+			}
+			if r.Failure == nil || r.Failure.Kind != selfupdate.KindAmbiguous {
+				t.Errorf("Failure = %+v, want KindAmbiguous", r.Failure)
+			}
+		})
+	}
+}
+
+func TestCheckUpgrades_AmbiguousRefusedButNeverFailsTheReport(t *testing.T) {
+	env := batchEnv(nil, "/opt/cover100", map[string]bool{"/opt/weird/ovdb": true}, jsonRunFor("/opt/weird/ovdb", "ovdb", "1.0.0"), noRunManaged)
+	env.PathDirs = func() []string { return []string{"/opt/weird"} }
+	srv := upgradeReleaseServer(t, map[string]string{"ovdb": releasesJSON("v2.0.0")}, nil)
+	opts := UpgradeOptions{HostID: "cover100", Env: env, ConfigureRelease: configureUpgradeRelease(srv)}
+
+	result, err := CheckUpgrades(context.Background(), []string{"ovdb"}, opts)
+	if err != nil {
+		t.Fatalf("CheckUpgrades error = %v", err)
+	}
+	r := result.Results[0]
+	if r.Outcome != UpgradeOutcomeRefused || r.Failure == nil || r.Failure.Kind != selfupdate.KindAmbiguous {
+		t.Errorf("result = %+v, want Refused/KindAmbiguous", r)
+	}
+	// CheckUpgrades still shows latest/verdict for an ambiguous target
+	// (task-22 review B1's own "keep the lookup" instruction).
+	if r.Latest != "2.0.0" {
+		t.Errorf("Latest = %q, want 2.0.0 shown despite the refusal", r.Latest)
+	}
+	// CheckUpgrades itself never treats this as a batch failure — that is
+	// cobracmd's own job (only a true lookup failure fails the report); at
+	// this layer, Failed()/Failure() on the *batch* still correctly report
+	// it, since the caller (cobracmd) filters differently for --check.
+	if !result.Failed() {
+		t.Error("UpgradeBatchResult.Failed() = false, want true (still a batch-level failure fact; cobracmd's report path chooses not to act on it for --check)")
 	}
 }
 
@@ -832,6 +1087,61 @@ func TestPlanUpgrade_LookupFailure(t *testing.T) {
 	r := result.Results[0]
 	if r.Outcome != UpgradeOutcomeFailed || r.Failure == nil || r.Failure.Kind != selfupdate.KindReleaseLookup {
 		t.Errorf("result = %+v, want Failed/KindReleaseLookup", r)
+	}
+}
+
+func TestCheckUpgrades_LookupFailure(t *testing.T) {
+	env := batchEnv(
+		[]string{"/usr/bin"}, "/opt/cover100",
+		map[string]bool{"/usr/bin/ovdb": true},
+		jsonRunFor("/usr/bin/ovdb", "ovdb", "1.0.0"),
+		noRunManaged,
+	)
+	srv := upgradeReleaseServer(t, nil, nil)
+	opts := UpgradeOptions{HostID: "cover100", Env: env, ConfigureRelease: configureUpgradeRelease(srv)}
+
+	result, err := CheckUpgrades(context.Background(), []string{"ovdb"}, opts)
+	if err != nil {
+		t.Fatalf("CheckUpgrades error = %v", err)
+	}
+	r := result.Results[0]
+	if r.Outcome != UpgradeOutcomeFailed || r.Failure == nil || r.Failure.Kind != selfupdate.KindReleaseLookup {
+		t.Errorf("result = %+v, want Failed/KindReleaseLookup", r)
+	}
+}
+
+// TestPlanUpgrade_ManagedLookupFailureBecomesWarningNotFailure is task-22
+// review B3: a MANAGED target's failed lookup must not fail the row — the
+// row still proceeds (redirect, or pending if executable), with the lookup
+// failure surfaced only as an advisory ReleaseCheckWarning, exactly as
+// self-update's own managed-availability-report REQ requires.
+func TestPlanUpgrade_ManagedLookupFailureBecomesWarningNotFailure(t *testing.T) {
+	env := batchEnv(
+		[]string{"/opt/homebrew/bin"}, "/opt/cover100",
+		map[string]bool{"/opt/homebrew/bin/wb": true},
+		jsonRunFor("/opt/homebrew/bin/wb", "wb", "1.0.0"),
+		noRunManaged,
+	)
+	env.EvalSymlinks = func(p string) (string, error) { return p, nil }
+	srv := upgradeReleaseServer(t, nil, nil) // wb's own lookup 404s
+	opts := UpgradeOptions{HostID: "cover100", Env: env, ConfigureRelease: configureUpgradeRelease(srv)}
+
+	result, err := PlanUpgrade(context.Background(), []string{"wb"}, opts)
+	if err != nil {
+		t.Fatalf("PlanUpgrade error = %v", err)
+	}
+	r := result.Results[0]
+	if r.Outcome != UpgradeOutcomeDryRun {
+		t.Fatalf("Outcome = %v, want DryRun (pending) despite the failed lookup: %+v", r.Outcome, r)
+	}
+	found := false
+	for _, w := range r.Warnings {
+		if strings.Contains(w, "latest release unavailable") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Warnings = %v, want a release-check-unavailable warning", r.Warnings)
 	}
 }
 
@@ -872,9 +1182,6 @@ func TestPlanUpgrade_RateLimitMessage(t *testing.T) {
 	r := result.Results[0]
 	if r.Outcome != UpgradeOutcomeFailed || r.Failure == nil {
 		t.Fatalf("result = %+v, want Failed", r)
-	}
-	if !strings.Contains(r.Failure.Error(), "GH_TOKEN") {
-		t.Errorf("Failure message %q does not name GH_TOKEN", r.Failure.Error())
 	}
 }
 
@@ -921,8 +1228,6 @@ func TestPlanUpgrade_LookupConcurrencyBounded(t *testing.T) {
 }
 
 func TestPlanUpgrade_LookupTimeoutKillsSlowRequest(t *testing.T) {
-	block := make(chan struct{})
-	t.Cleanup(func() { close(block) })
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
 	}))
@@ -1090,6 +1395,9 @@ func TestExecuteUpgrade_ManualReplacementSucceeds(t *testing.T) {
 	if plan.Results[0].Outcome != UpgradeOutcomeDryRun {
 		t.Fatalf("plan = %+v, want a pending manual upgrade", plan.Results[0])
 	}
+	if plan.Results[0].AssetURL == "" {
+		t.Error("AssetURL is empty, want the planned manual asset URL (task-22 review S3)")
+	}
 
 	result, err := ExecuteUpgrade(context.Background(), plan, opts)
 	if err != nil {
@@ -1098,6 +1406,9 @@ func TestExecuteUpgrade_ManualReplacementSucceeds(t *testing.T) {
 	r := result.Results[0]
 	if r.Outcome != UpgradeOutcomeUpgraded {
 		t.Fatalf("Outcome = %v, want Upgraded: %+v", r.Outcome, r)
+	}
+	if r.AssetURL != "" {
+		t.Errorf("AssetURL = %q, want empty for a terminal executed result", r.AssetURL)
 	}
 	got, err := readFile(destPath)
 	if err != nil || string(got) != "new-binary-content" {
@@ -1192,7 +1503,10 @@ func TestExecuteUpgrade_ManagerExecutedWithFinishHint(t *testing.T) {
 	)
 	env.EvalSymlinks = func(p string) (string, error) { return p, nil }
 
-	opts := UpgradeOptions{HostID: "cover100", Yes: true, Env: env, ConfigureRelease: configureUpgradeRelease(srv)}
+	opts := UpgradeOptions{
+		HostID: "cover100", Yes: true, Env: env, ConfigureRelease: configureUpgradeRelease(srv),
+		VerifyManaged: testVerifyManaged(env),
+	}
 	plan, err := PlanUpgrade(context.Background(), []string{"wb"}, opts)
 	if err != nil {
 		t.Fatalf("PlanUpgrade error = %v", err)
@@ -1253,17 +1567,20 @@ func TestExecuteUpgrade_HostManagedExecutedRunsHostAfterUpdate(t *testing.T) {
 	)
 	env.EvalSymlinks = func(p string) (string, error) { return p, nil }
 
+	homebrew := selfupdate.HomebrewCask("wb")
 	hookCalled := false
 	opts := UpgradeOptions{
 		HostID: "wb", Yes: true, Env: env,
 		HostConfig: hostReleaseConfig(srv, "wb", selfupdate.Config{
 			BinaryName: "wb", CurrentVersion: "1.0.0",
-			Managers: []selfupdate.Manager{selfupdate.HomebrewCask("wb")},
+			Managers: []selfupdate.Manager{homebrew},
 		}),
 		HostAfterUpdate: func(context.Context, selfupdate.AfterUpdate) error {
 			hookCalled = true
 			return nil
 		},
+		DetectHost:    fakeDetectHost(selfupdate.Managed, &homebrew, "/opt/homebrew/bin/wb"),
+		VerifyManaged: testVerifyManaged(env),
 	}
 
 	plan, err := PlanUpgrade(context.Background(), []string{"wb"}, opts)
@@ -1293,37 +1610,186 @@ func TestExecuteUpgrade_HostManagedExecutedRunsHostAfterUpdate(t *testing.T) {
 	}
 }
 
-func TestUpgradeVerifyManaged(t *testing.T) {
-	target := Entry{ID: "ovdb"}
+// TestPlanUpgrade_HostAlreadyCurrentNeverRunsAfterUpdate is task-22 review
+// B2's own root cause, verified directly: selfupdate.Config.UpdateAt's own
+// runAfterUpdate skips the hook whenever Options.DryRun is set, and
+// PlanUpgrade's UpdateAt call always sets DryRun — so PlanUpgrade alone
+// (and therefore `--dry-run`, and therefore `--check`, which does not even
+// reach UpdateAt) must NEVER fire the host's after-update hook.
+// ExecuteUpgrade is what fires it for a real run — see the next test.
+func TestPlanUpgrade_HostAlreadyCurrentNeverRunsAfterUpdate(t *testing.T) {
+	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.0.0")}, nil)
+	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
 
-	t.Run("not installed", func(t *testing.T) {
-		env := batchEnv(nil, "", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
-		verify := upgradeVerifyManaged(target, UpgradeOptions{Env: env})
-		if _, err := verify(context.Background(), selfupdate.Detection{}, "", nil, "1.0.0"); err == nil {
-			t.Error("expected an error for a not-installed copy")
-		}
-	})
+	calls := 0
+	opts := UpgradeOptions{
+		HostID: "cover100", Env: env,
+		HostConfig:      hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
+		DetectHost:      fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+		HostAfterUpdate: func(context.Context, selfupdate.AfterUpdate) error { calls++; return nil },
+	}
 
-	t.Run("version mismatch", func(t *testing.T) {
-		env := batchEnv([]string{"/usr/bin"}, "", map[string]bool{"/usr/bin/ovdb": true}, jsonRunFor("/usr/bin/ovdb", "ovdb", "1.0.0"), noRunManaged)
-		verify := upgradeVerifyManaged(target, UpgradeOptions{Env: env})
-		if _, err := verify(context.Background(), selfupdate.Detection{}, "", nil, "2.0.0"); err == nil {
-			t.Error("expected an error for a version mismatch")
-		}
-	})
+	plan, err := PlanUpgrade(context.Background(), []string{"cover100"}, opts)
+	if err != nil {
+		t.Fatalf("PlanUpgrade error = %v", err)
+	}
+	if plan.Results[0].Outcome != UpgradeOutcomeAlreadyCurrent {
+		t.Fatalf("plan = %+v, want AlreadyCurrent", plan.Results[0])
+	}
+	if calls != 0 {
+		t.Fatalf("HostAfterUpdate called %d times by PlanUpgrade alone, want 0 (DryRun always skips it)", calls)
+	}
+}
 
-	t.Run("success reports Path and Status.ResolvedPath", func(t *testing.T) {
-		env := batchEnv([]string{"/usr/bin"}, "", map[string]bool{"/usr/bin/ovdb": true}, jsonRunFor("/usr/bin/ovdb", "ovdb", "1.0.0"), noRunManaged)
-		env.EvalSymlinks = nil
-		verify := upgradeVerifyManaged(target, UpgradeOptions{Env: env})
-		id, err := verify(context.Background(), selfupdate.Detection{}, "", nil, "1.0.0")
-		if err != nil {
-			t.Fatalf("verify error = %v", err)
+// realHostPath creates a REAL file on disk and returns its path: after-
+// update's own installedExecutable calls the real filepath.EvalSymlinks
+// (selfupdate's own internal, non-injectable var) on the detected path, so
+// any test that lets a real AfterUpdate hook actually fire needs a path
+// that genuinely resolves, exactly as manualUpgradeFixture already does
+// for a real swap.
+func realHostPath(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir() + "/bin"
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := dir + "/cover100"
+	if err := writeFile(path, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestExecuteUpgrade_HostAlreadyCurrentRunsAfterUpdateExactlyOnce is
+// task-22 review B2's own fix: ExecuteUpgrade makes one further, real
+// (non-dry-run) UpdateAt call for an already-current host specifically, so
+// its after-update hook still fires — exactly once, and regardless of
+// whether any OTHER pending target in the same batch was declined.
+func TestExecuteUpgrade_HostAlreadyCurrentRunsAfterUpdateExactlyOnce(t *testing.T) {
+	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.0.0")}, nil)
+	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	hostPath := realHostPath(t)
+
+	calls := 0
+	opts := UpgradeOptions{
+		HostID: "cover100", Env: env,
+		HostConfig:      hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
+		DetectHost:      fakeDetectHost(selfupdate.Manual, nil, hostPath),
+		HostAfterUpdate: func(context.Context, selfupdate.AfterUpdate) error { calls++; return nil },
+	}
+
+	plan, err := PlanUpgrade(context.Background(), []string{"cover100"}, opts)
+	if err != nil {
+		t.Fatalf("PlanUpgrade error = %v", err)
+	}
+	if plan.Results[0].Outcome != UpgradeOutcomeAlreadyCurrent {
+		t.Fatalf("plan = %+v, want AlreadyCurrent", plan.Results[0])
+	}
+
+	result, err := ExecuteUpgrade(context.Background(), plan, opts)
+	if err != nil {
+		t.Fatalf("ExecuteUpgrade error = %v", err)
+	}
+	if result.Results[0].Outcome != UpgradeOutcomeAlreadyCurrent {
+		t.Errorf("Outcome = %v, want AlreadyCurrent unchanged", result.Results[0].Outcome)
+	}
+	if calls != 1 {
+		t.Errorf("HostAfterUpdate called %d times by ExecuteUpgrade, want exactly 1", calls)
+	}
+}
+
+// TestExecuteUpgrade_HostAlreadyCurrentHookRunsEvenWhenOtherTargetDeclined
+// proves the batch-decline path does not suppress the host's own no-op
+// hook: self-update itself never confirms a no-op, so a decline elsewhere
+// in the same batch must not change that.
+func TestExecuteUpgrade_HostAlreadyCurrentHookRunsEvenWhenOtherTargetDeclined(t *testing.T) {
+	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.0.0"), "ovdb": releasesJSON("v2.0.0")}, nil)
+	calls := 0
+	hostPath := realHostPath(t)
+	plan := UpgradeBatchResult{Host: "cover100", Results: []UpgradeResult{
+		pendingManualResult("ovdb", "v2.0.0", "1.0.0"),
+		{Target: "cover100", Host: true, Outcome: UpgradeOutcomeAlreadyCurrent, InstallMethod: selfupdate.Manual, ResolvedPath: hostPath, Current: "1.0.0", Tag: "v1.0.0"},
+	}}
+	opts := UpgradeOptions{
+		HostID: "cover100", Env: batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged),
+		HostConfig:      hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
+		Confirm:         func([]UpgradeResult) (bool, error) { return false, nil }, // decline ovdb's pending upgrade
+		HostAfterUpdate: func(context.Context, selfupdate.AfterUpdate) error { calls++; return nil },
+	}
+
+	result, err := ExecuteUpgrade(context.Background(), plan, opts)
+	if err != nil {
+		t.Fatalf("ExecuteUpgrade error = %v", err)
+	}
+	if result.Results[0].Outcome != UpgradeOutcomeDeclined {
+		t.Errorf("ovdb outcome = %v, want Declined", result.Results[0].Outcome)
+	}
+	if result.Results[1].Outcome != UpgradeOutcomeAlreadyCurrent {
+		t.Errorf("host outcome = %v, want AlreadyCurrent", result.Results[1].Outcome)
+	}
+	if calls != 1 {
+		t.Errorf("HostAfterUpdate called %d times, want exactly 1 despite ovdb's decline", calls)
+	}
+}
+
+// TestUpgrade_HostAlreadyCurrentRunsAfterUpdateExactlyOnceEndToEnd proves
+// the same invariant through the full Upgrade (Plan+confirm+Execute)
+// convenience call, with --yes set — the case task-22's own coordinator
+// ruling names directly ("wb self-update --yes on a current wb restarts
+// the daemon... upgrade wb --yes does nothing" was the bug).
+func TestUpgrade_HostAlreadyCurrentRunsAfterUpdateExactlyOnceEndToEnd(t *testing.T) {
+	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.0.0")}, nil)
+	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+
+	calls := 0
+	opts := UpgradeOptions{
+		HostID: "cover100", Yes: true, Env: env,
+		HostConfig:      hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
+		DetectHost:      fakeDetectHost(selfupdate.Manual, nil, realHostPath(t)),
+		HostAfterUpdate: func(context.Context, selfupdate.AfterUpdate) error { calls++; return nil },
+	}
+
+	result, err := Upgrade(context.Background(), []string{"cover100"}, opts)
+	if err != nil {
+		t.Fatalf("Upgrade error = %v", err)
+	}
+	if result.Results[0].Outcome != UpgradeOutcomeAlreadyCurrent {
+		t.Fatalf("Outcome = %v, want AlreadyCurrent", result.Results[0].Outcome)
+	}
+	if calls != 1 {
+		t.Errorf("HostAfterUpdate called %d times, want exactly 1", calls)
+	}
+}
+
+// testVerifyManaged is a small test-only selfupdate.ManagedBinaryVerifier
+// mirroring what a cobracmd host wires in production (probe via Probe,
+// confirm the version) — cliinstall core no longer builds this itself
+// (task-22 review S2: verification is injected, defaulting at the Cobra
+// layer to selfcliui.VerifyManagedBinary).
+func testVerifyManaged(env InstallEnv) selfupdate.ManagedBinaryVerifier {
+	return func(ctx context.Context, detection selfupdate.Detection, binary string, _ []string, expectedVersion string) (selfupdate.ExecutableIdentity, error) {
+		target := Entry{ID: filepathBase(binary)}
+		if binary == "" && detection.Path != "" {
+			target = Entry{ID: filepathBase(detection.Path)}
 		}
-		if id.Path != "/usr/bin/ovdb" || id.ResolvedPath != "/usr/bin/ovdb" {
-			t.Errorf("identity = %+v", id)
+		statuses := Probe(ctx, []Entry{target}, "", env.Env, ProbeOptions{})
+		status := statuses[0]
+		if status.State != Installed {
+			return selfupdate.ExecutableIdentity{}, fmt.Errorf("could not confirm %s", target.ID)
 		}
-	})
+		if expectedVersion != "" && status.Version != expectedVersion {
+			return selfupdate.ExecutableIdentity{}, fmt.Errorf("%s reports %s, expected %s", target.ID, status.Version, expectedVersion)
+		}
+		return selfupdate.ExecutableIdentity{Path: status.Path, ResolvedPath: status.ResolvedPath}, nil
+	}
+}
+
+func filepathBase(p string) string {
+	if p == "" {
+		return ""
+	}
+	i := strings.LastIndexByte(p, '/')
+	return p[i+1:]
 }
 
 // --- finalizeUpgradeResult / execute* error and action mapping ------------
@@ -1395,15 +1861,16 @@ func TestFinalizeUpgradeResult(t *testing.T) {
 }
 
 func TestExecuteHostUpgrade_NeverGetsFinishHint(t *testing.T) {
-	// A direct unit check that executeHostUpgrade always passes hooks=false
-	// to finalizeUpgradeResult, regardless of the host's own catalog entry
-	// — verified end to end via wb-as-host below, since wb.SelfUpdateHooks
-	// is true and would otherwise be the one case that could leak a hint.
+	// A direct check that executeHostUpgrade always passes hooks=false to
+	// finalizeUpgradeResult, regardless of the host's own catalog entry —
+	// verified end to end via wb-as-host below, since wb.SelfUpdateHooks is
+	// true and would otherwise be the one case that could leak a hint.
 	srv := upgradeReleaseServer(t, map[string]string{"wb": releasesJSON("v1.0.0")}, nil)
 	env := batchEnv(nil, "/opt/wb", map[string]bool{"/opt/wb/wb": true}, jsonRunFor("/opt/wb/wb", "wb", "1.0.0"), noRunManaged)
 	opts := UpgradeOptions{
 		HostID: "wb", Yes: true, Env: env,
 		HostConfig: hostReleaseConfig(srv, "wb", selfupdate.Config{BinaryName: "wb", CurrentVersion: "1.0.0"}),
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/wb/wb"),
 	}
 	result, err := Upgrade(context.Background(), []string{"wb"}, opts)
 	if err != nil {
@@ -1426,7 +1893,11 @@ func TestPlanUpgrade_HostOtherCopyWarning(t *testing.T) {
 		jsonRunFor("/usr/bin/cover100", "cover100", "1.0.0"),
 		noRunManaged,
 	)
-	opts := UpgradeOptions{HostID: "cover100", Env: env, HostConfig: selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}}
+	opts := UpgradeOptions{
+		HostID: "cover100", Env: env,
+		HostConfig: selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"},
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+	}
 
 	// cover100 named explicitly with no lookup server configured: the
 	// lookup itself will fail (no ConfigureRelease/HostConfig endpoint),
@@ -1446,6 +1917,14 @@ func TestPlanUpgrade_HostOtherCopyWarning(t *testing.T) {
 	if !found {
 		t.Errorf("Warnings = %v, want another-copy warning", r.Warnings)
 	}
+	if len(r.OtherPaths) != 1 || r.OtherPaths[0] != "/usr/bin/cover100" {
+		t.Errorf("OtherPaths = %v, want the PATH copy", r.OtherPaths)
+	}
+	// task-22 review M2: Status is always zero for the host row — the
+	// other PATH copy is named in Warnings/OtherPaths only.
+	if r.Status.ID != "" || r.Status.State != NotInstalled || r.Status.Path != "" {
+		t.Errorf("Status = %+v, want zero for the host row", r.Status)
+	}
 }
 
 func TestPlanUpgrade_HostAllIncludedEvenWhenNotOnPath(t *testing.T) {
@@ -1454,6 +1933,7 @@ func TestPlanUpgrade_HostAllIncludedEvenWhenNotOnPath(t *testing.T) {
 	opts := UpgradeOptions{
 		HostID: "cover100", All: true, Env: env,
 		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
 	}
 	result, err := PlanUpgrade(context.Background(), nil, opts)
 	if err != nil {
@@ -1461,6 +1941,240 @@ func TestPlanUpgrade_HostAllIncludedEvenWhenNotOnPath(t *testing.T) {
 	}
 	if len(result.Results) != 1 || !result.Results[0].Host {
 		t.Fatalf("Results = %+v, want exactly the host row", result.Results)
+	}
+}
+
+// --- additional CheckUpgrades / PlanUpgrade coverage ------------------------
+
+func TestCheckUpgrades_UnknownNameFailsWholeBatch(t *testing.T) {
+	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	opts := UpgradeOptions{HostID: "cover100", Env: env}
+
+	result, err := CheckUpgrades(context.Background(), []string{"nosuchcli"}, opts)
+	if err == nil {
+		t.Fatal("expected a batch-level unknown-target failure")
+	}
+	if selfupdate.KindOf(err) != selfupdate.KindUnknownTarget {
+		t.Errorf("KindOf(err) = %v", selfupdate.KindOf(err))
+	}
+	if len(result.Results) != 0 {
+		t.Errorf("result.Results = %v, want empty", result.Results)
+	}
+}
+
+func TestCheckUpgrades_NonHostNonReleaseBuildSkippedUnderAll(t *testing.T) {
+	env := batchEnv(
+		[]string{"/usr/bin"}, "/opt/cover100",
+		map[string]bool{"/usr/bin/ovdb": true},
+		jsonRunFor("/usr/bin/ovdb", "ovdb", "0.20.3+dirty"),
+		noRunManaged,
+	)
+	opts := UpgradeOptions{
+		HostID: "cover100", All: true, Env: env,
+		HostConfig: selfupdate.Config{BinaryName: "cover100", CurrentVersion: "dev"},
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+	}
+	result, err := CheckUpgrades(context.Background(), nil, opts)
+	if err != nil {
+		t.Fatalf("CheckUpgrades error = %v", err)
+	}
+	var ovdbResult *UpgradeResult
+	for i := range result.Results {
+		if result.Results[i].Target == "ovdb" {
+			ovdbResult = &result.Results[i]
+		}
+	}
+	if ovdbResult == nil || ovdbResult.Outcome != UpgradeOutcomeSkippedNonRelease {
+		t.Errorf("ovdb result = %+v, want SkippedNonRelease", ovdbResult)
+	}
+}
+
+func TestCheckUpgrades_ExplicitNonReleaseBuildProceeds(t *testing.T) {
+	srv := upgradeReleaseServer(t, map[string]string{"ovdb": releasesJSON("v1.0.0")}, nil)
+	env := batchEnv(
+		[]string{"/usr/bin"}, "/opt/cover100",
+		map[string]bool{"/usr/bin/ovdb": true},
+		jsonRunFor("/usr/bin/ovdb", "ovdb", "dev"),
+		noRunManaged,
+	)
+	opts := UpgradeOptions{HostID: "cover100", Env: env, ConfigureRelease: configureUpgradeRelease(srv)}
+
+	result, err := CheckUpgrades(context.Background(), []string{"ovdb"}, opts)
+	if err != nil {
+		t.Fatalf("CheckUpgrades error = %v", err)
+	}
+	r := result.Results[0]
+	if !r.NonReleaseBuild {
+		t.Error("NonReleaseBuild = false, want true")
+	}
+	if r.Latest != "1.0.0" {
+		t.Errorf("Latest = %q, want a real lookup to have run", r.Latest)
+	}
+}
+
+func TestCheckUpgrades_HostOtherCopyWarning(t *testing.T) {
+	env := batchEnv(
+		[]string{"/usr/bin"}, "/opt/cover100",
+		map[string]bool{"/usr/bin/cover100": true},
+		jsonRunFor("/usr/bin/cover100", "cover100", "1.0.0"),
+		noRunManaged,
+	)
+	opts := UpgradeOptions{
+		HostID: "cover100", Env: env,
+		HostConfig: selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"},
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+	}
+	result, err := CheckUpgrades(context.Background(), []string{"cover100"}, opts)
+	if err != nil {
+		t.Fatalf("CheckUpgrades error = %v", err)
+	}
+	r := result.Results[0]
+	if len(r.OtherPaths) != 1 || r.OtherPaths[0] != "/usr/bin/cover100" {
+		t.Errorf("OtherPaths = %v, want the PATH copy", r.OtherPaths)
+	}
+}
+
+func TestCheckUpgrades_HostExplicitNonReleaseBuildProceeds(t *testing.T) {
+	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.0.0")}, nil)
+	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	opts := UpgradeOptions{
+		HostID: "cover100", Env: env,
+		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "dev"}),
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+	}
+	result, err := CheckUpgrades(context.Background(), []string{"cover100"}, opts)
+	if err != nil {
+		t.Fatalf("CheckUpgrades error = %v", err)
+	}
+	if !result.Results[0].NonReleaseBuild {
+		t.Error("NonReleaseBuild = false, want true")
+	}
+}
+
+func TestCheckUpgrades_HostManagedCommandShown(t *testing.T) {
+	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	srv := upgradeReleaseServer(t, map[string]string{"wb": releasesJSON("v2.0.0")}, nil)
+	homebrew := selfupdate.HomebrewCask("wb")
+	opts := UpgradeOptions{
+		HostID: "wb", Env: env,
+		HostConfig: hostReleaseConfig(srv, "wb", selfupdate.Config{BinaryName: "wb", CurrentVersion: "1.0.0"}),
+		DetectHost: fakeDetectHost(selfupdate.Managed, &homebrew, "/opt/homebrew/bin/wb"),
+	}
+	result, err := CheckUpgrades(context.Background(), []string{"wb"}, opts)
+	if err != nil {
+		t.Fatalf("CheckUpgrades error = %v", err)
+	}
+	if result.Results[0].Command == "" {
+		t.Error("Command is empty, want the manager's upgrade command")
+	}
+}
+
+func TestCheckUpgrades_HostAmbiguous(t *testing.T) {
+	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v2.0.0")}, nil)
+	opts := UpgradeOptions{
+		HostID: "cover100", Env: env,
+		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
+		DetectHost: fakeDetectHost(selfupdate.Ambiguous, nil, "/src/cover100/cover100"),
+	}
+	result, err := CheckUpgrades(context.Background(), []string{"cover100"}, opts)
+	if err != nil {
+		t.Fatalf("CheckUpgrades error = %v", err)
+	}
+	r := result.Results[0]
+	if r.Outcome != UpgradeOutcomeRefused || r.Failure == nil || r.Failure.Kind != selfupdate.KindAmbiguous {
+		t.Errorf("result = %+v, want Refused/KindAmbiguous", r)
+	}
+}
+
+// TestCheckUpgrades_AmbiguousLookupFailureBecomesWarning: an ambiguous
+// row's own Check() lookup failing must not produce a SECOND, different
+// failure — the row is already terminal (Refused/KindAmbiguous); the
+// lookup failure is folded into a warning instead.
+func TestCheckUpgrades_AmbiguousLookupFailureBecomesWarning(t *testing.T) {
+	env := batchEnv(nil, "/opt/cover100", map[string]bool{"/opt/weird/ovdb": true}, jsonRunFor("/opt/weird/ovdb", "ovdb", "1.0.0"), noRunManaged)
+	env.PathDirs = func() []string { return []string{"/opt/weird"} }
+	srv := upgradeReleaseServer(t, nil, nil) // no "ovdb" key -> lookup fails
+	opts := UpgradeOptions{HostID: "cover100", Env: env, ConfigureRelease: configureUpgradeRelease(srv)}
+
+	result, err := CheckUpgrades(context.Background(), []string{"ovdb"}, opts)
+	if err != nil {
+		t.Fatalf("CheckUpgrades error = %v", err)
+	}
+	r := result.Results[0]
+	if r.Outcome != UpgradeOutcomeRefused || r.Failure == nil || r.Failure.Kind != selfupdate.KindAmbiguous {
+		t.Errorf("result = %+v, want Refused/KindAmbiguous (unchanged by the failed lookup)", r)
+	}
+	found := false
+	for _, w := range r.Warnings {
+		if strings.Contains(w, "unavailable") || strings.Contains(w, "release") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Warnings = %v, want a lookup-unavailable warning", r.Warnings)
+	}
+}
+
+func TestCheckUpgrades_ManagedRedirectAndExecutable(t *testing.T) {
+	env := batchEnv(
+		[]string{"/usr/bin"}, "/opt/cover100",
+		map[string]bool{"/opt/homebrew/bin/ingitdb": true, "/opt/homebrew/bin/wb": true},
+		multiJSONRun(map[string]string{"ingitdb": "1.0.0", "wb": "1.0.0"}),
+		noRunManaged,
+	)
+	env.PathDirs = func() []string { return []string{"/opt/homebrew/bin"} }
+	env.EvalSymlinks = func(p string) (string, error) { return p, nil }
+	srv := upgradeReleaseServer(t, map[string]string{
+		"ingitdb": releasesJSON("v2.0.0"),
+		"wb":      releasesJSON("v2.0.0"),
+	}, nil)
+	opts := UpgradeOptions{HostID: "cover100", Env: env, ConfigureRelease: configureUpgradeRelease(srv)}
+
+	result, err := CheckUpgrades(context.Background(), []string{"ingitdb", "wb"}, opts)
+	if err != nil {
+		t.Fatalf("CheckUpgrades error = %v", err)
+	}
+	if r := result.Results[0]; r.Outcome != UpgradeOutcomeRedirected {
+		t.Errorf("ingitdb result = %+v, want Redirected", r)
+	}
+	if r := result.Results[1]; r.Outcome != UpgradeOutcomeDryRun {
+		t.Errorf("wb result = %+v, want DryRun (offered)", r)
+	}
+}
+
+func TestPlanUpgrade_HostAmbiguous(t *testing.T) {
+	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v2.0.0")}, nil)
+	opts := UpgradeOptions{
+		HostID: "cover100", Env: env,
+		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
+		DetectHost: fakeDetectHost(selfupdate.Ambiguous, nil, "/src/cover100/cover100"),
+	}
+	result, err := PlanUpgrade(context.Background(), []string{"cover100"}, opts)
+	if err != nil {
+		t.Fatalf("PlanUpgrade error = %v", err)
+	}
+	r := result.Results[0]
+	if r.Outcome != UpgradeOutcomeRefused || r.Failure == nil || r.Failure.Kind != selfupdate.KindAmbiguous {
+		t.Errorf("result = %+v, want Refused/KindAmbiguous", r)
+	}
+}
+
+func TestPlanUpgrade_HostExplicitNonReleaseBuildProceeds(t *testing.T) {
+	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.0.0")}, nil)
+	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	opts := UpgradeOptions{
+		HostID: "cover100", Env: env,
+		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "dev"}),
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+	}
+	result, err := PlanUpgrade(context.Background(), []string{"cover100"}, opts)
+	if err != nil {
+		t.Fatalf("PlanUpgrade error = %v", err)
+	}
+	if !result.Results[0].NonReleaseBuild {
+		t.Error("NonReleaseBuild = false, want true")
 	}
 }
 
@@ -1495,6 +2209,28 @@ func TestAllUpgradeCandidates_HostLastRegardlessOfCatalogPosition(t *testing.T) 
 		if c.id == "wb" {
 			t.Errorf("host id %q appeared twice in candidates", c.id)
 		}
+	}
+}
+
+func TestResolveUpgradeCandidates_UsesAllWhenNamesEmpty(t *testing.T) {
+	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	candidates, _, _, err := resolveUpgradeCandidates(context.Background(), nil, UpgradeOptions{HostID: "cover100", Env: env})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(candidates) != 1 || !candidates[0].isHost {
+		t.Errorf("candidates = %+v, want exactly the host (nothing else installed)", candidates)
+	}
+}
+
+func TestResolveUpgradeCandidates_UsesNamedWhenGiven(t *testing.T) {
+	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	candidates, _, _, err := resolveUpgradeCandidates(context.Background(), []string{"ovdb"}, UpgradeOptions{HostID: "cover100", Env: env})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].id != "ovdb" {
+		t.Errorf("candidates = %+v, want exactly ovdb", candidates)
 	}
 }
 

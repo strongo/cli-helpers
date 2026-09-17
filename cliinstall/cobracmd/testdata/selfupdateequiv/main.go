@@ -32,11 +32,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
 
+	"github.com/strongo/cli-helpers/cliinstall"
 	cliinstallcmd "github.com/strongo/cli-helpers/cliinstall/cobracmd"
 	"github.com/strongo/cli-helpers/selfupdate"
 	selfupdatecmd "github.com/strongo/cli-helpers/selfupdate/cobracmd"
@@ -84,16 +87,92 @@ func fixtureConfig() selfupdate.Config {
 	return cfg
 }
 
+// fixtureHookMarker returns an AfterUpdateFunc that appends outcome.Action
+// to the file named by FIXTURE_HOOK_MARKER, one line per call — task-22
+// review S4's own "$FIXTURE_HOOK_MARKER" — so a test can compare hook-
+// invocation COUNT and CONTENT between self-update and upgrade <self> by
+// reading the file after each real, non-dry-run run. Nil when the env var
+// is unset, matching a host that configured no hook at all.
+func fixtureHookMarker() selfupdate.AfterUpdateFunc {
+	path := os.Getenv("FIXTURE_HOOK_MARKER")
+	if path == "" {
+		return nil
+	}
+	return func(_ context.Context, update selfupdate.AfterUpdate) error {
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint:gosec
+		if err != nil {
+			return err
+		}
+		defer f.Close() //nolint:errcheck
+		_, err = fmt.Fprintln(f, update.Outcome.Action.String())
+		return err
+	}
+}
+
+// fixtureExitCode maps a failure kind to a distinct, arbitrary exit code —
+// task-22 review S4's own "an ErrorMapper that gives each kind its own exit
+// code" — so a test can compare exit codes, not just "zero vs non-zero",
+// between self-update and upgrade <self> for the SAME underlying kind.
+// codeFor is the ONE mapping both commands' ErrorMapper share, so a mapped
+// code proves kind parity precisely because both sides consulted the
+// identical table.
+func fixtureExitCode(err error) int {
+	switch selfupdate.KindOf(err) {
+	case selfupdate.KindAmbiguous:
+		return 3
+	case selfupdate.KindReleaseLookup:
+		return 4
+	case selfupdate.KindNonInteractive:
+		return 5
+	default:
+		return 1
+	}
+}
+
+type fixtureExitError struct {
+	code int
+	err  error
+}
+
+func (e fixtureExitError) Error() string { return e.err.Error() }
+func (e fixtureExitError) ExitCode() int { return e.code }
+func (e fixtureExitError) Unwrap() error { return e.err }
+
+// fixtureErrors implements BOTH selfupdate/cobracmd.ErrorMapper and
+// cliinstall/cobracmd.ErrorMapper/UpgradeErrorMapper with the SAME
+// fixtureExitCode table, so self-update and upgrade <self> map the
+// identical failure kind to the identical exit code by construction.
+type fixtureErrors struct{}
+
+func (fixtureErrors) Failure(err error) error {
+	return fixtureExitError{code: fixtureExitCode(err), err: err}
+}
+func (fixtureErrors) UpdateAvailable(selfupdate.CheckResult) error {
+	return fixtureExitError{code: 2, err: fmt.Errorf("update available")}
+}
+func (fixtureErrors) UpgradesAvailable([]cliinstall.UpgradeResult) error {
+	return fixtureExitError{code: 2, err: fmt.Errorf("update available")}
+}
+
 func main() {
+	hook := fixtureHookMarker()
 	root := &cobra.Command{Use: fixtureHostID}
-	root.AddCommand(selfupdatecmd.New(fixtureConfig(), selfupdatecmd.CommandOptions{JSONFormat: true}))
+	root.AddCommand(selfupdatecmd.New(fixtureConfig(), selfupdatecmd.CommandOptions{
+		JSONFormat: true, AfterUpdate: hook, Errors: fixtureErrors{},
+	}))
 	root.AddCommand(cliinstallcmd.NewUpgrade(cliinstallcmd.UpgradeCommandOptions{
-		HostID:     fixtureHostID,
-		HostConfig: fixtureConfig(),
+		HostID: fixtureHostID, HostConfig: fixtureConfig(),
+		HostAfterUpdate: hook, Errors: fixtureErrors{},
 	}))
 	root.SetArgs(os.Args[1:])
-	if err := root.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err) //nolint:errcheck
-		os.Exit(1)
+	err := root.Execute()
+	if err == nil {
+		return
 	}
+	fmt.Fprintln(os.Stderr, err) //nolint:errcheck
+	var ec fixtureExitError
+	if errors.As(err, &ec) {
+		os.Exit(ec.ExitCode())
+	}
+	os.Exit(1)
 }

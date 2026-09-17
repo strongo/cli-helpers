@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -56,8 +57,30 @@ func equivBinaryName() string {
 // so one build is reused for every scenario in this file.
 func buildSelfUpdateEquivFixture(t *testing.T) string {
 	t.Helper()
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("go toolchain not found on PATH; skipping the self-update equivalence matrix (task-22 review S5)")
+	}
 	out := filepath.Join(t.TempDir(), "built-"+equivBinaryName())
-	cmd := exec.Command("go", "build", "-o", out, "./testdata/selfupdateequiv")
+	cmd := exec.Command(goBin, "build", "-o", out, "./testdata/selfupdateequiv")
+	// task-22 review S5: hermetic build — GOFLAGS=-mod=mod keeps this
+	// module's own go.mod/go.sum authoritative without a toolchain
+	// upgrade/module-graph surprise; GOPROXY=off and GOFLAGS=-mod=mod
+	// together refuse any network fetch (this fixture imports only
+	// packages already vendored in this module's own build cache);
+	// GOTOOLCHAIN=local pins the toolchain actually installed, never
+	// downloading a directive-pinned one; GOWORK=off ignores any stray
+	// go.work outside this module. PATH is reduced to exactly the
+	// directory containing the resolved `go` binary, so this build can
+	// never accidentally exec a DIFFERENT `go` or a shell-shadowed
+	// `cover100` from the real environment.
+	cmd.Env = append(os.Environ(),
+		"GOFLAGS=-mod=mod",
+		"GOPROXY=off",
+		"GOTOOLCHAIN=local",
+		"GOWORK=off",
+		"PATH="+filepath.Dir(goBin),
+	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("build testdata/selfupdateequiv fixture: %v\n%s", err, output)
@@ -102,6 +125,37 @@ func equivReleaseServer(t *testing.T, tag string) *httptest.Server {
 	return srv
 }
 
+// equivAssetReleaseServer is equivReleaseServer plus a real downloadable
+// asset and checksums file matching cover100's own GoReleaser-shaped
+// defaults (task-22 review S4: "a release server that also serves the
+// asset and checksum"), so a real, non-dry-run manual replacement can
+// actually complete offline.
+func equivAssetReleaseServer(t *testing.T, tag, content string) *httptest.Server {
+	t.Helper()
+	version := strings.TrimPrefix(tag, "v")
+	archive := makeTarGzFixture(t, "cover100", []byte(content))
+	checksum := sha256HexFixture(archive)
+	assetName := fmt.Sprintf("cover100_%s_%s_%s.tar.gz", version, runtime.GOOS, runtime.GOARCH)
+	checksumsName := fmt.Sprintf("cover100_%s_checksums.txt", version)
+	checksumsBody := fmt.Sprintf("%s  %s\n", checksum, assetName)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/releases":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `[{"tag_name":%q,"prerelease":false,"draft":false}]`, tag) //nolint:errcheck
+		case "/" + tag + "/" + assetName:
+			_, _ = w.Write(archive)
+		case "/" + tag + "/" + checksumsName:
+			_, _ = io.WriteString(w, checksumsBody)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 type equivRun struct {
 	stdout, stderr string
 	exitCode       int
@@ -131,10 +185,14 @@ func runEquivFixture(t *testing.T, binary string, env []string, args ...string) 
 
 func equivEnv(t *testing.T, endpoint, currentVersion, marker, executable string, extraPathDirs ...string) []string {
 	t.Helper()
-	path := os.Getenv("PATH")
-	for _, d := range extraPathDirs {
-		path = d + string(os.PathListSeparator) + path
-	}
+	// task-22 review S5: PATH is built ONLY from the given (t.TempDir()-
+	// rooted) directories, never inherited from the real environment — a
+	// real "cover100" happening to be installed on a developer's own PATH
+	// must never change what this subprocess finds. The host's own
+	// classification never depends on PATH anyway (DetectSelf/HostDir
+	// resolve the real running executable directly); PATH here only
+	// controls the deliberate "other copy" scenario below.
+	path := strings.Join(extraPathDirs, string(os.PathListSeparator))
 	env := []string{
 		"FIXTURE_RELEASE_ENDPOINT=" + endpoint,
 		"FIXTURE_CURRENT_VERSION=" + currentVersion,
@@ -164,7 +222,8 @@ type selfUpdateOutcomeJSON struct {
 // upgradeTargetJSONForTest mirrors cliui's own unexported upgradeTargetJSON
 // closely enough for this test's assertions.
 type upgradeDocForTest struct {
-	Targets []struct {
+	FailureKind string `json:"failure_kind"`
+	Targets     []struct {
 		Name         string   `json:"name"`
 		Action       string   `json:"action"`
 		Current      string   `json:"current"`
@@ -175,6 +234,7 @@ type upgradeDocForTest struct {
 		ResolvedPath string   `json:"resolved_path"`
 		OtherPaths   []string `json:"other_paths"`
 		Warnings     []string `json:"warnings"`
+		FailureKind  string   `json:"failure_kind"`
 	} `json:"targets"`
 }
 
@@ -228,26 +288,23 @@ func TestSelfUpdateEqualsUpgradeSelf(t *testing.T) {
 		})
 	}
 
-	// Ambiguous is a DOCUMENTED DIVERGENCE, not an equivalence: self-update's
-	// UpdateAt returns a hard *selfupdate.Failure{Kind: KindAmbiguous} for
-	// ANY ambiguous classification (self-update#req:ambiguous-safe-default),
-	// so `self-update --yes` on an ambiguous host fails the process. cliinstall's
-	// PlanUpgrade instead resolves ambiguous+update-available straight to the
-	// terminal, non-failing UpgradeOutcomeRefused BEFORE ever calling UpdateAt
-	// at all (cli-install#req:upgrade-per-target-policy's own table: "installed,
-	// ambiguous → refused... with manual-update guidance" is a descriptive
-	// per-target outcome, not a batch failure — see UpgradeBatchResult.Failed's
-	// own doc comment: "a refused... target is a descriptive state, not
-	// something that went wrong this run"). `upgrade <self>` therefore exits 0
-	// where `self-update` exits non-zero for the IDENTICAL install-method
-	// classification and the IDENTICAL underlying version facts — verified
-	// here rather than silently assumed equivalent, and worth flagging to
-	// task-22's coordinator: cli-install#ac:self-update-equals-upgrade-self's
-	// literal text ("produces the same... failure kind") is not met for this
-	// one classification, by task-21's own already-landed design, which this
-	// task's file scope (cliinstall/cliui, cliinstall/cobracmd — never
-	// cliinstall/upgrade.go itself) does not include changing.
-	t.Run("ambiguous (documented divergence, not equivalence)", func(t *testing.T) {
+	// Ambiguous IS a true equivalence, per task-22's coordinator ruling
+	// (B1): UpgradeBatchResult.Failed()/Failure() now count a Refused row
+	// that carries a Failure (always selfupdate.KindAmbiguous) exactly like
+	// UpgradeOutcomeFailed, so `upgrade <self> --dry-run --yes` exits
+	// non-zero for an ambiguous host with failure_kind "ambiguous" — the
+	// SAME outcome `self-update --dry-run --yes` reaches via UpdateAt's own
+	// ambiguous check. Both commands still agree on the underlying facts
+	// (current/latest) despite the batch-level refusal.
+	//
+	// This is the one place the two commands' Cobra adapters use a
+	// deliberately DIFFERENT read of that same fact: --check/the bare
+	// report (runUpgradeReport, via cliinstall.CheckUpgrades) never fails
+	// for a refused/ambiguous row — self-update's own `--check` never fails
+	// for one either, since selfupdate.Config.Check does not even consult
+	// classification (task-22 review B1.3) — so equivalence there is
+	// covered separately below, not by this --dry-run/--yes pair.
+	t.Run("ambiguous", func(t *testing.T) {
 		dest := placeEquivFixture(t, built, "host/plainlocation")
 		env := equivEnv(t, srv.URL, "1.0.0", "", "")
 
@@ -260,8 +317,8 @@ func TestSelfUpdateEqualsUpgradeSelf(t *testing.T) {
 		}
 
 		upRes := runEquivFixture(t, dest, env, "upgrade", "cover100", "--dry-run", "--yes", "--format", "json")
-		if upRes.exitCode != 0 {
-			t.Fatalf("upgrade <self> exit code = %d, want 0 (a refused target is descriptive, not a failure): stdout=%s stderr=%s", upRes.exitCode, upRes.stdout, upRes.stderr)
+		if upRes.exitCode == 0 {
+			t.Fatalf("upgrade <self> exit code = 0, want non-zero (task-22 review B1: a refused/ambiguous row now counts as a batch failure, same as self-update): stdout=%s stderr=%s", upRes.stdout, upRes.stderr)
 		}
 		var doc upgradeDocForTest
 		if err := json.Unmarshal([]byte(upRes.stdout), &doc); err != nil {
@@ -270,8 +327,45 @@ func TestSelfUpdateEqualsUpgradeSelf(t *testing.T) {
 		if len(doc.Targets) != 1 || doc.Targets[0].Action != "refused" {
 			t.Fatalf("doc.Targets = %+v, want exactly one 'refused' target", doc.Targets)
 		}
-		if doc.Targets[0].Current != "1.0.0" || doc.Targets[0].Latest != "1.1.0" {
-			t.Errorf("upgrade <self> Current/Latest = %q/%q, want 1.0.0/1.1.0 (same facts self-update saw)", doc.Targets[0].Current, doc.Targets[0].Latest)
+		if doc.Targets[0].FailureKind != "ambiguous" {
+			t.Errorf("doc.Targets[0].FailureKind = %q, want ambiguous (same failure kind self-update reports)", doc.Targets[0].FailureKind)
+		}
+		// Ambiguous fails selfupdate.Config.UpdateAt's own check BEFORE any
+		// release lookup even runs (self-update#req:ambiguous-safe-default
+		// — the same reason self-update's own ambiguous JSON has no
+		// current/latest fields at all), so only Current — known without a
+		// lookup — is populated; Latest stays empty on both sides.
+		if doc.Targets[0].Current != "1.0.0" {
+			t.Errorf("upgrade <self> Current = %q, want 1.0.0", doc.Targets[0].Current)
+		}
+		if doc.Targets[0].Latest != "" {
+			t.Errorf("upgrade <self> Latest = %q, want empty (ambiguous never reaches a lookup)", doc.Targets[0].Latest)
+		}
+	})
+
+	// --check's own equivalence: neither command fails BECAUSE OF THE
+	// AMBIGUITY under --check (task-22 review B1.3) — self-update's own
+	// --check calls selfupdate.Config.Check, which never even looks at
+	// classification, and cliinstall's --check (cliinstall.CheckUpgrades)
+	// deliberately narrows its own failure predicate to a genuine lookup
+	// failure only, excluding a refused/ambiguous row. This scenario's
+	// verdict IS UpdateAvailable, though, and fixtureErrors DOES map that
+	// signal to its own dedicated exit code (2) for both commands — so
+	// both sides exit 2 here, for the SAME reason (an update exists), and
+	// the equivalence this asserts is that they agree, not that either is
+	// zero.
+	t.Run("ambiguous --check never fails either command", func(t *testing.T) {
+		dest := placeEquivFixture(t, built, "host/plainlocation2")
+		env := equivEnv(t, srv.URL, "1.0.0", "", "")
+
+		selfRes := runEquivFixture(t, dest, env, "self-update", "--check", "--format", "json")
+		if selfRes.exitCode != 2 {
+			t.Errorf("self-update --check exit code = %d, want 2 (update-available, not ambiguity, per fixtureErrors): stdout=%s stderr=%s", selfRes.exitCode, selfRes.stdout, selfRes.stderr)
+		}
+
+		upRes := runEquivFixture(t, dest, env, "upgrade", "cover100", "--check", "--format", "json")
+		if upRes.exitCode != 2 {
+			t.Errorf("upgrade <self> --check exit code = %d, want 2 (same reason, same mapped code): stdout=%s stderr=%s", upRes.exitCode, upRes.stdout, upRes.stderr)
 		}
 	})
 
@@ -333,6 +427,134 @@ func TestSelfUpdateEqualsUpgradeSelf(t *testing.T) {
 			t.Errorf("upgrade <self> warnings = %v, want one naming the other PATH copy", target.Warnings)
 		}
 	})
+
+	// task-22 review S4: a REAL --yes pair, with a working release asset
+	// and checksum, proving self-update and upgrade <self> reach the same
+	// selfupdate.Config.UpdateAt outcome (ActionUpdated) for a manual
+	// install with an update available — not merely their --dry-run
+	// preview of it — using fixtureErrors so the exit code itself (not
+	// just zero/non-zero) is compared, and FIXTURE_HOOK_MARKER so the
+	// after-update hook's invocation COUNT is compared too.
+	t.Run("manual real replacement (--yes)", func(t *testing.T) {
+		assetSrv := equivAssetReleaseServer(t, "v1.1.0", "new binary content")
+
+		selfDest := placeEquivFixture(t, built, "self/bin")
+		selfMarker := filepath.Join(t.TempDir(), "self-hook.log")
+		selfEnv := append(equivEnv(t, assetSrv.URL, "1.0.0", "", ""), "FIXTURE_HOOK_MARKER="+selfMarker)
+		selfRes := runEquivFixture(t, selfDest, selfEnv, "self-update", "--yes", "--format", "json")
+		if selfRes.exitCode != 0 {
+			t.Fatalf("self-update exit code = %d, want 0: stdout=%s stderr=%s", selfRes.exitCode, selfRes.stdout, selfRes.stderr)
+		}
+		var selfOutcome selfUpdateOutcomeJSON
+		if err := json.Unmarshal([]byte(selfRes.stdout), &selfOutcome); err != nil {
+			t.Fatalf("decode self-update JSON: %v (raw %s)", err, selfRes.stdout)
+		}
+		if selfOutcome.Action != "updated" {
+			t.Fatalf("self-update action = %q, want updated", selfOutcome.Action)
+		}
+		selfHookLines := readHookMarker(t, selfMarker)
+
+		upDest := placeEquivFixture(t, built, "up/bin")
+		upMarker := filepath.Join(t.TempDir(), "up-hook.log")
+		upEnv := append(equivEnv(t, assetSrv.URL, "1.0.0", "", ""), "FIXTURE_HOOK_MARKER="+upMarker)
+		upRes := runEquivFixture(t, upDest, upEnv, "upgrade", "cover100", "--yes", "--format", "json")
+		if upRes.exitCode != 0 {
+			t.Fatalf("upgrade <self> exit code = %d, want 0: stdout=%s stderr=%s", upRes.exitCode, upRes.stdout, upRes.stderr)
+		}
+		var doc upgradeDocForTest
+		if err := json.Unmarshal([]byte(upRes.stdout), &doc); err != nil {
+			t.Fatalf("decode upgrade JSON: %v (raw %s)", err, upRes.stdout)
+		}
+		if len(doc.Targets) != 1 || doc.Targets[0].Action != "upgraded" {
+			t.Fatalf("doc.Targets = %+v, want exactly one 'upgraded' target", doc.Targets)
+		}
+		upHookLines := readHookMarker(t, upMarker)
+
+		if len(selfHookLines) != len(upHookLines) {
+			t.Errorf("hook invocation count: self-update=%d upgrade<self>=%d, want equal", len(selfHookLines), len(upHookLines))
+		}
+		if len(selfHookLines) != 1 {
+			t.Errorf("self-update hook invocations = %v, want exactly 1", selfHookLines)
+		}
+		if len(selfHookLines) > 0 && len(upHookLines) > 0 && selfHookLines[0] != upHookLines[0] {
+			t.Errorf("hook-recorded action differs: self-update=%q upgrade<self>=%q", selfHookLines[0], upHookLines[0])
+		}
+
+		got, err := os.ReadFile(upDest)
+		if err != nil || string(got) != "new binary content" {
+			t.Errorf("upgrade <self> did not replace its own binary: content=%q err=%v", got, err)
+		}
+	})
+
+	// task-22 review B2 + S4: a REAL --yes pair for an ALREADY-CURRENT
+	// host proves the after-update hook fires exactly once on BOTH sides —
+	// selfupdate.Config.UpdateAt's own runAfterUpdate skips it under
+	// DryRun, so only a real, non-dry-run call (self-update's single call;
+	// upgrade <self>'s dedicated second real call for AlreadyCurrent —
+	// see cliinstall.ExecuteUpgrade's own doc comment) ever fires it.
+	t.Run("already current runs the hook exactly once on both sides (--yes)", func(t *testing.T) {
+		srv := equivReleaseServer(t, "v1.0.0")
+
+		selfDest := placeEquivFixture(t, built, "self2/bin")
+		selfMarker := filepath.Join(t.TempDir(), "self-hook.log")
+		selfEnv := append(equivEnv(t, srv.URL, "1.0.0", "", ""), "FIXTURE_HOOK_MARKER="+selfMarker)
+		selfRes := runEquivFixture(t, selfDest, selfEnv, "self-update", "--yes", "--format", "json")
+		if selfRes.exitCode != 0 {
+			t.Fatalf("self-update exit code = %d, want 0: stdout=%s stderr=%s", selfRes.exitCode, selfRes.stdout, selfRes.stderr)
+		}
+		var selfOutcome selfUpdateOutcomeJSON
+		if err := json.Unmarshal([]byte(selfRes.stdout), &selfOutcome); err != nil {
+			t.Fatalf("decode self-update JSON: %v (raw %s)", err, selfRes.stdout)
+		}
+		if selfOutcome.Action != "already_current" {
+			t.Fatalf("self-update action = %q, want already_current", selfOutcome.Action)
+		}
+		selfHookLines := readHookMarker(t, selfMarker)
+
+		upDest := placeEquivFixture(t, built, "up2/bin")
+		upMarker := filepath.Join(t.TempDir(), "up-hook.log")
+		upEnv := append(equivEnv(t, srv.URL, "1.0.0", "", ""), "FIXTURE_HOOK_MARKER="+upMarker)
+		upRes := runEquivFixture(t, upDest, upEnv, "upgrade", "cover100", "--yes", "--format", "json")
+		if upRes.exitCode != 0 {
+			t.Fatalf("upgrade <self> exit code = %d, want 0: stdout=%s stderr=%s", upRes.exitCode, upRes.stdout, upRes.stderr)
+		}
+		var doc upgradeDocForTest
+		if err := json.Unmarshal([]byte(upRes.stdout), &doc); err != nil {
+			t.Fatalf("decode upgrade JSON: %v (raw %s)", err, upRes.stdout)
+		}
+		if len(doc.Targets) != 1 || doc.Targets[0].Action != "already_current" {
+			t.Fatalf("doc.Targets = %+v, want exactly one 'already_current' target", doc.Targets)
+		}
+		upHookLines := readHookMarker(t, upMarker)
+
+		if len(selfHookLines) != 1 {
+			t.Errorf("self-update hook invocations = %v, want exactly 1", selfHookLines)
+		}
+		if len(upHookLines) != 1 {
+			t.Errorf("upgrade <self> hook invocations = %v, want exactly 1 (task-22 review B2)", upHookLines)
+		}
+	})
+}
+
+// readHookMarker reads FIXTURE_HOOK_MARKER's file and returns its non-empty
+// lines — empty (not an error) when the hook was never invoked, since the
+// fixture never creates the file until its first write.
+func readHookMarker(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatalf("read hook marker %s: %v", path, err)
+	}
+	var lines []string
+	for _, l := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if l != "" {
+			lines = append(lines, l)
+		}
+	}
+	return lines
 }
 
 // runScenario places built at subdir, runs both commands with the given

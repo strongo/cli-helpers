@@ -42,6 +42,38 @@ func TestUpgradeLine_AllOutcomes(t *testing.T) {
 			want: "1.2.0 → 1.3.0  upgrade available (Homebrew: brew upgrade --cask wb)",
 		},
 		{
+			// task-22 review S3: the manual pending line shows the exact
+			// asset URL a replacement would fetch.
+			name: "dry_run manual with asset URL",
+			row: UpgradeRow{Result: cliinstall.UpgradeResult{
+				Target: "datatug", Outcome: cliinstall.UpgradeOutcomeDryRun,
+				InstallMethod: selfupdate.Manual, Current: "0.29.0", Latest: "0.30.1", ResolvedPath: "/home/alex/.local/bin/datatug",
+				AssetURL: "https://github.com/x/y/releases/download/v0.30.1/datatug_0.30.1_linux_amd64.tar.gz",
+			}},
+			want: "0.29.0 → 0.30.1  upgrade available (manual, /home/alex/.local/bin/datatug, asset https://github.com/x/y/releases/download/v0.30.1/datatug_0.30.1_linux_amd64.tar.gz)",
+		},
+		{
+			// task-22 review S3: an explicitly-named non-release build is
+			// tagged in the line itself, manual case.
+			name: "dry_run manual non-release build",
+			row: UpgradeRow{Result: cliinstall.UpgradeResult{
+				Target: "ingitdb", Outcome: cliinstall.UpgradeOutcomeDryRun,
+				InstallMethod: selfupdate.Manual, Current: "dev", Latest: "0.65.16", ResolvedPath: "/home/alex/go/bin/ingitdb",
+				NonReleaseBuild: true,
+			}},
+			want: "dev → 0.65.16  upgrade available (manual, /home/alex/go/bin/ingitdb) (non-release build)",
+		},
+		{
+			// Managed pending non-release build: tagged the same way.
+			name: "dry_run managed executable non-release build",
+			row: UpgradeRow{Result: cliinstall.UpgradeResult{
+				Target: "wb", Outcome: cliinstall.UpgradeOutcomeDryRun,
+				InstallMethod: selfupdate.Managed, Manager: executable, Command: executable.UpgradeCommand,
+				Current: "(devel)", Latest: "1.3.0", NonReleaseBuild: true,
+			}},
+			want: "(devel) → 1.3.0  upgrade available (Homebrew: brew upgrade --cask wb) (non-release build)",
+		},
+		{
 			name: "redirected",
 			row: UpgradeRow{Result: cliinstall.UpgradeResult{
 				Target: "ovdb", Outcome: cliinstall.UpgradeOutcomeRedirected,
@@ -93,6 +125,17 @@ func TestUpgradeLine_AllOutcomes(t *testing.T) {
 				Current: "1.0.0", Latest: "1.1.0", ResolvedPath: "/src/foo/foo",
 			}},
 			want: "1.0.0 → 1.1.0  ambiguous install at /src/foo/foo — update manually",
+		},
+		{
+			// PlanUpgrade/ExecuteUpgrade's own ambiguous path never resolves
+			// Latest at all (UpdateAt's ambiguous check fails before any
+			// lookup) — no dangling "→ ".
+			name: "refused ambiguous no lookup",
+			row: UpgradeRow{Result: cliinstall.UpgradeResult{
+				Target: "foo", Outcome: cliinstall.UpgradeOutcomeRefused,
+				Current: "1.0.0", ResolvedPath: "/src/foo/foo",
+			}},
+			want: "1.0.0  ambiguous install at /src/foo/foo — update manually",
 		},
 		{
 			name: "declined",
@@ -419,6 +462,29 @@ func TestUpgradeConfirm_InteractivePromptReadsStdin(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Upgrade ovdb, wb? [y/N] ") {
 		t.Errorf("prompt = %q", out.String())
+	}
+}
+
+// TestUpgradeConfirm_TagsNonReleaseBuildInPrompt is task-22 review S3: the
+// confirmation prompt itself names a non-release build, not only a
+// separate stderr warning.
+func TestUpgradeConfirm_TagsNonReleaseBuildInPrompt(t *testing.T) {
+	var out bytes.Buffer
+	confirm := UpgradeConfirm(ConfirmOptions{
+		In:          strings.NewReader("y\n"),
+		Out:         &out,
+		Interactive: func() bool { return true },
+	})
+	pending := []cliinstall.UpgradeResult{
+		{Target: "ovdb", Outcome: cliinstall.UpgradeOutcomeDryRun},
+		{Target: "ingitdb", Outcome: cliinstall.UpgradeOutcomeDryRun, NonReleaseBuild: true},
+	}
+	if _, err := confirm(pending); err != nil {
+		t.Fatalf("confirm error = %v", err)
+	}
+	want := "Upgrade ovdb, ingitdb (non-release build)? [y/N] "
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("prompt = %q, want it to contain %q", out.String(), want)
 	}
 }
 
