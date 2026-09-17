@@ -17,8 +17,9 @@ thirteen repositories: the `cliinstall` library in `strongo/cli-helpers`, the
 `version --json` contract in `strongo/buildinfo`, `install`, `upgrade` and
 `version --json` wiring in all nine fleet CLIs — moving `ingitdb`, `ovdb` and `synchestra` onto
 `cli-helpers/selfupdate` and giving `datatug` a self-update — self-update-only
-migrations of `synchestra-channel` and `synchestra-vm-host`, and deprecation of
-the standalone `strongo/selfupdate` module once nothing imports it.
+migrations of `synchestra-channel` and `synchestra-vm-host`, and confirming
+that the pre-rename `github.com/strongo/selfupdate` import path (this same
+repository under its old name) has no remaining fleet consumer.
 
 ### Journey
 
@@ -63,8 +64,9 @@ In the user's own words, with the observable good result of each stage:
 ## Approach
 
 Library in five small same-repository tasks, the buildinfo contract in
-parallel, then one task per consumer repository, then deprecation of the old
-module and one whole-journey verification against real published releases.
+parallel, then one task per consumer repository, then confirmation that the
+pre-rename `strongo/selfupdate` import path has no remaining consumer and one
+whole-journey verification against real published releases.
 
 - **Library split (cli-helpers).** task-1 (`selfupdate` placement primitive and
   failure kinds) and task-2 (catalog) touch disjoint packages and MAY run in
@@ -138,7 +140,8 @@ from a locally built binary. Each consumer's thin `install` Feature also covers
 **Id:** task-1
 **Verifies:** cli-install#ac:direct-install-writes-only-verified-new-files
 **Depends-On:** —
-**Status:** planning
+**Status:** complete
+**Note:** Released as selfupdate InstallNew placement primitive, v0.14.0 (cli-helpers PR #26).
 
 Repository `strongo/cli-helpers`, package `selfupdate` only; parallel-capable
 with task-2. Export a verified-download-to-new-path primitive reusing the
@@ -157,7 +160,8 @@ self-update tests unchanged, Windows CI job green.
 **Id:** task-2
 **Verifies:** cli-install#ac:catalog-matrix-is-valid
 **Depends-On:** —
-**Status:** planning
+**Status:** complete
+**Note:** Catalog, snapshots and matrix landed in cli-helpers PR #27.
 
 Repository `strongo/cli-helpers`, new package `cliinstall` catalog files only;
 parallel-capable with task-1. Nine entries with identity constructors
@@ -176,7 +180,8 @@ Files: `cliinstall/catalog*.go`, `cliinstall/testdata/**`,
 **Id:** task-3
 **Verifies:** cli-install#ac:listing-is-offline-and-read-only, cli-install#ac:older-builds-degrade-gracefully
 **Depends-On:** 2, 6
-**Status:** planning
+**Status:** complete
+**Note:** Released as status locate/probe, v0.16.0 (cli-helpers PR #28).
 
 Repository `strongo/cli-helpers`, `cliinstall` status files. Locate across
 absolute `PATH` entries, host directory and `--dir`; classify unresolved and
@@ -194,7 +199,8 @@ bump `github.com/strongo/buildinfo` to task-6's tag, `go mod tidy -diff`.
 **Id:** task-4
 **Verifies:** cli-install#ac:install-destination-follows-policy, cli-install#ac:homebrew-host-installs-by-cask, cli-install#ac:direct-install-writes-only-verified-new-files, cli-install#ac:batch-reports-every-target
 **Depends-On:** 1, 3
-**Status:** planning
+**Status:** complete
+**Note:** Released as planner/destination-policy/batch installer, v0.17.0 (cli-helpers PR #29).
 
 Repository `strongo/cli-helpers`, `cliinstall` planning and install files.
 Method order, per-user bin directory (`~/.local/bin`,
@@ -212,7 +218,8 @@ per-OS table cases (Windows paths tested by injected OS). Verification:
 **Id:** task-5
 **Verifies:** cli-install#ac:listing-is-offline-and-read-only, cli-install#ac:batch-reports-every-target, cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes
 **Depends-On:** 4
-**Status:** planning
+**Status:** complete
+**Note:** Released as output writers and Cobra install adapter, v0.19.0 (cli-helpers PR #32).
 
 Repository `strongo/cli-helpers`. Framework-neutral text and JSON writers
 (labelled dates, additional copies, warnings on stderr), and
@@ -230,7 +237,8 @@ offline. Update `README.md` and move the Feature to Implementing. Files:
 **Id:** task-6
 **Verifies:** cli-install#ac:version-json-is-uniform-and-quiet
 **Depends-On:** —
-**Status:** planning
+**Status:** complete
+**Note:** Released as buildinfo v0.3.0 (version --json contract).
 
 Repository `strongo/buildinfo` (no `spec/`); independent of tasks 1–2. Track
 whether `date` came from link-time stamping or `vcs.time`; export the JSON type
@@ -246,7 +254,8 @@ produces the next minor tag.
 **Id:** task-7
 **Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:version-json-is-uniform-and-quiet, cli-install#ac:self-update-equals-upgrade-self
 **Depends-On:** 22, 6
-**Status:** planning
+**Status:** complete
+**Note:** wb PR #565 merged; cli-helpers v0.136.0 tagged, release in progress.
 
 Repository `sneat-dev/wb`. Bump `cli-helpers` and `buildinfo`; `wb version
 --json` adds `name`, `commit`, `date`, `date_source` beside `revision`/`built`
@@ -263,7 +272,8 @@ gate plus the common checks.
 **Id:** task-8
 **Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:version-json-is-uniform-and-quiet, cli-install#ac:self-update-equals-upgrade-self
 **Depends-On:** 22, 6
-**Status:** planning
+**Status:** complete
+**Note:** specscore-cli PR #212 merged; release in progress.
 
 Repository `specscore/specscore-cli`. Bump `cli-helpers` (from v0.9.4) and
 `buildinfo`; self-update `Config` from the catalog keeping Homebrew/Scoop/WinGet
@@ -280,7 +290,8 @@ common checks.
 **Id:** task-9
 **Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:version-json-is-uniform-and-quiet, cli-install#ac:self-update-equals-upgrade-self
 **Depends-On:** 22, 6
-**Status:** planning
+**Status:** complete
+**Note:** chatwright/cli PR #28 merged; release NOT shipped — needs a manually pushed tag and founder confirmation of macOS notarization secrets (MACOS_SIGN_*); blocks task-19's chatwright rows.
 
 Repository `chatwright/cli`. Bump `cli-helpers` (from v0.9.4) and `buildinfo`;
 add `--json` to chatwright's own `version` command (buildinfo type plus optional
@@ -300,7 +311,8 @@ reported, not worked around.
 **Id:** task-10
 **Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:self-update-equals-upgrade-self
 **Depends-On:** 22, 6
-**Status:** planning
+**Status:** complete
+**Note:** code-grapher/codegrapher PR #46 merged; released v0.13.0.
 
 Repository `code-grapher/codegrapher`. Bump `cli-helpers` and `buildinfo`;
 self-update `Config` from the catalog (flat `checksums.txt`, keep `AfterUpdate`
@@ -316,7 +328,8 @@ scripts) plus common checks.
 **Id:** task-11
 **Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:self-update-equals-upgrade-self
 **Depends-On:** 22, 6
-**Status:** planning
+**Status:** complete
+**Note:** cover100-cli PR #1 merged; release in progress.
 
 Repository `sneat-dev/cover100-cli`. Bump `cli-helpers` and `buildinfo`;
 self-update `Config` from the catalog (no managers); `install` mapper treating
@@ -332,7 +345,8 @@ amendment. Verification: coverage floor 100% plus common checks.
 **Id:** task-12
 **Verifies:** cli-install#ac:datatug-installs-ovdb-and-ovdb-sees-datatug, cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:self-update-equals-upgrade-self
 **Depends-On:** 22, 6
-**Status:** planning
+**Status:** complete
+**Note:** ovdb merged to main at 5e7b44f; released v0.15.0.
 
 Repository `openvaultdb/ovdb` (no `spec/`; record configuration in `README.md`).
 Replace `github.com/strongo/selfupdate` v0.6.0 with `cli-helpers/selfupdate` and
@@ -348,7 +362,8 @@ Verification: common checks, no `strongo/selfupdate` import, `ovdb self-update
 **Id:** task-13
 **Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:self-update-equals-upgrade-self
 **Depends-On:** 22, 6
-**Status:** planning
+**Status:** complete
+**Note:** synchestra PR #30 merged (squash — repo disallows merge commits); released cli-v0.21.0.
 
 Repository `synchestra-io/synchestra`. Replace `strongo/selfupdate` v0.4.0 with
 `cli-helpers/selfupdate`; `Config` from the catalog
@@ -368,7 +383,8 @@ resolves the newest `cli-v*` release.
 **Id:** task-14
 **Verifies:** cli-install#ac:catalog-matrix-is-valid, cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:version-json-is-uniform-and-quiet, cli-install#ac:self-update-equals-upgrade-self
 **Depends-On:** 22, 6
-**Status:** planning
+**Status:** complete
+**Note:** ingitdb-cli PR #159 merged; released v0.67.0.
 
 Repository `ingitdb/ingitdb-cli`. Delete `internal/selfupdate`; rebuild
 `cmd/ingitdb/commands/self_update.go` on `cli-helpers/selfupdate/cobracmd`.
@@ -396,7 +412,8 @@ Verification: 80% floor, `golangci-lint run` with the repository config, no
 **Id:** task-15
 **Verifies:** cli-install#ac:datatug-installs-ovdb-and-ovdb-sees-datatug, cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:version-json-is-uniform-and-quiet, cli-install#ac:self-update-equals-upgrade-self
 **Depends-On:** 22, 6
-**Status:** planning
+**Status:** complete
+**Note:** datatug-cli PR #257 merged; released v0.31.0.
 
 Repository `datatug/datatug-cli`. Releases already carry the default GoReleaser
 identity (`datatug_<v>_<os>_<arch>` tarballs, windows zip,
@@ -405,9 +422,12 @@ Add `self-update` (no `update` alias — the earlier plan's alias is dropped
 before it ships) from the catalog `Config` with `HomebrewCask("datatug")` steps,
 `install` and `upgrade`, in
 `apps/datatugapp/commands/{cmd_self_update,cmd_install,cmd_upgrade}.go` following that
-package's layout, registered where `main.go` builds the root. Exit mapping:
-failures → 1, `KindUnknownTarget` → 1 with a usage message, `--check` with an
-update available → 0 for both `self-update --check` and `upgrade --check`. `main.go` enqueues PostHog "CLI started"/"CLI exited"
+package's layout, registered where `main.go` builds the root. Exit mapping
+follows datatug's own CLI spec, not a single failures-to-1 rule: invalid
+arguments and `KindUnknownTarget` → 2, not-found failures → 3, I/O, permission
+and destination failures (including `KindNoInstallDir`/`KindDestinationExists`)
+→ 4, other failures → 1; `--check` with an update available → 0 for both
+`self-update --check` and `upgrade --check`. `main.go` enqueues PostHog "CLI started"/"CLI exited"
 events on every run: skip them for `version --json`. Files: those commands and
 tests, `main.go`, `go.mod`, `spec/features/cli/self-update/README.md`,
 `spec/features/cli/install/README.md`, `spec/features/cli/version/README.md`
@@ -420,7 +440,8 @@ fully covered, a test proving no telemetry event for `version --json`,
 **Id:** task-16
 **Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes
 **Depends-On:** 1
-**Status:** planning
+**Status:** complete
+**Note:** synchestra-channel self-update migration merged to main (synchestra-io/synchestra-servers).
 
 Repository `synchestra-io/synchestra-servers`. Replace `strongo/selfupdate`
 v0.4.0 in `cmd/synchestra-channel/selfupdate.go` with `cli-helpers/selfupdate`
@@ -437,7 +458,8 @@ import, `synchestra-channel self-update --dry-run` resolves the newest
 **Id:** task-17
 **Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes
 **Depends-On:** 1
-**Status:** planning
+**Status:** complete
+**Note:** synchestra-vm-host self-update migration merged to main (synchestra-io/synchestra-vm).
 
 Repository `synchestra-io/synchestra-vm` (no `spec/`). Same migration for
 `cmd/synchestra-vm-host/selfupdate.go` (tag prefix `vm-`, flat `checksums.txt`,
@@ -445,27 +467,34 @@ nil managers), keeping its error mapping; no `install`. Files: that file and its
 test, `go.mod`. Verification: `go test ./...`, `go mod tidy -diff`, no
 `strongo/selfupdate` import, `synchestra-vm-host self-update --dry-run`.
 
-### Task 18: deprecate strongo/selfupdate
+### Task 18: confirm no fleet consumer of strongo/selfupdate — closed not applicable
 
 **Id:** task-18
 **Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes
 **Depends-On:** 12, 13, 16, 17
-**Status:** planning
+**Status:** aborted
+**Note:** Not applicable: github.com/strongo/selfupdate is the pre-rename module path of this same repository (GitHub redirects it to strongo/cli-helpers), so there is no separate repository to mark deprecated or archive. Verified no go.mod on main imports the old path in any of the 11 fleet repositories.
 
-Repository `strongo/selfupdate`. First prove no importer remains: `gh search code
-"github.com/strongo/selfupdate" --owner` for each fleet org plus a grep of local
-clones' `go.mod` files, excluding the module itself. Then add a `// Deprecated:
-use github.com/strongo/cli-helpers/selfupdate` comment on the `module` line of
-`go.mod` and a deprecation notice at the top of `README.md`, and release a patch
-tag so the Go toolchain surfaces it. Archiving the repository is left to the
-founder and recorded as a recommendation in the report.
+Repository `strongo/cli-helpers` — no separate repository exists to act on.
+`github.com/strongo/selfupdate` is the pre-rename module path of this same
+repository; GitHub redirects requests for it to `strongo/cli-helpers`, so there
+is no other `go.mod` to mark `// Deprecated:` and no other `README.md` to carry
+a deprecation notice, and no separate patch tag to release. Verified instead,
+for all eleven fleet repositories (the nine catalog CLIs plus
+`synchestra-servers` and `synchestra-vm`), that no `go.mod` on `main` imports
+the old `github.com/strongo/selfupdate` path any more:
+`gh search code "github.com/strongo/selfupdate" --owner <org>` per fleet org
+plus a grep of local clones' `go.mod` files, excluding this module itself.
+Closed as not applicable with that reason; archiving is moot because it is not
+a separate repository.
 
 ### Task 19: whole-journey verification on published releases
 
 **Id:** task-19
 **Verifies:** cli-install#ac:datatug-installs-ovdb-and-ovdb-sees-datatug, cli-install#ac:version-json-is-uniform-and-quiet
 **Depends-On:** 7, 8, 9, 10, 11, 12, 13, 14, 15, 18
-**Status:** planning
+**Status:** blocked
+**Note:** Linux direct-install path PASSED against published releases in a sandbox HOME/PATH (see task body for evidence). Outstanding: founder's Mac Homebrew cask install/upgrade dry-run, and chatwright's rows (release not yet shipped, task-9).
 
 Prerequisites: every consumer CLI has a published release carrying `install`
 `upgrade` and `version --json` (chatwright via task-9's tag push), and any batched catalog
@@ -484,12 +513,26 @@ cask, then `<host> upgrade --all --dry-run` showing `brew upgrade --cask` for
 cask-managed targets. Record evidence in this task's notes; the coordinator then commits the
 Feature's move to Stable in `cli-helpers`.
 
+**Evidence (coordinator, Linux VM, 2026-09-17):** run against the published
+releases in a sandbox `HOME`/`PATH`: `datatug install` listed `ingitdb`, `ovdb`
+and `specscore`, each with description and Why; `datatug install ovdb --yes`
+showed details, plan and asset URL and installed ovdb v0.15.0; `ovdb install`
+showed `datatug: installed v0.31.0, built 2026-09-17, 947d77f`; `ovdb upgrade
+--all --check` reported `datatug` and `ovdb` up to date (exit 0), matching
+`ovdb self-update --check`; a real upgrade from ovdb 0.14.1 via
+`datatug upgrade ovdb --yes` reached 0.15.0, verified via `ovdb version
+--json`. Journey steps 1–6 PASSED for the Linux direct-install path. Not yet
+run: the founder's Mac Homebrew cask install/upgrade dry-run, and chatwright's
+rows, since its release has not shipped (task-9). Status is `blocked` on those
+two, not `complete`.
+
 ### Task 20: Self-Update Library amendment for upgrade
 
 **Id:** task-20
 **Verifies:** cli-install#ac:self-update-equals-upgrade-self, cli-install#ac:upgrade-respects-install-method
 **Depends-On:** —
-**Status:** planning
+**Status:** complete
+**Note:** Released as UpdateAt/ahead verdict, v0.18.0 (cli-helpers PR #31).
 
 Repository `strongo/cli-helpers`, package `selfupdate` only; MAY run in parallel
 with task-5. Implements the self-update Feature amendment (status Amending):
@@ -514,7 +557,8 @@ the ahead verdict for `self-update`.
 **Id:** task-21
 **Verifies:** cli-install#ac:upgrade-all-covers-installed-not-relevant, cli-install#ac:upgrade-respects-install-method
 **Depends-On:** 4, 20
-**Status:** planning
+**Status:** complete
+**Note:** Released as cliinstall upgrade core, v0.20.0 (cli-helpers PR #33).
 
 Repository `strongo/cli-helpers`, `cliinstall` upgrade files only. `Status`
 gains `ResolvedPath`; classification of non-host copies follows `DetectSelf`
@@ -536,7 +580,8 @@ Verification: `go test -race -count=1 ./cliinstall/...` at 100%.
 **Id:** task-22
 **Verifies:** cli-install#ac:self-update-equals-upgrade-self, cli-install#ac:upgrade-all-covers-installed-not-relevant
 **Depends-On:** 5, 21
-**Status:** planning
+**Status:** complete
+**Note:** Released as upgrade output writers and Cobra command, v0.21.0 (cli-helpers PR #34); this is the tag consumers pin.
 
 Repository `strongo/cli-helpers`. Text and JSON writers for upgrade and check
 results (current, latest, verdict, action, command, resolved path, ahead,
@@ -626,15 +671,35 @@ Adversarial review of the landed task-21/task-22 branch (3 blocking, 6 serious, 
   `upgrade` share, so `self-update` is `upgrade <self>` with no exception.
 - **Other CLIs' after-update work:** v1 reports a `<target> self-update` finish
   hint instead of running another binary's hooks.
+- **Founder, 2026-09-17: ingitdb and specscore version lines.** Where a build
+  can be stamped from either a module tag or a GitHub release tag, the GitHub
+  release line (`v0.x`) is canonical, not any stray module-tag line. Stray
+  `v1.x` tags were already absent from GitHub for both repositories; stale
+  local `v1.x` tags were deleted. This resolves the Open Question task-14
+  carried (ingitdb's module tags vs. its GitHub releases), applied before
+  task-19 ran.
 
 ## Open Questions
 
-- ingitdb's module tags (`v1.31.x`) and its GitHub releases (`v0.65.x`) are on
-  different version lines, so a build stamped from a module tag orders above
-  every release: `self-update` offers a "downgrade" to `0.65.16` today and
-  `upgrade` will report it as ahead forever. Which line is canonical, and should
-  the release tags or the module tags be aligned? Owner: task-14 brings this to
-  the founder and applies the decision before task-19 runs.
+Rollout follow-ups found during task-19's Linux verification (2026-09-17), not
+yet decided or fixed:
+
+- (a) Unauthenticated GitHub API calls hit the 60/hour rate limit during smoke
+  tests; fall back to `gh auth token` when `GH_TOKEN`/`GITHUB_TOKEN` are both
+  unset, instead of failing or waiting.
+- (b) The `upgrade` success line mixes a bare and a `v`-prefixed version in the
+  same sentence (for example "0.14.1 → v0.15.0"); pick one convention.
+- (c) A manual copy inside a system prefix (for example an AUR-installed
+  `/usr/bin/ingitdb`) is still replaced when the prefix is writable, the same
+  question already open on the Feature (see
+  [Feature Open Questions](../../features/cli-install/README.md#open-questions));
+  founder decision pending.
+- (d) Running another CLI's `AfterUpdate` hooks on a non-host `upgrade` target
+  is still an open design question (see the Feature's Open Question on this);
+  current behavior ships only the `<target> self-update` finish hint.
+- (e) Two defects hit during rollout and filed rather than worked around: a
+  `wb` landing issue, sneat-dev/wb#561, and a `specscore` test git-env
+  pollution issue, specscore/specscore-cli#211.
 
 ---
 *This document follows the https://specscore.md/plan-specification*

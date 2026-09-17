@@ -40,6 +40,11 @@ This repository owns the behavior contract. Each consuming CLI carries a thin
 Feature that points here and specifies only its own configuration and deviations
 — see [Consumers](#consumers).
 
+Rollout status (2026-09-17): every task but chatwright's release and the Mac
+Homebrew cask verification has landed — see [Plan: CLI install command across
+the fleet](../../plans/cli-install/README.md) — so this Feature stays
+Implementing rather than Stable until both land.
+
 ## Problem
 
 The fleet's CLIs are used together — DataTug reads inGitDB databases, Synchestra
@@ -767,9 +772,11 @@ feature every fleet binary MUST move its self-update onto
 only and do not get `install` because they are daemons deployed to hosts, not
 tools a developer installs beside another CLI. `datatug` MUST gain a self-update
 command built from the same package. Each migrated binary MUST keep its
-documented self-update exit-code contract. When no fleet module imports
-`github.com/strongo/selfupdate`, that module MUST be marked deprecated in its
-README and `go.mod`; archiving it is the founder's decision.
+documented self-update exit-code contract. `github.com/strongo/selfupdate` is
+the pre-rename module path of this same repository — GitHub redirects it to
+`github.com/strongo/cli-helpers` — so once no fleet module imports it, there is
+no separate repository to mark deprecated or archive; the cutover is verified
+by confirming the old import is gone fleet-wide.
 
 ## Consumers
 
@@ -897,7 +904,7 @@ Homebrew, and deviations; the behavior above is inherited, not restated.
 
 **Given** the nine hosts building `install` from the Cobra adapter, the migrated self-update commands of `ingitdb`, `ovdb`, `synchestra`, `synchestra-channel` and `synchestra-vm-host`, and datatug's new self-update
 **When** each host runs `install nosuchcli` and `upgrade nosuchcli`, and each migrated binary runs its existing self-update tests
-**Then** each host exits with its own usage code and a message without a `self-update:` prefix, no fleet module imports `github.com/strongo/selfupdate` or ingitdb's `internal/selfupdate`, each migrated binary's documented self-update exit codes are unchanged, `github.com/strongo/selfupdate` is marked deprecated, and the library and consumer install tests ran without network, `brew`, or writes outside temporary directories.
+**Then** each host exits with its own usage code and a message without a `self-update:` prefix, no fleet module imports `github.com/strongo/selfupdate` or ingitdb's `internal/selfupdate`, each migrated binary's documented self-update exit codes are unchanged, and the library and consumer install tests ran without network, `brew`, or writes outside temporary directories; `github.com/strongo/selfupdate` needs no separate deprecation notice because it is the pre-rename path of this same repository.
 
 ## Open Questions
 
