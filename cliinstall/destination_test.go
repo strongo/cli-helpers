@@ -357,6 +357,11 @@ func TestDestinationDenylistFailure_ReusedSystemPackageDir(t *testing.T) {
 // (see deniedRoots' doc comment) even though SystemPackageDirs does not
 // list it.
 func TestDeniedRoots_WindowsReusesSystemPackageDirsPlusProgramData(t *testing.T) {
+	// Stub the runtime.GOROOT fallback: on a real toolchain host (e.g. a
+	// Windows CI runner) it would append the host's Go root to the list.
+	orig := goroot
+	t.Cleanup(func() { goroot = orig })
+	goroot = func() string { return "" }
 	getenv := func(k string) string {
 		switch k {
 		case "ProgramData":
