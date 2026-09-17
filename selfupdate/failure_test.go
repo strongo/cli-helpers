@@ -126,11 +126,34 @@ func TestAction_String(t *testing.T) {
 		{ActionAborted, "aborted"},
 		{ActionPlanned, "planned"},
 		{ActionManagerExecuted, "manager_executed"},
+		{ActionAhead, "ahead"},
 		{Action(999), "unknown"},
 	}
 	for _, c := range cases {
 		if got := c.a.String(); got != c.want {
 			t.Errorf("Action(%d).String() = %q, want %q", c.a, got, c.want)
+		}
+	}
+}
+
+// Appending ActionAhead after the existing values (REQ: ahead-of-latest)
+// must never renumber a value a consumer already switches on.
+func TestAction_ExistingValuesPinned(t *testing.T) {
+	cases := []struct {
+		a    Action
+		want int
+	}{
+		{ActionRedirected, 0},
+		{ActionAlreadyCurrent, 1},
+		{ActionUpdated, 2},
+		{ActionAborted, 3},
+		{ActionPlanned, 4},
+		{ActionManagerExecuted, 5},
+		{ActionAhead, 6},
+	}
+	for _, c := range cases {
+		if got := int(c.a); got != c.want {
+			t.Errorf("%s = %d, want %d (an Action value must never change once shipped)", c.a, got, c.want)
 		}
 	}
 }

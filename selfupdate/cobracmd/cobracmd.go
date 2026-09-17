@@ -68,12 +68,16 @@ type ErrorMapper interface {
 	// mapped so hosts can preserve their operational-failure exit codes.
 	Failure(err error) error
 	// UpdateAvailable is called after a successful --check whose verdict is
-	// not UpToDate — that covers both selfupdate.UpdateAvailable and
-	// selfupdate.Undetermined, since neither is "up to date" (a consumer
-	// that wants a dedicated exit code for "update available" typically
-	// wants it for both). Returning nil reports success (exit 0) despite an
-	// update being available; returning an error is how a consumer
-	// reserves e.g. a dedicated exit code for this case.
+	// neither UpToDate nor Ahead — that covers both selfupdate.
+	// UpdateAvailable and selfupdate.Undetermined, since neither is "up to
+	// date" (a consumer that wants a dedicated exit code for "update
+	// available" typically wants it for both). selfupdate.Ahead is excluded
+	// the same as UpToDate (REQ: ahead-of-latest): a build ahead of the
+	// latest stable release has nothing to update to, so it must never
+	// signal "update available" — a machine on a source or pseudo-version
+	// build must not trip this forever. Returning nil reports success (exit
+	// 0) despite an update being available; returning an error is how a
+	// consumer reserves e.g. a dedicated exit code for this case.
 	UpdateAvailable(res selfupdate.CheckResult) error
 }
 
@@ -245,12 +249,16 @@ func runCheck(cmd *cobra.Command, cfg selfupdate.Config, opts CommandOptions, fo
 		}
 	} else {
 		cliui.WriteCheck(out, cfg, result)
-		if result.Verdict != selfupdate.UpToDate {
+		if result.Verdict != selfupdate.UpToDate && result.Verdict != selfupdate.Ahead {
 			cliui.WriteNextStep(out, cfg, detection, cmd.CommandPath())
 		}
 	}
 
-	if result.Verdict != selfupdate.UpToDate && opts.Errors != nil {
+	// REQ: ahead-of-latest — a check-only report must not treat Ahead as an
+	// available update, so a consumer's "update available" mapping (and its
+	// exit-code contract) is not invoked for a build ahead of the latest
+	// stable release, same as UpToDate.
+	if result.Verdict != selfupdate.UpToDate && result.Verdict != selfupdate.Ahead && opts.Errors != nil {
 		return opts.Errors.UpdateAvailable(result)
 	}
 	return nil

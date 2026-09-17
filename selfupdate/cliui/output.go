@@ -92,6 +92,9 @@ func WriteOutcome(out, errOut io.Writer, cfg selfupdate.Config, outcome selfupda
 		}
 	case selfupdate.ActionAlreadyCurrent:
 		writeStyled(out, successStyle, fmt.Sprintf("[OK] %s is already up to date (%s).\n", cfg.BinaryName, outcome.Result.Current))
+	case selfupdate.ActionAhead:
+		writeStyled(out, successStyle, fmt.Sprintf("[OK] %s (%s) is ahead of the latest published release (%s); nothing to do.\n",
+			cfg.BinaryName, outcome.Result.Current, outcome.Result.Latest))
 	case selfupdate.ActionAborted:
 		fmt.Fprintln(out, "self-update: aborted; binary left unchanged.") //nolint:errcheck
 	case selfupdate.ActionPlanned:
@@ -275,6 +278,9 @@ func WriteCheck(out io.Writer, cfg selfupdate.Config, result selfupdate.CheckRes
 		fmt.Fprintf(out, "%s is up to date (%s).\n", cfg.BinaryName, result.Current) //nolint:errcheck
 	case selfupdate.Undetermined:
 		fmt.Fprintf(out, "current %s version is undetermined (%s); latest stable is %s.\n", //nolint:errcheck
+			cfg.BinaryName, result.Current, result.Latest)
+	case selfupdate.Ahead:
+		fmt.Fprintf(out, "%s (%s) is ahead of the latest published release (%s); nothing to do.\n", //nolint:errcheck
 			cfg.BinaryName, result.Current, result.Latest)
 	default:
 		fmt.Fprintf(out, "update available: %s → %s\n", result.Current, result.Latest) //nolint:errcheck
