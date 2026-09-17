@@ -35,6 +35,18 @@ func (i Identity) String() string {
 
 // PluginIdentity is globally stable and deliberately separate from a skill
 // directory name, which avoids flat-directory collisions between products.
+//
+// A plugin identity is also Sync's independent-install and removal boundary:
+// one Sync call computes desired state, including removals, only within the
+// plugin keys present in that call's Config.Bundles, and only from skills
+// that plugin key already owns. Two skills sharing one PluginIdentity are
+// therefore installed and removed together — Sync-ing one of them alone
+// drops the other, because it is no longer "desired" under that shared key.
+// A caller that wants each skill installable and removable on its own (for
+// example a CLI offering per-skill consent, one `install <skill>` call per
+// bundle) MUST give each such skill its own PluginIdentity. Skills owned by a
+// different plugin key, or never registered with skillsync at all, are never
+// touched by a Sync call that does not name their key.
 type PluginIdentity struct {
 	Publisher string `json:"publisher"`
 	Name      string `json:"name"`

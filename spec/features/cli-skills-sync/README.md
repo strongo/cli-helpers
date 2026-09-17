@@ -50,6 +50,16 @@ bounds. A source mismatch, including different content under the same revision,
 MUST be reported as a conflict for the whole plugin and leave existing content
 unchanged.
 
+A `PluginIdentity` is also the install/removal unit: one `Sync` call desires,
+and may remove, only the skills already owned by the plugin keys present in
+that call's `Config.Bundles`. A host offering several independently
+installable skills (per-skill explicit consent, one `install <skill>` call
+per bundle) MUST give each such skill its own `PluginIdentity`; skills that
+share one identity are installed and removed together. Skills owned by a
+different plugin, or never registered with skillsync, are left untouched by a
+`Sync` call that does not name their key — this is validated in
+`skillsync/perskill_identity_test.go`.
+
 ### REQ: crash-safe-transaction
 
 The library MUST classify the whole requested plan before its first target
