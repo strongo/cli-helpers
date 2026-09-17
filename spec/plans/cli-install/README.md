@@ -14,8 +14,8 @@ status: Draft
 
 Implements [Feature: cli-install](../../features/cli-install/README.md) across
 thirteen repositories: the `cliinstall` library in `strongo/cli-helpers`, the
-`version --json` contract in `strongo/buildinfo`, `install` plus `version --json`
-wiring in all nine fleet CLIs — moving `ingitdb`, `ovdb` and `synchestra` onto
+`version --json` contract in `strongo/buildinfo`, `install`, `upgrade` and
+`version --json` wiring in all nine fleet CLIs — moving `ingitdb`, `ovdb` and `synchestra` onto
 `cli-helpers/selfupdate` and giving `datatug` a self-update — self-update-only
 migrations of `synchestra-channel` and `synchestra-vm-host`, and deprecation of
 the standalone `strongo/selfupdate` module once nothing imports it.
@@ -43,6 +43,11 @@ In the user's own words, with the observable good result of each stage:
    result: one JSON document with one result per target, ingitdb installed,
    `nosuchcli` refused with the valid ids, and an exit code that follows ovdb's
    own contract.
+6. **"Later I ran `ovdb upgrade --all --check`."** — Good result: `datatug` and
+   `ovdb` (and `ingitdb`) are listed with path, install method, current and
+   latest version and verdict; nothing changes; a build ahead of its latest
+   release is shown as ahead, never offered a downgrade; the exit code follows
+   ovdb's mapping of "upgrades available", exactly as `ovdb self-update --check`.
 
 | Journey step | Verified by |
 |---|---|
@@ -51,6 +56,7 @@ In the user's own words, with the observable good result of each stage:
 | 3 | task-1 (no-replace placement), task-4 (install and verification), task-19 |
 | 4 | task-3 (JSON probe), task-12 (ovdb), task-15 (datatug `version --json`), task-19 |
 | 5 | task-4 (batch), task-5 (JSON, error mapper), task-12 (ovdb exit contract), task-19 |
+| 6 | task-20 (`UpdateAt`, upgrade core, direction check), task-21 (`upgrade` command, check mapping), task-12, task-15, task-19 |
 
 ## Approach
 
@@ -63,10 +69,15 @@ module and one whole-journey verification against real published releases.
   parallel in separate worktrees; task-6 (`strongo/buildinfo`) is a different
   repository and is independent of both. task-3 (status) needs task-2 and
   task-6's exported JSON type; task-4 (planner and installer) needs task-1 and
-  task-3; task-5 (output and Cobra adapter) needs task-4. `cli-helpers`
+  task-3; task-5 (output and Cobra adapter) needs task-4. The `upgrade`
+  command adds task-20 (numbered after the existing tasks, playing the role of
+  5b; library core: `selfupdate.Config.UpdateAt` and
+  `cliinstall.Upgrade`), which touches files disjoint from task-5 and MAY run in
+  parallel with it, and task-21 (the 5c role: `upgrade` writers and Cobra command), which
+  needs task-5 and task-20. `cli-helpers`
   releases a minor tag on every `feat:` merge to `main`, so task-1's tag already
   unblocks the self-update-only migrations (task-16, task-17). Consumers pin the
-  next minor tag produced after task-5 and task-6 land, read from
+  next minor tag produced after task-21 and task-6 land, read from
   `gh release list`, not a guessed number.
 - **Catalog text is frozen in task-2.** Its relevance texts get their own
   adversarial check against each pair's cited basis before merge. Text fixes
@@ -74,14 +85,15 @@ module and one whole-journey verification against real published releases.
   (task-19 prerequisite), not by re-bumping already-released consumers one at a
   time.
 - **One task per consumer repository** (task-7 to task-15) combines dependency
-  bumps, self-update migration or addition, `install` wiring, `version --json`,
+  bumps, self-update migration or addition, `install` and `upgrade` wiring,
+  `version --json`,
   explicit exit mapping of the three new failure kinds, the GoReleaser-versus-
   catalog naming test, and thin Feature — one branch, one CI run, one release
   per repository. chatwright is the exception: its release runs only on a pushed
   tag (task-9).
 - **Concurrency:** the VM allows at most two concurrent Go lanes. Suggested
   pairing: (task-1, task-2), (task-6, task-16), (task-3, task-17), task-4,
-  task-5, then consumers with migrations first: (task-14 ingitdb, task-13
+  (task-5, task-20), task-21, then consumers with migrations first: (task-14 ingitdb, task-13
   synchestra), (task-12 ovdb, task-15 datatug), (task-7 wb, task-8 specscore),
   (task-9 chatwright, task-10 codegrapher), task-11 cover100, then task-18 and
   task-19.
@@ -93,17 +105,27 @@ module and one whole-journey verification against real published releases.
 - **Exit codes:** each host adds explicit cases for `KindUnknownTarget`
   (usage/invalid-argument code), `KindNoInstallDir` and `KindDestinationExists`
   (invalid-state or general failure code) with a command-neutral message, and
-  keeps its self-update mapping for the shared kinds. A declined confirmation,
-  an already-installed target and a print-only Homebrew redirect exit 0.
+  keeps its self-update mapping for the shared kinds. `upgrade` uses the same
+  mapper; its upgrades-available method maps exactly as that host's
+  self-update `UpdateAvailable`. A declined confirmation, an already-installed
+  or ahead-of-latest target and a print-only Homebrew redirect exit 0.
+- **`update` alias:** kept only where a released CLI already ships it (wb,
+  specscore, chatwright and the others that have it today); not added to
+  `upgrade` or to any CLI that lacks it; datatug's planned alias is dropped;
+  ingitdb never gets one because its `update` edits records.
 
 Per-repository verification in every consumer task, in addition to the listed
 commands: `go build ./...`, `go vet ./...`, `go test ./...` with the repository's
 coverage gate and no network access in install tests (release endpoints
 injected), `go mod tidy -diff`, `specscore spec lint` where the repository has
-`spec/`, a test of `install nosuchcli` asserting exit code and message, the
-GoReleaser-naming test, and a local smoke run of `<cli> version --json`,
-`<cli> install`, `<cli> install --all --format json` and
-`<cli> install <target> --dry-run` from a locally built binary.
+`spec/`, tests of `install nosuchcli` and `upgrade nosuchcli` asserting exit
+code and message, a test that `self-update` and `upgrade <self>` reach the same
+library call, the GoReleaser-naming test, and a local smoke run of
+`<cli> version --json`, `<cli> install`, `<cli> install --all --format json`,
+`<cli> install <target> --dry-run`, `<cli> upgrade`,
+`<cli> upgrade --all --check --format json` and `<cli> upgrade --all --dry-run`
+from a locally built binary. Each consumer's thin `install` Feature also covers
+`upgrade` (exit mapping of the upgrades-available signal and alias status).
 
 ## Tasks
 
@@ -215,11 +237,11 @@ whether `date` came from link-time stamping or `vcs.time`; export the JSON type
 ./...` with full coverage of new code; stdout is exactly one object. Merge
 produces the next minor tag.
 
-### Task 7: wb install wiring
+### Task 7: wb install and upgrade wiring
 
 **Id:** task-7
-**Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:version-json-is-uniform-and-quiet
-**Depends-On:** 5, 6
+**Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:version-json-is-uniform-and-quiet, cli-install#ac:self-update-equals-upgrade-self
+**Depends-On:** 21, 6
 **Status:** planning
 
 Repository `sneat-dev/wb`. Bump `cli-helpers` and `buildinfo`; `wb version
@@ -232,11 +254,11 @@ Files: `cmd/wb/{version,selfupdate,install}.go` and tests, root registration,
 to catalog identity, `README.md`. Verification: `go run ./cmd/wb coverage .`
 gate plus the common checks.
 
-### Task 8: specscore install wiring
+### Task 8: specscore install and upgrade wiring
 
 **Id:** task-8
-**Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:version-json-is-uniform-and-quiet
-**Depends-On:** 5, 6
+**Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:version-json-is-uniform-and-quiet, cli-install#ac:self-update-equals-upgrade-self
+**Depends-On:** 21, 6
 **Status:** planning
 
 Repository `specscore/specscore-cli`. Bump `cli-helpers` (from v0.9.4) and
@@ -249,11 +271,11 @@ tests, `spec/features/cli/install/README.md`, `spec/features/cli/version/README.
 amendment for `--json`. Verification: `scripts/coverage-gate.sh` (100%) plus
 common checks.
 
-### Task 9: chatwright install wiring and release
+### Task 9: chatwright install and upgrade wiring and release
 
 **Id:** task-9
-**Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:version-json-is-uniform-and-quiet
-**Depends-On:** 5, 6
+**Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:version-json-is-uniform-and-quiet, cli-install#ac:self-update-equals-upgrade-self
+**Depends-On:** 21, 6
 **Status:** planning
 
 Repository `chatwright/cli`. Bump `cli-helpers` (from v0.9.4) and `buildinfo`;
@@ -269,11 +291,11 @@ notarization secrets with the founder, pushes the next tag, and watches the
 release; a notarization failure blocks task-19's chatwright rows and is
 reported, not worked around.
 
-### Task 10: codegrapher install wiring
+### Task 10: codegrapher install and upgrade wiring
 
 **Id:** task-10
-**Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes
-**Depends-On:** 5, 6
+**Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:self-update-equals-upgrade-self
+**Depends-On:** 21, 6
 **Status:** planning
 
 Repository `code-grapher/codegrapher`. Bump `cli-helpers` and `buildinfo`;
@@ -285,11 +307,11 @@ tests, `spec/features/install/README.md`. Verification: `CGO_ENABLED=0 go test
 -count=1 ./...` including command-tree goldens (rebaselined by the repository's
 scripts) plus common checks.
 
-### Task 11: cover100 install wiring
+### Task 11: cover100 install and upgrade wiring
 
 **Id:** task-11
-**Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes
-**Depends-On:** 5, 6
+**Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:self-update-equals-upgrade-self
+**Depends-On:** 21, 6
 **Status:** planning
 
 Repository `sneat-dev/cover100-cli`. Bump `cli-helpers` and `buildinfo`;
@@ -301,11 +323,11 @@ and `cover100 ./install` still means a path. Files:
 `spec/features/install/README.md`, `spec/features/cli-command-surface/README.md`
 amendment. Verification: coverage floor 100% plus common checks.
 
-### Task 12: ovdb self-update migration and install wiring
+### Task 12: ovdb self-update migration and install and upgrade wiring
 
 **Id:** task-12
 **Verifies:** cli-install#ac:datatug-installs-ovdb-and-ovdb-sees-datatug, cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes
-**Depends-On:** 5, 6
+**Depends-On:** 21, 6
 **Status:** planning
 
 Repository `openvaultdb/ovdb` (no `spec/`; record configuration in `README.md`).
@@ -317,11 +339,11 @@ the new kinds mapped explicitly to 1 and a neutral message. Files:
 Verification: common checks, no `strongo/selfupdate` import, `ovdb self-update
 --dry-run` names the same asset URL as before.
 
-### Task 13: synchestra self-update migration and install wiring
+### Task 13: synchestra self-update migration and install and upgrade wiring
 
 **Id:** task-13
-**Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes
-**Depends-On:** 5, 6
+**Verifies:** cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:self-update-equals-upgrade-self
+**Depends-On:** 21, 6
 **Status:** planning
 
 Repository `synchestra-io/synchestra`. Replace `strongo/selfupdate` v0.4.0 with
@@ -337,11 +359,11 @@ tests, `go.mod`, `spec/features/cli/install/README.md`,
 checks, no `strongo/selfupdate` import, `synchestra self-update --dry-run`
 resolves the newest `cli-v*` release.
 
-### Task 14: ingitdb self-update migration and install wiring
+### Task 14: ingitdb self-update migration and install and upgrade wiring
 
 **Id:** task-14
-**Verifies:** cli-install#ac:catalog-matrix-is-valid, cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:version-json-is-uniform-and-quiet
-**Depends-On:** 5, 6
+**Verifies:** cli-install#ac:catalog-matrix-is-valid, cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:version-json-is-uniform-and-quiet, cli-install#ac:self-update-equals-upgrade-self
+**Depends-On:** 21, 6
 **Status:** planning
 
 Repository `ingitdb/ingitdb-cli`. Delete `internal/selfupdate`; rebuild
@@ -352,7 +374,9 @@ so darwin and windows self-update fail today. Model Homebrew
 (`ingitdb/cli/ingitdb`) and Snap (`snap refresh ingitdb`, `/snap/` marker) as
 redirect-only; verify the Snap layout still classifies managed given the shared
 package classifies the resolved path. Preserve exit 10 for `--check` with an
-update available; map `KindUnknownTarget` to its usage code and other new kinds
+update available, and map `upgrade --check`'s upgrades-available signal to 10
+as well; wire `upgrade` with no `update` alias (ingitdb's `update` edits
+records); map `KindUnknownTarget` to its usage code and other new kinds
 explicitly. Rewrite `spec/features/cli/self-update/README.md` as a thin Feature
 pointing at the library (removing REQ checksum-verification's per-OS names and
 the hand-specified flag surface, adding `--dry-run` and `--format`); amend
@@ -363,22 +387,23 @@ Files: `cmd/ingitdb/commands/{self_update,install}.go` and tests,
 Verification: 80% floor, `golangci-lint run` with the repository config, no
 `internal/selfupdate` import, `ingitdb self-update --check` plus common checks.
 
-### Task 15: datatug self-update addition and install wiring
+### Task 15: datatug self-update addition and install and upgrade wiring
 
 **Id:** task-15
-**Verifies:** cli-install#ac:datatug-installs-ovdb-and-ovdb-sees-datatug, cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:version-json-is-uniform-and-quiet
-**Depends-On:** 5, 6
+**Verifies:** cli-install#ac:datatug-installs-ovdb-and-ovdb-sees-datatug, cli-install#ac:hosts-keep-their-exit-codes-and-cutover-completes, cli-install#ac:version-json-is-uniform-and-quiet, cli-install#ac:self-update-equals-upgrade-self
+**Depends-On:** 21, 6
 **Status:** planning
 
 Repository `datatug/datatug-cli`. Releases already carry the default GoReleaser
 identity (`datatug_<v>_<os>_<arch>` tarballs, windows zip,
 `datatug_<v>_checksums.txt`, cask `datatug/tap/datatug`), so no pipeline change.
-Add `self-update` (alias `update`) from the catalog `Config` with
-`HomebrewCask("datatug")` steps and `install`, in
-`apps/datatugapp/commands/{cmd_self_update,cmd_install}.go` following that
+Add `self-update` (no `update` alias — the earlier plan's alias is dropped
+before it ships) from the catalog `Config` with `HomebrewCask("datatug")` steps,
+`install` and `upgrade`, in
+`apps/datatugapp/commands/{cmd_self_update,cmd_install,cmd_upgrade}.go` following that
 package's layout, registered where `main.go` builds the root. Exit mapping:
 failures → 1, `KindUnknownTarget` → 1 with a usage message, `--check` with an
-update available → 0. `main.go` enqueues PostHog "CLI started"/"CLI exited"
+update available → 0 for both `self-update --check` and `upgrade --check`. `main.go` enqueues PostHog "CLI started"/"CLI exited"
 events on every run: skip them for `version --json`. Files: those commands and
 tests, `main.go`, `go.mod`, `spec/features/cli/self-update/README.md`,
 `spec/features/cli/install/README.md`, `spec/features/cli/version/README.md`
@@ -439,17 +464,65 @@ founder and recorded as a recommendation in the report.
 **Status:** planning
 
 Prerequisites: every consumer CLI has a published release carrying `install`
-and `version --json` (chatwright via task-9's tag push), and any batched catalog
+`upgrade` and `version --json` (chatwright via task-9's tag push), and any batched catalog
 text fixes have shipped in one final propagation wave. Owner: the coordinator on
 the Linux VM, in a scratch `HOME` with `PATH` reduced to system directories plus
 `$HOME/.local/bin`: download the latest `datatug` archive by hand, verify its
-checksum, run Journey steps 1–5 verbatim and capture output; then for each of the
-nine released CLIs run `<cli> install --all --format json` and `<cli> version
---json` and compare matrix rows and probe sources. Owner: the founder on the Mac
+checksum, run Journey steps 1–6 verbatim and capture output; then for each of the
+nine released CLIs run `<cli> install --all --format json`,
+`<cli> upgrade --all --check --format json` and `<cli> version --json` and
+compare matrix rows, probe sources and upgrade verdicts; finally install an
+older ovdb release by hand into the scratch bin and confirm `datatug upgrade
+--all --yes` upgrades it and leaves datatug itself current. Owner: the founder on the Mac
 with a Homebrew-installed host: `<host> install <cask target> --dry-run` and one
 real cask install of a target not yet installed, including the unsigned ingitdb
-cask. Record evidence in this task's notes; the coordinator then commits the
+cask, then `<host> upgrade --all --dry-run` showing `brew upgrade --cask` for
+cask-managed targets. Record evidence in this task's notes; the coordinator then commits the
 Feature's move to Stable in `cli-helpers`.
+
+### Task 20: upgrade library core (5b)
+
+**Id:** task-20
+**Verifies:** cli-install#ac:upgrade-all-covers-installed-not-relevant, cli-install#ac:upgrade-respects-install-method
+**Depends-On:** 4
+**Status:** planning
+
+Repository `strongo/cli-helpers`; files disjoint from task-5, so the two MAY run
+in parallel. In `selfupdate`, extract `func (c Config) UpdateAt(ctx
+context.Context, detection Detection, opts Options) (Outcome, error)` from
+`Update`, leaving `Update` as `DetectSelf` + `UpdateAt`; the existing
+`update_test.go` must pass unmodified, plus tests of `UpdateAt` on a non-running
+path (manual symlinked copy, managed executable, redirect-only, ambiguous). In
+`cliinstall`, `Upgrade(ctx, names, UpgradeOptions)` and `CheckUpgrades`: target
+selection (`--all` = installed ids including the host, undetermined skipped),
+`CompareVersions` direction check producing `ahead`, bounded lookups (one per
+target, concurrency 4, 15 s), per-target policy via `UpdateAt` with the probed
+detection and catalog managers, host last with the host's own `Config` and
+after-update hook, batch confirmation and dry run reusing task-4's gate, and
+per-target results. Files: `selfupdate/update.go`, `selfupdate/update_at_test.go`,
+`cliinstall/upgrade*.go` and tests. Verification: `go test -count=1
+-coverprofile=cover.out ./selfupdate/... ./cliinstall/...` at 100%; self-update
+Stable behavior unchanged (existing tests untouched).
+
+### Task 21: upgrade output and Cobra command (5c)
+
+**Id:** task-21
+**Verifies:** cli-install#ac:self-update-equals-upgrade-self, cli-install#ac:upgrade-respects-install-method
+**Depends-On:** 5, 20
+**Status:** planning
+
+Repository `strongo/cli-helpers`. Text and JSON writers for upgrade and check
+results (current, latest, verdict, action, command, ahead, not-installed hint)
+in `cliinstall/cliui`; `cliinstall/cobracmd` builds `upgrade` with `--all`,
+`--check`, `--yes/-y`, `--dry-run`, `--format`, no aliases, and extends the
+error mapper with an upgrades-available method; no-args runs the read-only
+report and exits 0. A test builds both `self-update` (from
+`selfupdate/cobracmd`) and `upgrade <self>` over the same fake host and asserts
+the same library call, action and failure kind for manual, executable-managed,
+redirect-only and ambiguous hosts. Files: `cliinstall/cliui/upgrade*.go`,
+`cliinstall/cobracmd/upgrade*.go`, tests, `README.md`. Verification:
+full-repository coverage at 100%, `go mod tidy -diff`, `specscore spec lint`;
+this merge's minor tag is what consumers pin.
 
 ## Review Disposition
 
@@ -482,9 +555,33 @@ Adversarial review of the first draft (2 blocking, 11 serious, 12 minor):
 - M12 task-19 ownership — fixed: coordinator on the VM, founder on the Mac; Stable move is an explicit coordinator commit.
 - (task-2 catalog review) No entry declares `LegacyVersionSignatures` — the two real old-build outputs found on this VM (a stale synchestra binary's bare `--version` printing `synchestra version 0.9.0 (92c5a01)`, and a from-source ingitdb's `--version` printing `ingitdb version unknown (built from source)`) are both multi-token lines, not the single version token REQ: status-probe-order's step 3 requires, so a declared signature could never match either one. Left empty rather than widening step 3's shape to accommodate them; that REQ is unchanged.
 
+## Decisions
+
+- **Founder, 2026-09-17: add `upgrade` in this round.** `upgrade` is the
+  fleet-wide verb; `self-update` stays as the self-descriptive, searchable
+  command and is equivalent to `upgrade <self>`; `upgrade --all` means every
+  installed catalog CLI, not the host's relevance list; the `update` alias stays
+  where it already ships and is added nowhere else (Feature section
+  "Upgrading").
+- **`upgrade` with no arguments reports instead of failing.** It runs the
+  read-only check over installed CLIs and exits 0 with the next step, because
+  one call that shows what would change serves agents and people better than a
+  usage error, and it mirrors `install` listing before acting
+  (REQ upgrade-no-args-reports).
+- **Library primitive:** `selfupdate.Config.UpdateAt(ctx, detection, opts)`,
+  extracted from `Update` without behavior change (REQ upgrade-at-detected-path).
+- **Ahead-of-latest builds:** `upgrade` checks direction itself and reports
+  `ahead` with no action; the Self-Update Library and `self-update` are
+  unchanged, which is the one documented exception to the equivalence
+  (REQ upgrade-never-downgrades; Feature Open Question on amending the library).
+
 ## Open Questions
 
-None at this time.
+- ingitdb's module tags (`v1.31.x`) and its GitHub releases (`v0.65.x`) are on
+  different version lines, so a build stamped from a module tag orders above
+  every release: `self-update` offers a "downgrade" to `0.65.16` today and
+  `upgrade` will report it as ahead forever. Which line is canonical, and should
+  task-14 align the release tags or the module tags?
 
 ---
 *This document follows the https://specscore.md/plan-specification*

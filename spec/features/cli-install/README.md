@@ -31,6 +31,11 @@ relevance texts are compiled into this module, so each CLI ships the catalog it
 was built with. Installed status comes from a new fleet-wide `version --json`
 contract that all nine CLIs implement, with a text fallback for older builds.
 
+`<cli> upgrade` brings installed catalog CLIs — named ones, or all of them with
+`--all` — to their latest release, each by the Self-Update Library's own policy
+for how that copy was installed; `self-update` is the same operation for the
+host alone.
+
 This repository owns the behavior contract. Each consuming CLI carries a thin
 Feature that points here and specifies only its own configuration and deviations
 — see [Consumers](#consumers).
@@ -430,6 +435,153 @@ MUST carry one result per named target — installed, already installed,
 redirected, dry run, declined, or failed with its typed failure — and the
 command fails when at least one target failed.
 
+### Upgrading
+
+Founder decision (2026-09-17): the fleet-wide verb is `upgrade`; `self-update`
+stays as the self-descriptive, searchable command; `upgrade --all` means every
+*installed* catalog CLI, not the host's relevance list; `self-update` is the
+shorthand for `upgrade <self>`; the `update` alias is kept where it already
+ships and not added anywhere else.
+
+`<cli> upgrade [name...] [--all] [--check] [--yes] [--dry-run] [--format text|json]`
+applies the [Self-Update Library](../self-update/README.md)'s existing update
+policy to installed catalog CLIs. Nothing below re-specifies that policy; it
+only says which copy is updated, in which order, and how results are batched.
+
+#### REQ: upgrade-targets
+
+`upgrade <name>...` MUST resolve each name against the catalog per
+[REQ: unknown-target-refused](#req-unknown-target-refused) and upgrade the copy
+[REQ: status-locate](#req-status-locate) reports for it. `upgrade --all` MUST
+target every catalog id whose status is `installed`, including the host itself,
+regardless of [REQ: relevance-matrix](#req-relevance-matrix); names together
+with `--all` are a usage error. With `--all`, an installed copy whose version is
+undetermined (for example `dev` from a source build) MUST be reported and
+skipped, because replacing a developer's own build is only done when that CLI
+is named explicitly.
+
+#### REQ: upgrade-no-args-reports
+
+`upgrade` with no names and no `--all` MUST NOT change anything: it MUST run the
+read-only report of [REQ: upgrade-check](#req-upgrade-check) over every
+installed catalog CLI and end with the next step, `<cli> upgrade --all` or
+`<cli> upgrade <name>`. Unlike `--check`, it MUST exit successfully when the only
+finding is that upgrades are available. A bare verb that tells an agent or a
+person what would change, in one call, is more useful than a usage error, and
+it mirrors `install` with no names listing before acting.
+
+#### REQ: upgrade-per-target-policy
+
+Each target MUST be handled by the Self-Update Library's policy for its
+classified install, using that target's catalog managers and the detection
+[REQ: status-locate](#req-status-locate) produced (both the found and resolved
+paths checked, managed preferred):
+
+| Status / classification | Behavior |
+|---|---|
+| `installed`, managed, redirect-only manager | report the manager's upgrade command per [REQ: managed-redirect-command](../self-update/README.md#req-managed-redirect-command) |
+| `installed`, managed, executable manager | run its structured argv after confirmation per [REQ: managed-executable-command](../self-update/README.md#req-managed-executable-command) (for example `brew upgrade --cask ovdb`) |
+| `installed`, manual | verified atomic replacement of the symlink-resolved path of that copy per [REQ: download-matching-asset](../self-update/README.md#req-download-matching-asset), [REQ: checksum-before-extract](../self-update/README.md#req-checksum-before-extract), [REQ: atomic-replace](../self-update/README.md#req-atomic-replace), [REQ: post-swap-version-check](../self-update/README.md#req-post-swap-version-check) and [REQ: failure-leaves-working-binary](../self-update/README.md#req-failure-leaves-working-binary) |
+| `installed`, ambiguous | refused per [REQ: ambiguous-safe-default](../self-update/README.md#req-ambiguous-safe-default) with manual-update guidance naming the path |
+| `installed`, ahead of the latest release | reported, no action, per [REQ: upgrade-never-downgrades](#req-upgrade-never-downgrades) |
+| `installed`, already latest | no-op per [REQ: no-op-when-current](../self-update/README.md#req-no-op-when-current) |
+| `unrecognized` | never touched, reported per [REQ: unrecognized-copy-not-trusted](#req-unrecognized-copy-not-trusted) |
+| `not installed` | reported with the hint `<cli> install <name>`; not a failure |
+
+`upgrade` offers no version pin or downgrade flag; `self-update --version` and
+`--allow-downgrade` remain the way to move one CLI to a specific release.
+
+#### REQ: upgrade-never-downgrades
+
+The Self-Update Library's verdict treats any difference from the latest release
+as an available update, so a build ahead of the latest release — a Go
+pseudo-version after a tag such as synchestra `0.20.4-0.2026…` against release
+`0.20.3`, or ingitdb's `1.31.x` module-tag builds against `0.65.x` releases — is
+offered a downgrade by `self-update` today. `upgrade` MUST apply its own
+direction check with `selfupdate.CompareVersions` before any action: when the
+current version orders above the latest stable release, the target's state is
+`ahead`, reported with both versions, and the command MUST NOT download,
+replace, confirm, run a manager command, or count it as an available upgrade in
+`--check` or the no-args report. This check lives in `cliinstall`; the
+Self-Update Library and its Stable Feature are unchanged.
+
+#### REQ: upgrade-at-detected-path
+
+The Self-Update Library MUST expose the update path for an already-classified
+copy: `func (c Config) UpdateAt(ctx context.Context, detection Detection, opts Options) (Outcome, error)`,
+where `c.CurrentVersion` is the probed version and `detection` carries the
+method, manager and the path to replace. `Config.Update` MUST become
+`DetectSelf` followed by `UpdateAt`, with no change in behavior, so every rule of
+the Self-Update Library's Stable Feature applies unchanged to any copy and that
+Feature's text needs no amendment. No other library primitive is needed:
+`Config.Check` already compares any `CurrentVersion`, and the managed verifier
+already takes a binary name.
+
+#### REQ: host-upgraded-last
+
+When the host is among the targets it MUST be processed after every other
+target, so a replaced running binary (renamed aside on Windows) cannot affect
+the rest of the batch. The host MUST be upgraded with the host's own
+self-update `Config` and options, including its after-update hook and any
+manager overrides it adds to its catalog entry.
+
+#### REQ: self-update-equals-upgrade-self
+
+For every outcome — redirect, executed manager command, replacement, no-op,
+refusal and each failure kind — `<cli> self-update --yes` MUST behave as
+`<cli> upgrade <cli> --yes`, and `self-update --check`, `--dry-run` and
+`--format json` as the matching `upgrade <cli>` flags, except that output shapes
+and exit codes stay those `self-update` already documents. The one exception
+is a build ahead of the latest release: `upgrade` reports it per
+[REQ: upgrade-never-downgrades](#req-upgrade-never-downgrades), while
+`self-update` keeps its Stable behavior. `self-update` keeps
+its name, flags, aliases and exit codes; the Self-Update Library's Stable
+Feature is not changed. Both commands MUST reach the same library call so the
+equivalence holds by construction.
+
+#### REQ: update-alias-policy
+
+An `update` alias for `self-update` MUST remain where a released CLI already
+ships it and MUST NOT be added to any other CLI; `upgrade` MUST NOT get an
+`update` alias. datatug's planned `update` alias, never released, MUST NOT ship.
+ingitdb MUST NOT gain one, because its `update` command edits records.
+
+#### REQ: upgrade-release-lookups-bounded
+
+Unlike listing, `upgrade` needs release lookups. The command MUST make at most
+one latest-release lookup per target, at most four concurrently, each bounded
+by a 15 second timeout, and MUST NOT look up releases for targets that are not
+installed or unrecognized. A failed lookup MUST fail only that target with the
+release-lookup failure kind; the rest of the batch continues.
+
+#### REQ: upgrade-check
+
+`--check` MUST be read-only: it runs status probing and release lookups and
+reports, per target, the path, install method, manager and its upgrade command
+when there is one, current version, latest version and verdict, carrying the
+facts of [REQ: check-states-the-next-step](../self-update/README.md#req-check-states-the-next-step).
+It MUST NOT download, write, confirm or invoke a manager. When at least one
+target is not up to date (update available or undetermined), the Cobra adapter
+MUST call the host's error mapper's upgrades-available method with every such
+result, mirroring self-update's `UpdateAvailable` mapping, so each host decides
+the exit code for that signal exactly as its `self-update --check` does.
+
+#### REQ: upgrade-batch-semantics
+
+`upgrade` MUST follow `install`'s batch rules:
+[REQ: details-before-install](#req-details-before-install) for the planned
+action per target (command, or version transition, asset URL and path),
+[REQ: confirmation-gate](#req-confirmation-gate) with one confirmation covering
+every target that would be replaced or have a manager command executed,
+[REQ: install-dry-run](#req-install-dry-run) for `--dry-run`,
+[REQ: multi-target-batch](#req-multi-target-batch) for order, de-duplication,
+continuing past failures and per-target results (upgraded, manager executed,
+redirected, already current, ahead of latest, skipped undetermined, not installed, unrecognized,
+refused, dry run, declined, or failed), and
+[REQ: machine-readable-output](#req-machine-readable-output) with added fields
+`current`, `latest`, `verdict`, `action` and `command`. Redirect-only targets
+need no confirmation.
+
 ### Consumer integration
 
 #### REQ: host-owned-exit-codes
@@ -448,6 +600,11 @@ invalid-state or general failure code — and MUST NOT let them fall into a
 self-update default branch or print a `self-update:` message prefix. Each host
 MUST test `install nosuchcli` for its exit code and message.
 
+The `upgrade` command MUST use the same error mapper, extended with an
+upgrades-available method per [REQ: upgrade-check](#req-upgrade-check); a host
+maps it as its self-update maps `UpdateAvailable`. Each host MUST test
+`upgrade nosuchcli` the same way.
+
 #### REQ: host-identity-from-catalog
 
 A host MUST identify itself to the library by its catalog id and running version
@@ -460,18 +617,20 @@ The catalog, status probe, planner and installer MUST NOT depend on a command
 framework or write to the terminal. A framework-neutral layer MUST provide the
 text and JSON writers and reuse the Self-Update Library's confirmation gate, and
 an optional `cliinstall/cobracmd` adapter MUST build the `install` command with
-`--all`, `--yes/-y`, `--dry-run`, `--dir` and `--format text|json`.
+`--all`, `--yes/-y`, `--dry-run`, `--dir` and `--format text|json`, and the
+`upgrade` command with `--all`, `--check`, `--yes/-y`, `--dry-run` and
+`--format text|json`.
 
 #### REQ: no-network-in-tests
 
-The library's and consumers' `install` tests MUST NOT require network access,
+The library's and consumers' `install` and `upgrade` tests MUST NOT require network access,
 invoke a real `brew`, or write outside temporary directories. Release endpoints,
 `PATH` and environment, executable probing, the managed command runner, the
 per-user bin directory and interactivity MUST be injectable.
 
 #### REQ: fleet-cutover
 
-All nine catalog CLIs MUST expose `install` built from this library and implement
+All nine catalog CLIs MUST expose `install` and `upgrade` built from this library and implement
 [REQ: version-json-contract](#req-version-json-contract). As part of this
 feature every fleet binary MUST move its self-update onto
 `github.com/strongo/cli-helpers/selfupdate`: `ingitdb` (dropping its
@@ -511,11 +670,11 @@ Homebrew, and deviations; the behavior above is inherited, not restated.
 
 ### AC: datatug-installs-ovdb-and-ovdb-sees-datatug
 
-**Requirements:** cli-install#req:list-relevant, cli-install#req:details-before-install, cli-install#req:install-method-mirrors-host, cli-install#req:direct-release-install, cli-install#req:post-install-verification, cli-install#req:status-probe-order, cli-install#req:version-json-contract, cli-install#req:date-labelled-by-source, cli-install#req:fleet-cutover
+**Requirements:** cli-install#req:list-relevant, cli-install#req:details-before-install, cli-install#req:install-method-mirrors-host, cli-install#req:direct-release-install, cli-install#req:post-install-verification, cli-install#req:status-probe-order, cli-install#req:version-json-contract, cli-install#req:date-labelled-by-source, cli-install#req:fleet-cutover, cli-install#req:upgrade-targets, cli-install#req:upgrade-check
 
 **Given** a user on Linux with no fleet CLIs installed who put the latest released `datatug` binary into `~/.local/bin`, which is on `PATH`
-**When** they run `datatug install`, then `datatug install ovdb` and confirm, then `ovdb install`
-**Then** the first command lists `ingitdb`, `ovdb` and `specscore` as not installed, each with its description and why it helps a DataTug user; the second shows ovdb's details, relevance and the planned release asset and destination `~/.local/bin/ovdb`, installs the latest ovdb release after one confirmation, and reports it verified; and `ovdb install` lists `datatug` as installed at `~/.local/bin/datatug` with the same version, `built` date and commit that `datatug version --json` prints, obtained through the JSON probe.
+**When** they run `datatug install`, then `datatug install ovdb` and confirm, then `ovdb install`, then `ovdb upgrade --all --check`
+**Then** the first command lists `ingitdb`, `ovdb` and `specscore` as not installed, each with its description and why it helps a DataTug user; the second shows ovdb's details, relevance and the planned release asset and destination `~/.local/bin/ovdb`, installs the latest ovdb release after one confirmation, and reports it verified; and `ovdb install` lists `datatug` as installed at `~/.local/bin/datatug` with the same version, `built` date and commit that `datatug version --json` prints, obtained through the JSON probe; and `ovdb upgrade --all --check` reports `datatug` and `ovdb`, each with its path, manual install method, current and latest version and verdict, changes nothing, and exits by ovdb's mapping of its upgrades-available signal.
 
 ### AC: listing-is-offline-and-read-only
 
@@ -581,12 +740,36 @@ Homebrew, and deviations; the behavior above is inherited, not restated.
 **When** `version --json` runs with telemetry configured and no network
 **Then** stdout is exactly one object whose `name` is the catalog id, `date_source` is `build` for the stamped build and `commit` or empty for the plain build, plain `version` output is unchanged, and no network connection, telemetry event or file write occurs.
 
+### AC: upgrade-all-covers-installed-not-relevant
+
+**Requirements:** cli-install#req:upgrade-targets, cli-install#req:upgrade-never-downgrades, cli-install#req:upgrade-no-args-reports, cli-install#req:upgrade-release-lookups-bounded, cli-install#req:upgrade-batch-semantics, cli-install#req:host-upgraded-last
+
+**Given** a `cover100` host where `ovdb` (not relevant to cover100) and `wb` are installed and outdated, `ingitdb` is a `dev` source build, `chatwright` is a pseudo-version build ahead of its latest release, `datatug` is an unrecognized binary, `specscore` is not installed, and the release server fails for `wb`
+**When** `cover100 upgrade`, then `cover100 upgrade --all --yes`, then `cover100 upgrade specscore datatug`, then `cover100 upgrade --all wb` run
+**Then** the bare command reports the installed CLIs with current and latest versions, changes nothing and exits successfully; `--all` looks up releases only for installed targets, upgrades `ovdb` and `cover100` (itself, last), fails `wb` with the release-lookup kind while continuing, skips `ingitdb` as undetermined, reports `chatwright` as ahead of latest without downgrading it or counting it as upgradeable, leaves `datatug` untouched, and reports one result per target; the named command reports `specscore` with an `install` hint and `datatug` as unrecognized without touching either; and `--all` with names is a usage error.
+
+### AC: upgrade-respects-install-method
+
+**Requirements:** cli-install#req:upgrade-per-target-policy, cli-install#req:upgrade-at-detected-path, cli-install#req:upgrade-check, cli-install#req:host-owned-exit-codes
+
+**Given** installed targets that are Homebrew-managed with executable argv, Homebrew-managed redirect-only, Snap-managed via a `/snap/bin` shim, manual behind a symlink in `~/.local/bin`, ambiguous, and already current
+**When** `upgrade` runs over them with confirmation, then with `--dry-run`, then with `--check`
+**Then** the executable manager's argv runs once after the single confirmation without a shell, redirect-only and Snap targets print their manager commands without confirmation, the manual target's resolved file is replaced atomically after checksum verification while the symlink is kept and the post-swap probe passes, the ambiguous target is refused with guidance naming its path, the current target is a no-op; the dry run and check change nothing and invoke no manager; and the check maps through the host's upgrades-available method.
+
+### AC: self-update-equals-upgrade-self
+
+**Requirements:** cli-install#req:self-update-equals-upgrade-self, cli-install#req:host-upgraded-last, cli-install#req:update-alias-policy, cli-install#req:upgrade-at-detected-path
+
+**Given** each of a manual host, an executable-Homebrew host, a redirect-only host and an ambiguous host, against the same fake release server
+**When** `self-update --yes`, `self-update --check` and `self-update --dry-run` run, and separately `upgrade <self> --yes`, `upgrade <self> --check` and `upgrade <self> --dry-run`
+**Then** each pair reaches the same library call and produces the same action, target version, after-update hook invocation and failure kind; `self-update`'s existing flags, aliases, output and exit codes are unchanged; `upgrade` has no `update` alias; datatug has no `update` alias and ingitdb's `update` still edits records.
+
 ### AC: hosts-keep-their-exit-codes-and-cutover-completes
 
 **Requirements:** cli-install#req:host-owned-exit-codes, cli-install#req:core-framework-neutral, cli-install#req:no-network-in-tests, cli-install#req:fleet-cutover
 
 **Given** the nine hosts building `install` from the Cobra adapter, the migrated self-update commands of `ingitdb`, `ovdb`, `synchestra`, `synchestra-channel` and `synchestra-vm-host`, and datatug's new self-update
-**When** each host runs `install nosuchcli` and each migrated binary runs its existing self-update tests
+**When** each host runs `install nosuchcli` and `upgrade nosuchcli`, and each migrated binary runs its existing self-update tests
 **Then** each host exits with its own usage code and a message without a `self-update:` prefix, no fleet module imports `github.com/strongo/selfupdate` or ingitdb's `internal/selfupdate`, each migrated binary's documented self-update exit codes are unchanged, `github.com/strongo/selfupdate` is marked deprecated, and the library and consumer install tests ran without network, `brew`, or writes outside temporary directories.
 
 ## Open Questions
@@ -602,6 +785,17 @@ Homebrew, and deviations; the behavior above is inherited, not restated.
   `synchestra-io/synchestra-releases`), but a burst of `servers-` or `vm-`
   releases could push it off the page. Should the Self-Update Library follow
   `Link: rel="next"` for prefixed repositories, amending its Stable spec?
+- Should the Self-Update Library's verdict gain an "ahead of latest" state so
+  `self-update` also stops offering a downgrade to builds ahead of the latest
+  release (a Stable Feature amendment), removing the one exception in
+  [REQ: self-update-equals-upgrade-self](#req-self-update-equals-upgrade-self)?
+- Should `upgrade` and `self-update` treat a manual copy inside a system
+  prefix from [REQ: destination-denylist](#req-destination-denylist) (for
+  example an AUR-installed `/usr/bin/ingitdb`) as ambiguous and refuse it? Today
+  both replace it when writable, which keeps
+  [REQ: self-update-equals-upgrade-self](#req-self-update-equals-upgrade-self)
+  but lets a `sudo` run modify a system package manager's file; changing it
+  means amending the Stable Self-Update Feature.
 - Should a v2 offer interactive selection (a picker on a terminal) in addition
   to naming targets, given the fleet's preference for non-interactive,
   agent-friendly commands?
