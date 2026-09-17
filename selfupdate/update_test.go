@@ -248,7 +248,10 @@ func TestUpdate_ManagedExecutable_Ahead(t *testing.T) {
 
 	run := false
 	outcome, err := h.cfg.Update(context.Background(), Options{
-		Confirm:    func(string) (bool, error) { t.Fatal("Confirm was called for an ahead-of-latest managed install"); return true, nil },
+		Confirm: func(string) (bool, error) {
+			t.Fatal("Confirm was called for an ahead-of-latest managed install")
+			return true, nil
+		},
 		RunManaged: func(context.Context, string, []string) error { run = true; return nil },
 		VerifyManaged: func(context.Context, Detection, string, []string, string) (ExecutableIdentity, error) {
 			return ExecutableIdentity{}, nil
@@ -817,7 +820,10 @@ func TestUpdate_Manual_Ahead(t *testing.T) {
 
 	afterUpdateCalled := false
 	outcome, err := h.cfg.Update(context.Background(), Options{
-		Confirm:     func(string) (bool, error) { t.Fatal("Confirm was called for an ahead-of-latest build"); return true, nil },
+		Confirm: func(string) (bool, error) {
+			t.Fatal("Confirm was called for an ahead-of-latest build")
+			return true, nil
+		},
 		AfterUpdate: func(context.Context, AfterUpdate) error { afterUpdateCalled = true; return nil },
 	})
 	if err != nil {
