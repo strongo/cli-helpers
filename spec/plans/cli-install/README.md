@@ -109,8 +109,8 @@ module and one whole-journey verification against real published releases.
   mapper; its upgrades-available method maps exactly as that host's
   self-update `UpdateAvailable`. A declined confirmation, an already-installed
   or ahead-of-latest target and a print-only Homebrew redirect exit 0.
-- **`update` alias:** kept only where a released CLI already ships it (wb,
-  specscore, chatwright and the others that have it today); not added to
+- **`update` alias:** kept only where a released CLI already ships it (checked:
+  wb, specscore, chatwright, codegrapher, cover100, ovdb and synchestra); not added to
   `upgrade` or to any CLI that lacks it; datatug's planned alias is dropped;
   ingitdb never gets one because its `update` edits records.
 
