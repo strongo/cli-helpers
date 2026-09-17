@@ -393,9 +393,12 @@ func TestStartDetachedRetriesOnlyAcceptedFailures(t *testing.T) {
 		return err != nil && strings.Contains(err.Error(), filepath.Base(missing))
 	}
 	retryMissing := isMissing
+	// A plain second attempt: GitHub's Windows runner job itself forbids
+	// breakaway, so ConfigureDetached alone is refused there.
+	plain := func(*exec.Cmd) {}
 
 	process, err := startDetached(probeCommand("sleep", dir), log,
-		[]func(*exec.Cmd){breakMissing, ConfigureDetached}, retryMissing)
+		[]func(*exec.Cmd){breakMissing, plain}, retryMissing)
 	if err != nil {
 		t.Fatalf("retry after an accepted failure: %v", err)
 	}
@@ -403,7 +406,7 @@ func TestStartDetachedRetriesOnlyAcceptedFailures(t *testing.T) {
 	_, _ = process.Wait()
 
 	if _, err := startDetached(probeCommand("sleep", dir), log,
-		[]func(*exec.Cmd){breakMissing, ConfigureDetached}, func(error) bool { return false }); !isMissing(err) {
+		[]func(*exec.Cmd){breakMissing, plain}, func(error) bool { return false }); !isMissing(err) {
 		t.Fatalf("non-retryable failure = %v, want the first error", err)
 	}
 	if _, err := startDetached(probeCommand("sleep", dir), log,
