@@ -340,7 +340,17 @@ func TestInstallNew_Success(t *testing.T) {
 	dest := filepath.Join(destDir, "wb")
 
 	cfg := installTestConfig(srv)
-	result, err := cfg.InstallNew(context.Background(), dest)
+	plan, err := cfg.PlanInstall(context.Background())
+	if err != nil {
+		t.Fatalf("PlanInstall: %v", err)
+	}
+	if plan.Tag != tag || plan.Version != version {
+		t.Errorf("plan = %+v, want tag %q version %q", plan, tag, version)
+	}
+	if want := installTestConfig(srv).DownloadURL("acme/wb", tag, asset); plan.AssetURL != want {
+		t.Errorf("plan.AssetURL = %q, want %q", plan.AssetURL, want)
+	}
+	result, err := cfg.InstallNew(context.Background(), dest, plan)
 	if err != nil {
 		t.Fatalf("InstallNew: %v", err)
 	}
@@ -402,7 +412,11 @@ func TestInstallNew_TagPrefix(t *testing.T) {
 
 	cfg := installTestConfig(srv)
 	cfg.TagPrefix = "cli-"
-	result, err := cfg.InstallNew(context.Background(), dest)
+	plan, err := cfg.PlanInstall(context.Background())
+	if err != nil {
+		t.Fatalf("PlanInstall: %v", err)
+	}
+	result, err := cfg.InstallNew(context.Background(), dest, plan)
 	if err != nil {
 		t.Fatalf("InstallNew: %v", err)
 	}
@@ -444,7 +458,11 @@ func TestInstallNew_DestinationAlreadyExists(t *testing.T) {
 	}
 
 	cfg := installTestConfig(srv)
-	_, err := cfg.InstallNew(context.Background(), dest)
+	plan, err := cfg.PlanInstall(context.Background())
+	if err != nil {
+		t.Fatalf("PlanInstall: %v", err)
+	}
+	_, err = cfg.InstallNew(context.Background(), dest, plan)
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
@@ -483,7 +501,11 @@ func TestInstallNew_ChecksumMismatchLeavesNothing(t *testing.T) {
 	dest := filepath.Join(destDir, "wb")
 
 	cfg := installTestConfig(srv)
-	_, err := cfg.InstallNew(context.Background(), dest)
+	plan, err := cfg.PlanInstall(context.Background())
+	if err != nil {
+		t.Fatalf("PlanInstall: %v", err)
+	}
+	_, err = cfg.InstallNew(context.Background(), dest, plan)
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
@@ -497,8 +519,9 @@ func TestInstallNew_ChecksumMismatchLeavesNothing(t *testing.T) {
 }
 
 // The platform check runs before any network request, so an unreachable
-// ReleasesAPIURL never gets dialed for an unsupported platform.
-func TestInstallNew_UnsupportedPlatformMakesNoRequest(t *testing.T) {
+// ReleasesAPIURL never gets dialed for an unsupported platform. Planning,
+// not InstallNew itself, is where this check now lives.
+func TestPlanInstall_UnsupportedPlatformMakesNoRequest(t *testing.T) {
 	origOS, origArch := goosName, goarchName
 	goosName, goarchName = "linux", "amd64"
 	t.Cleanup(func() { goosName, goarchName = origOS, origArch })
@@ -510,8 +533,7 @@ func TestInstallNew_UnsupportedPlatformMakesNoRequest(t *testing.T) {
 		SupportedPlatforms: []Platform{{GOOS: "darwin", GOARCH: "arm64"}},
 	}
 
-	destDir := t.TempDir()
-	_, err := cfg.InstallNew(context.Background(), filepath.Join(destDir, "wb"))
+	_, err := cfg.PlanInstall(context.Background())
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
@@ -520,7 +542,7 @@ func TestInstallNew_UnsupportedPlatformMakesNoRequest(t *testing.T) {
 	}
 }
 
-func TestInstallNew_ReleaseLookupFailure(t *testing.T) {
+func TestPlanInstall_ReleaseLookupFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "rate limited", http.StatusForbidden)
 	}))
@@ -533,12 +555,26 @@ func TestInstallNew_ReleaseLookupFailure(t *testing.T) {
 		HTTPClient:     srv.Client(),
 	}
 
-	destDir := t.TempDir()
-	_, err := cfg.InstallNew(context.Background(), filepath.Join(destDir, "wb"))
+	_, err := cfg.PlanInstall(context.Background())
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
 	if KindOf(err) != KindReleaseLookup {
 		t.Errorf("KindOf(err) = %v, want KindReleaseLookup", KindOf(err))
+	}
+}
+
+// InstallNew performs no lookup of its own: a caller who never called
+// PlanInstall (a zero InstallPlan) gets a clear KindUnexpected error rather
+// than InstallNew silently resolving "latest" behind the caller's back.
+func TestInstallNew_ZeroPlanIsRejected(t *testing.T) {
+	cfg := Config{BinaryName: "wb", Repository: "acme/wb"}
+	destDir := t.TempDir()
+	_, err := cfg.InstallNew(context.Background(), filepath.Join(destDir, "wb"), InstallPlan{})
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if KindOf(err) != KindUnexpected {
+		t.Errorf("KindOf(err) = %v, want KindUnexpected", KindOf(err))
 	}
 }

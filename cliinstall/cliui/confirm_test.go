@@ -6,8 +6,20 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/strongo/cli-helpers/cliinstall"
 	"github.com/strongo/cli-helpers/selfupdate"
 )
+
+// plannedResults builds the []cliinstall.Result Confirm's callback now
+// receives, one per name, matching cliinstall.Plan's own OutcomeDryRun
+// shape closely enough for these tests (only Target matters here).
+func plannedResults(names ...string) []cliinstall.Result {
+	out := make([]cliinstall.Result, len(names))
+	for i, n := range names {
+		out[i] = cliinstall.Result{Target: n, Outcome: cliinstall.OutcomeDryRun}
+	}
+	return out
+}
 
 func TestConfirm_InteractivePromptReadsStdin(t *testing.T) {
 	var out bytes.Buffer
@@ -16,7 +28,7 @@ func TestConfirm_InteractivePromptReadsStdin(t *testing.T) {
 		Out:         &out,
 		Interactive: func() bool { return true },
 	})
-	proceed, err := confirm([]string{"ovdb", "ingitdb"})
+	proceed, err := confirm(plannedResults("ovdb", "ingitdb"))
 	if err != nil || !proceed {
 		t.Fatalf("Confirm with 'y' = (%v, %v), want (true, nil)", proceed, err)
 	}
@@ -31,7 +43,7 @@ func TestConfirm_YesWordAlsoProceeds(t *testing.T) {
 		Out:         &bytes.Buffer{},
 		Interactive: func() bool { return true },
 	})
-	proceed, err := confirm([]string{"ovdb"})
+	proceed, err := confirm(plannedResults("ovdb"))
 	if err != nil || !proceed {
 		t.Fatalf("Confirm with 'yes' = (%v, %v), want (true, nil)", proceed, err)
 	}
@@ -43,7 +55,7 @@ func TestConfirm_ExplicitNoIsDeclineNotFailure(t *testing.T) {
 		Out:         &bytes.Buffer{},
 		Interactive: func() bool { return true },
 	})
-	proceed, err := confirm([]string{"ovdb"})
+	proceed, err := confirm(plannedResults("ovdb"))
 	if proceed || err != nil {
 		t.Errorf("Confirm with 'n' = (%v, %v), want (false, nil)", proceed, err)
 	}
@@ -55,7 +67,7 @@ func TestConfirm_NonInteractiveRefusal(t *testing.T) {
 		Out:         &bytes.Buffer{},
 		Interactive: func() bool { return false },
 	})
-	proceed, err := confirm([]string{"ovdb"})
+	proceed, err := confirm(plannedResults("ovdb"))
 	if proceed {
 		t.Error("Confirm proceeded without an interactive terminal")
 	}
@@ -73,7 +85,7 @@ func TestConfirm_EmptyStdinRefusesInsteadOfDeclining(t *testing.T) {
 		Out:         &bytes.Buffer{},
 		Interactive: func() bool { return true },
 	})
-	proceed, err := confirm([]string{"ovdb"})
+	proceed, err := confirm(plannedResults("ovdb"))
 	if proceed {
 		t.Error("Confirm proceeded on empty stdin")
 	}
@@ -85,6 +97,14 @@ func TestConfirm_EmptyStdinRefusesInsteadOfDeclining(t *testing.T) {
 // A nil ConfirmOptions.Interactive defaults to selfupdate/cliui.IsTerminal —
 // reused rather than a second terminal check. Forcing stdin to /dev/null
 // makes that default deterministic under `go test`.
+//
+// In is deliberately "y\n", NOT empty (task-5 review M11: an empty reader
+// makes this test vacuous — refusal follows from stdin being empty on
+// EITHER branch of a bug in the default, so it never actually proves
+// selfupdate/cliui.IsTerminal was consulted at all). With a real answer
+// queued, a broken default that resolved to "always interactive" would
+// read it and proceed, failing this test; only the correct default (which
+// sees /dev/null and refuses before ever reading In) passes.
 func TestConfirm_NilInteractiveDefaultsToSelfupdateIsTerminal(t *testing.T) {
 	devNull, err := os.Open(os.DevNull)
 	if err != nil {
@@ -95,8 +115,8 @@ func TestConfirm_NilInteractiveDefaultsToSelfupdateIsTerminal(t *testing.T) {
 	t.Cleanup(func() { os.Stdin = origStdin })
 	os.Stdin = devNull
 
-	confirm := Confirm(ConfirmOptions{In: strings.NewReader(""), Out: &bytes.Buffer{}})
-	proceed, cErr := confirm([]string{"ovdb"})
+	confirm := Confirm(ConfirmOptions{In: strings.NewReader("y\n"), Out: &bytes.Buffer{}})
+	proceed, cErr := confirm(plannedResults("ovdb"))
 	if proceed {
 		t.Error("Confirm proceeded with a nil Interactive and /dev/null stdin")
 	}

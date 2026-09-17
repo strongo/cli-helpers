@@ -289,7 +289,7 @@ func TestInstall_UnknownTarget(t *testing.T) {
 	if selfupdate.KindOf(err) != selfupdate.KindUnknownTarget {
 		t.Errorf("KindOf(err) = %v, want KindUnknownTarget", selfupdate.KindOf(err))
 	}
-	if !strings.Contains(out, "unknown_target") {
+	if !strings.Contains(out, "nosuchcli") || !strings.Contains(out, "Refused:") {
 		t.Errorf("stdout does not report the failure:\n%s", out)
 	}
 }
@@ -335,11 +335,20 @@ func TestInstall_NoErrorsReturnsUnderlyingFailure(t *testing.T) {
 
 func TestInstall_NonInteractiveWithoutYesRefuses(t *testing.T) {
 	env := fakeInstallEnv(nil, "/host", nil, noProc)
-	cmd := newInstallCmd(t, CommandOptions{HostID: "datatug", Env: env, Interactive: func() bool { return false }})
+	// "ovdb" is a valid, not-installed target planned as a direct install:
+	// under Plan+confirm+Execute (task-5 review B1) planning ALWAYS
+	// resolves its release exactly once, before Execute ever asks for
+	// confirmation, so this needs a local release server just like any
+	// other Plan call — task-5 review S5 found this exact test leaking a
+	// real request to api.github.com because it omitted one.
+	srv := releaseServer(t, "ovdb", "0.5.0")
+	cmd := newInstallCmd(t, CommandOptions{
+		HostID: "datatug", Env: env, Interactive: func() bool { return false },
+		ConfigureRelease: configureReleaseFromServer(srv),
+	})
 
-	// "ovdb" is a valid, not-installed target; --dir gives planning a valid
-	// destination (a denylist-clean directory) with no release lookup
-	// needed to reach it, so this reaches the confirmation gate itself.
+	// --dir gives planning a valid destination (a denylist-clean
+	// directory), so this reaches the confirmation gate itself.
 	_, _, err := runCmd(t, cmd, "ovdb", "--dir", t.TempDir())
 	if selfupdate.KindOf(err) != selfupdate.KindNonInteractive {
 		t.Fatalf("KindOf(err) = %v, want KindNonInteractive; err=%v", selfupdate.KindOf(err), err)
@@ -537,8 +546,13 @@ func TestInstall_RealSuccess_PreviewThenResult(t *testing.T) {
 	if n := strings.Count(out, "Plan: direct install"); n != 1 {
 		t.Errorf("stdout has %d 'Plan:' lines (preview), want exactly 1:\n%s", n, out)
 	}
-	if !strings.Contains(out, "Result: installed v0.5.0 at "+destPath) {
+	// The final report is WriteOutcome's TERSE form — no repeated
+	// description/details block, just id + outcome (task-5 review B1).
+	if !strings.Contains(out, "ovdb: installed v0.5.0 at "+destPath) {
 		t.Errorf("stdout missing the final install result:\n%s", out)
+	}
+	if n := strings.Count(out, "OpenVaultDB command-line interface"); n != 1 {
+		t.Errorf("stdout repeats ovdb's description %d times, want exactly 1 (preview only, not the final report)", n)
 	}
 	content, rerr := os.ReadFile(destPath)
 	if rerr != nil {
@@ -546,6 +560,113 @@ func TestInstall_RealSuccess_PreviewThenResult(t *testing.T) {
 	}
 	if string(content) != "the installed binary" {
 		t.Errorf("installed content = %q", content)
+	}
+}
+
+// TestInstall_RealSuccess_JSON exercises the SAME real end-to-end install
+// as TestInstall_RealSuccess_PreviewThenResult, but in --format json: the
+// pre-execute preview goes to stderr, and stdout carries exactly one final
+// JSON document with the executed outcome.
+func TestInstall_RealSuccess_JSON(t *testing.T) {
+	srv := releaseServer(t, "ovdb", "0.5.0")
+	destDir := t.TempDir()
+	destPath := filepath.Join(destDir, "ovdb")
+	if runtime.GOOS == "windows" {
+		destPath += ".exe"
+	}
+
+	run := func(_ context.Context, path string, args []string) ([]byte, error) {
+		if path != destPath || len(args) != 2 || args[0] != "version" || args[1] != "--json" {
+			return nil, errors.New("unexpected probe")
+		}
+		b, _ := json.Marshal(struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		}{Name: "ovdb", Version: "0.5.0"})
+		return b, nil
+	}
+	env := cliinstall.InstallEnv{
+		Env: cliinstall.Env{
+			PathDirs:     func() []string { return []string{destDir} },
+			HostDir:      func() (string, error) { return "", errors.New("no host dir") },
+			IsExecutable: func(p string) bool { info, err := os.Stat(p); return err == nil && !info.IsDir() },
+			EvalSymlinks: func(p string) (string, error) { return p, nil },
+			Run:          run,
+		},
+		UserHomeDir: func() (string, error) { return "/home/alex", nil },
+		Getenv:      func(string) string { return "" },
+		MkdirAll:    os.MkdirAll,
+	}
+	cmd := newInstallCmd(t, CommandOptions{HostID: "datatug", Env: env, ConfigureRelease: configureReleaseFromServer(srv)})
+
+	out, errOut, err := runCmd(t, cmd, "ovdb", "--yes", "--dir", destDir, "--format", "json")
+	if err != nil {
+		t.Fatalf("err = %v, stdout=%s stderr=%s", err, out, errOut)
+	}
+	if n := strings.Count(strings.TrimSpace(out), "\n"); n != 0 {
+		t.Errorf("stdout has %d extra newlines, want exactly one JSON document:\n%s", n, out)
+	}
+	var doc struct {
+		Targets []struct {
+			Outcome string `json:"outcome"`
+			Version string `json:"planned_version"`
+		} `json:"targets"`
+	}
+	if jerr := json.Unmarshal([]byte(out), &doc); jerr != nil {
+		t.Fatalf("decode: %v (raw %s)", jerr, out)
+	}
+	if len(doc.Targets) != 1 || doc.Targets[0].Outcome != "installed" {
+		t.Errorf("doc = %+v", doc)
+	}
+	if !strings.Contains(errOut, "Plan: direct install") {
+		t.Errorf("stderr missing the pre-execute preview:\n%s", errOut)
+	}
+}
+
+func TestInstall_DryRun_JSON_WriteErrorIsMapped(t *testing.T) {
+	srv := releaseServer(t, "ovdb", "0.5.0")
+	env := fakeInstallEnv(nil, "/host", nil, noProc)
+	cmd := newInstallCmd(t, CommandOptions{HostID: "datatug", Env: env, Errors: wbStyleErrors{}, ConfigureRelease: configureReleaseFromServer(srv)})
+	cmd.SetOut(failingWriter{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"ovdb", "--dry-run", "--format", "json", "--dir", t.TempDir()})
+
+	err := cmd.Execute()
+	var ec exitCoder
+	if !errors.As(err, &ec) || ec.ExitCode() != 1 {
+		t.Fatalf("err = %v, want a mapped wbStyleErrors failure", err)
+	}
+}
+
+// TestInstall_RealSuccess_JSON_FinalWriteErrorIsMapped exercises the final
+// WriteResultJSON error branch after a real Execute (as opposed to the
+// dry-run or unknown-target JSON write-error branches already covered).
+func TestInstall_RealSuccess_JSON_FinalWriteErrorIsMapped(t *testing.T) {
+	srv := releaseServer(t, "ovdb", "0.5.0")
+	destDir := t.TempDir()
+	run := func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("not installed") }
+	env := cliinstall.InstallEnv{
+		Env: cliinstall.Env{
+			PathDirs:     func() []string { return []string{destDir} },
+			HostDir:      func() (string, error) { return "", errors.New("no host dir") },
+			IsExecutable: func(p string) bool { info, err := os.Stat(p); return err == nil && !info.IsDir() },
+			EvalSymlinks: func(p string) (string, error) { return p, nil },
+			Run:          run,
+		},
+		UserHomeDir: func() (string, error) { return "/home/alex", nil },
+		Getenv:      func(string) string { return "" },
+		MkdirAll:    os.MkdirAll,
+	}
+	cmd := newInstallCmd(t, CommandOptions{HostID: "datatug", Env: env, Errors: wbStyleErrors{}, ConfigureRelease: configureReleaseFromServer(srv)})
+	cmd.SetOut(failingWriter{})
+	errOut := &bytes.Buffer{}
+	cmd.SetErr(errOut)
+	cmd.SetArgs([]string{"ovdb", "--yes", "--dir", destDir, "--format", "json"})
+
+	err := cmd.Execute()
+	var ec exitCoder
+	if !errors.As(err, &ec) || ec.ExitCode() != 1 {
+		t.Fatalf("err = %v, want a mapped wbStyleErrors failure", err)
 	}
 }
 

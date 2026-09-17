@@ -124,13 +124,13 @@ func TestTargetConfig_WithOverride(t *testing.T) {
 	}
 }
 
-// --- dryRunResult ----------------------------------------------------------
+// --- planDirectResult / planHomebrewResult ----------------------------------
 
-func TestDryRunResult_Homebrew(t *testing.T) {
+func TestPlanHomebrewResult(t *testing.T) {
 	target := Entry{ID: "ovdb"}
-	got := dryRunResult(context.Background(), target, MethodHomebrew, "", "acme/tap/ovdb", Status{}, []string{"warn"}, Options{})
+	got := planHomebrewResult(target, "acme/tap/ovdb", Status{}, []string{"warn"})
 	if got.Outcome != OutcomeDryRun || got.Method != MethodHomebrew {
-		t.Fatalf("dryRunResult = %+v", got)
+		t.Fatalf("planHomebrewResult = %+v", got)
 	}
 	if len(got.CaskArgv) == 0 || got.CaskArgv[len(got.CaskArgv)-1] != "acme/tap/ovdb" {
 		t.Errorf("CaskArgv = %v", got.CaskArgv)
@@ -140,14 +140,14 @@ func TestDryRunResult_Homebrew(t *testing.T) {
 	}
 }
 
-func TestDryRunResult_DirectSuccess(t *testing.T) {
+func TestPlanDirectResult_Success(t *testing.T) {
 	srv := newReleaseServer(t, `[{"tag_name":"v1.2.3","prerelease":false,"draft":false}]`, nil)
 	target := Entry{ID: "ovdb", Repository: "openvaultdb/ovdb"}
 	opts := Options{ConfigureRelease: configureReleaseFromServer(srv)}
 
-	got := dryRunResult(context.Background(), target, MethodDirect, "/home/alex/.local/bin", "", Status{}, nil, opts)
+	got := planDirectResult(context.Background(), target, "/home/alex/.local/bin", Status{}, nil, opts)
 	if got.Outcome != OutcomeDryRun || got.Method != MethodDirect {
-		t.Fatalf("dryRunResult = %+v", got)
+		t.Fatalf("planDirectResult = %+v", got)
 	}
 	if got.Destination != "/home/alex/.local/bin/ovdb" {
 		t.Errorf("Destination = %q", got.Destination)
@@ -155,9 +155,12 @@ func TestDryRunResult_DirectSuccess(t *testing.T) {
 	if got.Version != "1.2.3" || got.Tag != "v1.2.3" {
 		t.Errorf("Version/Tag = %q/%q", got.Version, got.Tag)
 	}
+	if got.AssetURL == "" {
+		t.Error("AssetURL is empty")
+	}
 }
 
-func TestDryRunResult_DirectReleaseLookupFailure(t *testing.T) {
+func TestPlanDirectResult_ReleaseLookupFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))
@@ -169,7 +172,7 @@ func TestDryRunResult_DirectReleaseLookupFailure(t *testing.T) {
 		return cfg
 	}}
 
-	got := dryRunResult(context.Background(), target, MethodDirect, "/home/alex/.local/bin", "", Status{}, nil, opts)
+	got := planDirectResult(context.Background(), target, "/home/alex/.local/bin", Status{}, nil, opts)
 	if got.Outcome != OutcomeFailed {
 		t.Fatalf("Outcome = %v, want OutcomeFailed", got.Outcome)
 	}
@@ -178,12 +181,17 @@ func TestDryRunResult_DirectReleaseLookupFailure(t *testing.T) {
 	}
 }
 
-func TestPlannedTag(t *testing.T) {
-	if got := plannedTag(Entry{TagPrefix: "cli-"}, "0.15.1"); got != "cli-v0.15.1" {
-		t.Errorf("plannedTag = %q", got)
-	}
-	if got := plannedTag(Entry{}, "1.0.0"); got != "v1.0.0" {
-		t.Errorf("plannedTag = %q", got)
+func TestPlanDirectResult_UnsupportedPlatform(t *testing.T) {
+	target := Entry{ID: "ovdb", Repository: "openvaultdb/ovdb"}
+	opts := Options{ConfigureRelease: func(_ Entry, cfg selfupdate.Config) selfupdate.Config {
+		cfg.SupportedPlatforms = []selfupdate.Platform{{GOOS: "plan9", GOARCH: "amd64"}}
+		cfg.ReleasesAPIURL = "http://127.0.0.1:1/releases" // never dialed
+		return cfg
+	}}
+
+	got := planDirectResult(context.Background(), target, "/home/alex/.local/bin", Status{}, nil, opts)
+	if got.Outcome != OutcomeFailed || got.Failure == nil || got.Failure.Kind != selfupdate.KindUnsupportedPlatform {
+		t.Fatalf("planDirectResult = %+v, want KindUnsupportedPlatform", got)
 	}
 }
 
@@ -191,7 +199,8 @@ func TestPlannedTag(t *testing.T) {
 
 func TestExecuteInstall_DispatchesHomebrew(t *testing.T) {
 	opts := Options{Env: InstallEnv{RunManaged: func(context.Context, string, []string) error { return errors.New("no brew here") }}}
-	got := executeInstall(context.Background(), Entry{ID: "ovdb"}, MethodHomebrew, "", "acme/tap/ovdb", false, nil, opts)
+	planned := Result{Target: "ovdb", Method: MethodHomebrew, CaskArgv: []string{"brew", "install", "--cask", "acme/tap/ovdb"}}
+	got := executeInstall(context.Background(), Entry{ID: "ovdb"}, planned, false, opts)
 	if got.Method != MethodHomebrew {
 		t.Fatalf("executeInstall did not dispatch to Homebrew: %+v", got)
 	}
@@ -199,7 +208,8 @@ func TestExecuteInstall_DispatchesHomebrew(t *testing.T) {
 
 func TestExecuteInstall_DispatchesDirect(t *testing.T) {
 	opts := Options{Env: InstallEnv{MkdirAll: func(string, os.FileMode) error { return errors.New("permission denied") }}}
-	got := executeInstall(context.Background(), Entry{ID: "ovdb"}, MethodDirect, "/home/alex/.local/bin", "", true, nil, opts)
+	planned := Result{Target: "ovdb", Method: MethodDirect, Destination: "/home/alex/.local/bin/ovdb"}
+	got := executeInstall(context.Background(), Entry{ID: "ovdb"}, planned, true, opts)
 	if got.Method != MethodDirect || got.Failure == nil || got.Failure.Kind != selfupdate.KindPermission {
 		t.Fatalf("executeInstall did not dispatch to executeDirectInstall: %+v", got)
 	}
@@ -240,8 +250,9 @@ func TestExecuteDirectInstall_Success(t *testing.T) {
 		},
 	}
 	opts := Options{Env: env, ConfigureRelease: configureReleaseFromServer(srv)}
+	planned := Result{Target: "ovdb", Method: MethodDirect, Destination: filepath.Join(destDir, "ovdb"), Version: version, Tag: tag}
 
-	got := executeDirectInstall(context.Background(), Entry{ID: "ovdb", Repository: "openvaultdb/ovdb"}, destDir, false, nil, opts)
+	got := executeDirectInstall(context.Background(), Entry{ID: "ovdb", Repository: "openvaultdb/ovdb"}, planned, false, opts)
 	if got.Outcome != OutcomeInstalled {
 		t.Fatalf("Outcome = %v, want OutcomeInstalled; failure=%v", got.Outcome, got.Failure)
 	}
@@ -283,8 +294,9 @@ func TestExecuteDirectInstall_NotOnPathWarning(t *testing.T) {
 		},
 	}
 	opts := Options{Env: env, ConfigureRelease: configureReleaseFromServer(srv)}
+	planned := Result{Target: "ovdb", Method: MethodDirect, Destination: filepath.Join(destDir, "ovdb"), Version: version, Tag: "v" + version}
 
-	got := executeDirectInstall(context.Background(), Entry{ID: "ovdb", Repository: "openvaultdb/ovdb"}, destDir, false, nil, opts)
+	got := executeDirectInstall(context.Background(), Entry{ID: "ovdb", Repository: "openvaultdb/ovdb"}, planned, false, opts)
 	if got.Outcome != OutcomeInstalled {
 		t.Fatalf("Outcome = %v, want OutcomeInstalled; failure=%v", got.Outcome, got.Failure)
 	}
@@ -302,8 +314,9 @@ func TestExecuteDirectInstall_NotOnPathWarning(t *testing.T) {
 func TestExecuteDirectInstall_MkdirFails(t *testing.T) {
 	env := InstallEnv{MkdirAll: func(string, os.FileMode) error { return errors.New("permission denied") }}
 	opts := Options{Env: env}
+	planned := Result{Target: "ovdb", Method: MethodDirect, Destination: "/home/alex/.local/bin/ovdb", Tag: "v1.0.0", Version: "1.0.0"}
 
-	got := executeDirectInstall(context.Background(), Entry{ID: "ovdb"}, "/home/alex/.local/bin", true, nil, opts)
+	got := executeDirectInstall(context.Background(), Entry{ID: "ovdb"}, planned, true, opts)
 	if got.Outcome != OutcomeFailed || got.Failure == nil || got.Failure.Kind != selfupdate.KindPermission {
 		t.Fatalf("executeDirectInstall = %+v, want a KindPermission failure", got)
 	}
@@ -313,8 +326,9 @@ func TestExecuteDirectInstall_InstallNewFails(t *testing.T) {
 	srv := newReleaseServer(t, `[{"tag_name":"v1.2.3","prerelease":false,"draft":false}]`, nil) // no asset/checksums published
 	destDir := t.TempDir()
 	opts := Options{Env: InstallEnv{}, ConfigureRelease: configureReleaseFromServer(srv)}
+	planned := Result{Target: "ovdb", Method: MethodDirect, Destination: filepath.Join(destDir, "ovdb"), Tag: "v1.2.3", Version: "1.2.3"}
 
-	got := executeDirectInstall(context.Background(), Entry{ID: "ovdb", Repository: "openvaultdb/ovdb"}, destDir, false, nil, opts)
+	got := executeDirectInstall(context.Background(), Entry{ID: "ovdb", Repository: "openvaultdb/ovdb"}, planned, false, opts)
 	if got.Outcome != OutcomeFailed {
 		t.Fatalf("Outcome = %v, want OutcomeFailed", got.Outcome)
 	}
@@ -323,10 +337,26 @@ func TestExecuteDirectInstall_InstallNewFails(t *testing.T) {
 	}
 }
 
+// A caller that somehow reaches executeDirectInstall with an unplanned
+// (zero) Tag gets InstallNew's own KindUnexpected refusal, not a silent
+// re-resolution of "latest" — see selfupdate.Config.InstallNew's doc
+// comment. This proves cliinstall never triggers that path itself; the
+// error still routes through executeDirectInstall's normal failure shape.
+func TestExecuteDirectInstall_UnplannedTagIsRejectedBySelfupdate(t *testing.T) {
+	destDir := t.TempDir()
+	opts := Options{Env: InstallEnv{}}
+	planned := Result{Target: "ovdb", Method: MethodDirect, Destination: filepath.Join(destDir, "ovdb")}
+
+	got := executeDirectInstall(context.Background(), Entry{ID: "ovdb"}, planned, false, opts)
+	if got.Outcome != OutcomeFailed || got.Failure == nil || got.Failure.Kind != selfupdate.KindUnexpected {
+		t.Fatalf("executeDirectInstall = %+v, want KindUnexpected", got)
+	}
+}
+
 // --- executeHomebrewInstall --------------------------------------------
 
 func TestExecuteHomebrewInstall_NoRunnerConfigured(t *testing.T) {
-	got := executeHomebrewInstall(context.Background(), Entry{ID: "ovdb"}, "acme/tap/ovdb", nil, Options{})
+	got := executeHomebrewInstall(context.Background(), Entry{ID: "ovdb"}, Result{Target: "ovdb", Method: MethodHomebrew, CaskArgv: []string{"brew", "install", "--cask", "acme/tap/ovdb"}}, Options{})
 	if got.Outcome != OutcomeFailed || got.Failure == nil || got.Failure.Kind != selfupdate.KindManagedCommand {
 		t.Fatalf("executeHomebrewInstall = %+v, want KindManagedCommand", got)
 	}
@@ -339,7 +369,7 @@ func TestExecuteHomebrewInstall_RunManagedFails(t *testing.T) {
 		gotExecutable, gotArgs = executable, args
 		return errors.New("exit status 1")
 	}}
-	got := executeHomebrewInstall(context.Background(), Entry{ID: "ovdb"}, "acme/tap/ovdb", nil, Options{Env: env})
+	got := executeHomebrewInstall(context.Background(), Entry{ID: "ovdb"}, Result{Target: "ovdb", Method: MethodHomebrew, CaskArgv: []string{"brew", "install", "--cask", "acme/tap/ovdb"}}, Options{Env: env})
 	if got.Outcome != OutcomeFailed || got.Failure == nil || got.Failure.Kind != selfupdate.KindManagedCommand {
 		t.Fatalf("executeHomebrewInstall = %+v, want KindManagedCommand", got)
 	}
@@ -371,7 +401,7 @@ func TestExecuteHomebrewInstall_Success(t *testing.T) {
 		},
 		RunManaged: func(context.Context, string, []string) error { return nil },
 	}
-	got := executeHomebrewInstall(context.Background(), Entry{ID: "ovdb"}, "acme/tap/ovdb", nil, Options{Env: env})
+	got := executeHomebrewInstall(context.Background(), Entry{ID: "ovdb"}, Result{Target: "ovdb", Method: MethodHomebrew, CaskArgv: []string{"brew", "install", "--cask", "acme/tap/ovdb"}}, Options{Env: env})
 	if got.Outcome != OutcomeInstalled {
 		t.Fatalf("Outcome = %v, want OutcomeInstalled", got.Outcome)
 	}

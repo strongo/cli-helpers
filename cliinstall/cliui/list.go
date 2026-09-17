@@ -15,25 +15,34 @@ type listDocument struct {
 	Targets []listTargetJSON `json:"targets"`
 }
 
-// listTargetJSON is one target's listing row. "details" is deliberately
-// absent: REQ: machine-readable-output scopes that field to "details and
-// install" output, not a bare listing.
+// listTargetJSON is one target's listing row. Every field REQ:
+// machine-readable-output names MUST be present, even when empty — no
+// "omitempty" on any of them (task-5 review M5: "omitempty drops keys the
+// spec lists as MUST-present"). "details" is the one field that REQ
+// deliberately scopes to "details and install" output, not a bare listing,
+// and is the only one genuinely absent from this shape (not merely empty).
 type listTargetJSON struct {
 	Name          string   `json:"name"`
 	Relevant      bool     `json:"relevant"`
-	Description   string   `json:"description,omitempty"`
-	Relevance     string   `json:"relevance,omitempty"`
+	Description   string   `json:"description"`
+	Relevance     string   `json:"relevance"`
 	Status        string   `json:"status"`
-	Version       string   `json:"version,omitempty"`
-	Commit        string   `json:"commit,omitempty"`
-	Date          string   `json:"date,omitempty"`
-	DateSource    string   `json:"date_source,omitempty"`
-	Path          string   `json:"path,omitempty"`
-	OtherPaths    []string `json:"other_paths,omitempty"`
-	InstallMethod string   `json:"install_method,omitempty"`
-	Manager       string   `json:"manager,omitempty"`
-	VersionSource string   `json:"version_source,omitempty"`
-	Warnings      []string `json:"warnings,omitempty"`
+	Version       string   `json:"version"`
+	Commit        string   `json:"commit"`
+	Date          string   `json:"date"`
+	DateSource    string   `json:"date_source"`
+	Path          string   `json:"path"`
+	OtherPaths    []string `json:"other_paths"`
+	InstallMethod string   `json:"install_method"`
+	Manager       string   `json:"manager"`
+	VersionSource string   `json:"version_source"`
+	Warnings      []string `json:"warnings"`
+	// Output is the observed probe output for an unrecognized copy
+	// (cli-install#req:status-probe-order: "reported with its path and the
+	// output that was seen" — task-5 review S4); empty for every other
+	// state, including a listing row that omits it structurally the same
+	// way as any other zero field above.
+	Output string `json:"output"`
 }
 
 func rowToListJSON(row Row) listTargetJSON {
@@ -53,6 +62,7 @@ func rowToListJSON(row Row) listTargetJSON {
 		InstallMethod: installMethodJSON(s),
 		VersionSource: s.VersionSource.String(),
 		Warnings:      dedupedWarnings(row),
+		Output:        s.Output,
 	}
 	if s.State != cliinstall.NotInstalled && s.Manager != nil {
 		t.Manager = s.Manager.Name

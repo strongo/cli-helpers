@@ -69,7 +69,7 @@ func TestWriteList_Golden(t *testing.T) {
 	WriteList(&out, &errOut, "datatug", rows)
 
 	want := fmt.Sprintf(
-		"ingitdb: installed v0.65.16, built 2026-08-01, ab12cd3 at /home/alex/.local/bin/ingitdb (direct)\n"+
+		"ingitdb: installed v0.65.16, built 2026-08-01, ab12cd3 at /home/alex/.local/bin/ingitdb (manual)\n"+
 			"  %s\n"+
 			"  Why: %s\n"+
 			"\n"+
@@ -192,6 +192,30 @@ func TestWriteListJSON_ManagerField(t *testing.T) {
 	}
 	if doc.Targets[0].Manager != "Homebrew" {
 		t.Errorf("manager = %q, want Homebrew", doc.Targets[0].Manager)
+	}
+}
+
+// S4: an unrecognized copy's observed output is surfaced in listing JSON
+// too, not just the details/result document.
+func TestWriteListJSON_UnrecognizedOutput(t *testing.T) {
+	row := Row{
+		Entry:  cliinstall.Entry{ID: "synchestra"},
+		Status: cliinstall.Status{State: cliinstall.Unrecognized, Path: "/bin/synchestra", Output: "synchestra version 0.9.0 (92c5a01)"},
+	}
+	var out, errOut bytes.Buffer
+	if err := WriteListJSON(&out, &errOut, "datatug", []Row{row}); err != nil {
+		t.Fatalf("WriteListJSON error = %v", err)
+	}
+	var doc struct {
+		Targets []struct {
+			Output string `json:"output"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Targets[0].Output != "synchestra version 0.9.0 (92c5a01)" {
+		t.Errorf("output = %q", doc.Targets[0].Output)
 	}
 }
 

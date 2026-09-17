@@ -58,7 +58,7 @@ func TestMethodLabel(t *testing.T) {
 	if got := methodLabel(cliinstall.Status{Method: selfupdate.Managed}); got != "managed" {
 		t.Errorf("managed without manager = %q", got)
 	}
-	if got := methodLabel(cliinstall.Status{Method: selfupdate.Manual}); got != "direct" {
+	if got := methodLabel(cliinstall.Status{Method: selfupdate.Manual}); got != "manual" {
 		t.Errorf("manual = %q", got)
 	}
 	if got := methodLabel(cliinstall.Status{Method: selfupdate.Ambiguous}); got != "ambiguous" {
@@ -90,7 +90,7 @@ func TestStatusSummary_Unrecognized(t *testing.T) {
 		OtherPaths: []string{"/other/foo"},
 	}
 	got := statusSummary(s)
-	want := "unrecognized copy at /opt/x/foo (direct); 1 other copy"
+	want := "unrecognized copy at /opt/x/foo (layout: manual); 1 other copy"
 	if got != want {
 		t.Errorf("statusSummary(Unrecognized) = %q, want %q", got, want)
 	}
@@ -108,7 +108,7 @@ func TestStatusSummary_InstalledFull(t *testing.T) {
 		OtherPaths: []string{"/a", "/b"},
 	}
 	got := statusSummary(s)
-	want := "installed v1.2.3, built 2026-08-01, abcdef1 at /home/x/.local/bin/ovdb (direct); 2 other copies"
+	want := "installed v1.2.3, built 2026-08-01, abcdef1 at /home/x/.local/bin/ovdb (manual); 2 other copies"
 	if got != want {
 		t.Errorf("statusSummary(Installed) = %q, want %q", got, want)
 	}
@@ -173,6 +173,49 @@ func TestWriteWarnings(t *testing.T) {
 	}
 	if strings.Contains(out, "ingitdb") {
 		t.Errorf("errOut contains a line for a target with no warnings: %q", out)
+	}
+}
+
+func TestStatusSummary_UnrecognizedWithOutput(t *testing.T) {
+	s := cliinstall.Status{State: cliinstall.Unrecognized, Path: "/bin/synchestra", Output: "synchestra version 0.9.0 (92c5a01)"}
+	got := statusSummary(s)
+	want := "unrecognized copy at /bin/synchestra (layout: managed)\n  Output: synchestra version 0.9.0 (92c5a01)"
+	if got != want {
+		t.Errorf("statusSummary = %q, want %q", got, want)
+	}
+}
+
+func TestFirstLine(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"one line", "one line"},
+		{"first\nsecond", "first..."},
+		{"exactly ten", "exactly ten"},
+	}
+	for _, c := range cases {
+		if got := firstLine(c.in, 160); got != c.want {
+			t.Errorf("firstLine(%q, 160) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	long := ""
+	for i := 0; i < 200; i++ {
+		long += "x"
+	}
+	got := firstLine(long, 160)
+	if len(got) != 163 || got[160:] != "..." { // 160 runes + "..."
+		t.Errorf("firstLine truncation = %q (len %d), want 160 chars + ...", got, len(got))
+	}
+}
+
+func TestVersionLabel(t *testing.T) {
+	if got := versionLabel(""); got != "" {
+		t.Errorf("versionLabel(\"\") = %q", got)
+	}
+	if got := versionLabel("dev"); got != "dev" {
+		t.Errorf("versionLabel(dev) = %q, want dev (no v prefix)", got)
+	}
+	if got := versionLabel("1.2.3"); got != "v1.2.3" {
+		t.Errorf("versionLabel(1.2.3) = %q, want v1.2.3", got)
 	}
 }
 

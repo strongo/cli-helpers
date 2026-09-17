@@ -3,10 +3,27 @@ package cliinstall
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/strongo/cli-helpers/selfupdate"
 )
+
+// goroot is a test seam over runtime.GOROOT, used as deniedRoots' fallback
+// when $GOROOT is unset — the common case for an installed toolchain, where
+// the environment variable is usually never set at all (task-5 review M2).
+//
+// runtime.GOROOT is deprecated since Go 1.24 in favor of shelling out to
+// `go env GOROOT`, because a binary that was cross-compiled and then copied
+// to another machine carries the BUILD machine's root, not the one on the
+// machine it now runs on. That gap does not apply the way it would for a Go
+// tool: cliinstall runs go env GOROOT for nothing — it is a fleet CLI, not
+// a Go build tool, so `go` need not even be on PATH — and this fallback
+// only ever widens a denylist (a wrong or stale value makes a Go-toolchain
+// path merely un-denied, never lets an install escape a REAL directory it
+// should have been kept out of); getenv("GOROOT") is still checked first
+// and wins whenever a caller sets it explicitly.
+var goroot = runtime.GOROOT //nolint:staticcheck // SA1019: intentional; see comment above
 
 // getwdFunc is a test seam over os.Getwd, used only to resolve a relative
 // --dir against the working directory (cli-install#req:install-method-
@@ -20,7 +37,12 @@ var getwdFunc = os.Getwd
 // host OS it was compiled for regardless of that injection.
 func isAbsPath(goos, p string) bool {
 	if goos == "windows" {
-		if len(p) >= 2 && p[1] == ':' {
+		// A drive letter alone ("C:foo") names a path RELATIVE to that
+		// drive's current directory, not an absolute one — only a drive
+		// letter followed by a separator ("C:\foo", "C:/foo") is
+		// (task-5 review M12). Requiring len(p) >= 3 and a separator at
+		// p[2] catches this; a bare "C:" (len 2) is also relative.
+		if len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/') {
 			return true
 		}
 		return strings.HasPrefix(p, `\\`) || strings.HasPrefix(p, "//")
@@ -67,8 +89,13 @@ func installFilePath(goos, dir, id string) string {
 // (cli-install#req:destination-denylist: "including --dir (resolved to an
 // absolute, symlink-resolved path)"). A relative value is joined against
 // the working directory; when evalSymlinks is nil or errors, resolution
-// falls back to the absolute-but-unresolved path, mirroring DetectSelf's
-// own fallback.
+// falls back to the absolute-but-unresolved (but still Cleaned, M2) path,
+// mirroring DetectSelf's own fallback. Called exactly once per batch
+// (cli-install#req:no-network-in-tests's sibling concern for
+// filesystem/env reads — S6 of the task-5 review): the caller passes the
+// SAME resolved string to both Probe and planning, so a relative,
+// symlinked or different-case --dir never lets a located copy and a
+// planned destination silently disagree about which path they mean.
 func resolveDir(raw, goos string, evalSymlinks func(string) (string, error)) string {
 	p := raw
 	if !isAbsPath(goos, p) {
@@ -78,10 +105,69 @@ func resolveDir(raw, goos string, evalSymlinks func(string) (string, error)) str
 	}
 	if evalSymlinks != nil {
 		if resolved, err := evalSymlinks(p); err == nil {
-			return resolved
+			return cleanPath(resolved, goos)
 		}
 	}
-	return p
+	return cleanPath(p, goos)
+}
+
+// cleanPath collapses "." and ".." segments and duplicate separators for
+// goos's own separator convention, without relying on path/filepath's
+// build-time OS behavior (this package's tests exercise an injected goos
+// from any host — see isAbsPath's own doc comment for why). It never
+// changes a leading root marker (a POSIX "/", a Windows drive or UNC
+// prefix).
+func cleanPath(p, goos string) string {
+	if p == "" {
+		return p
+	}
+	sep := "/"
+	if goos == "windows" {
+		sep = `\`
+	}
+	abs := isAbsPath(goos, p)
+	root := ""
+	rest := p
+	if abs {
+		switch {
+		case goos == "windows" && len(p) >= 2 && p[1] == ':':
+			root, rest = p[:2]+sep, p[2:]
+		case goos == "windows" && (strings.HasPrefix(p, `\\`) || strings.HasPrefix(p, "//")):
+			root, rest = p[:2], p[2:]
+		default:
+			root, rest = "/", p[1:]
+		}
+	}
+	var stack []string
+	for _, part := range strings.FieldsFunc(rest, func(r rune) bool { return r == '/' || r == '\\' }) {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+		default:
+			stack = append(stack, part)
+		}
+	}
+	return root + strings.Join(stack, sep)
+}
+
+// samePath reports whether a and b name the same filesystem location once
+// both are cleaned, comparing case-insensitively on Windows and macOS —
+// both case-insensitive-by-default filesystems — and byte-exact elsewhere.
+// This is REQ: unrecognized-copy-not-trusted's own destination-collision
+// check ("An install whose destination is that copy's path MUST fail"),
+// which a raw "==" comparison misses whenever the two paths reached this
+// point through different resolution (a relative or symlinked --dir versus
+// a PATH-found copy) or a Windows/macOS case variant of the same path.
+func samePath(a, b, goos string) bool {
+	a, b = cleanPath(a, goos), cleanPath(b, goos)
+	if goos == "windows" || goos == "darwin" {
+		return strings.EqualFold(normalizeSlashes(a), normalizeSlashes(b))
+	}
+	return a == b
 }
 
 // normalizeSlashes lowercases s and folds backslashes to forward slashes,
@@ -109,8 +195,21 @@ func deniedRoots(goos string, getenv func(string) string) []string {
 		roots = append(roots, "/usr", "/bin", "/sbin", "/lib",
 			"/opt/homebrew", "/home/linuxbrew/.linuxbrew", "/snap", "/nix")
 	}
-	if goroot := getenv("GOROOT"); goroot != "" {
-		roots = append(roots, goroot)
+	// $GOROOT is usually unset for an installed toolchain (the toolchain
+	// itself knows its own root without it) — falling back to
+	// runtime.GOROOT() catches the common case the environment variable
+	// alone misses (M2). getenv still wins when the caller set it. The
+	// fallback applies only when goos is the REAL running host's own OS:
+	// runtime.GOROOT() describes THIS process's toolchain, which is never a
+	// meaningful denylist root for a goos this package was merely asked to
+	// evaluate as if it were the host (a test exercising an injected
+	// foreign goos, or a real cross-platform planning decision).
+	gr := getenv("GOROOT")
+	if gr == "" && goos == runtime.GOOS {
+		gr = goroot()
+	}
+	if gr != "" {
+		roots = append(roots, gr)
 	}
 	return roots
 }

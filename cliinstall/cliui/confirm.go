@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/strongo/cli-helpers/cliinstall"
 	"github.com/strongo/cli-helpers/selfupdate"
 	selfcliui "github.com/strongo/cli-helpers/selfupdate/cliui"
 )
@@ -29,9 +30,15 @@ type ConfirmOptions struct {
 
 // Confirm builds a cliinstall.Options.Confirm callback
 // (cli-install#req:confirmation-gate: "one confirmation covering every
-// target that would be installed"). cliinstall.Install calls it at most
+// target that would be installed"). cliinstall.Execute calls it at most
 // once per batch, only when at least one target still needs confirming and
 // Options.Yes is false, so this callback has no --yes concern of its own.
+//
+// planned is exactly the plan Execute is about to install from — already
+// printed once by the caller (typically via WriteResult on cliinstall.Plan's
+// own output, before Execute ever runs) — so this callback only asks the
+// yes/no question; it does not re-render descriptions, details or planned
+// actions a second time (task-5 review B1: "printed once, no second pass").
 //
 // It refuses with a *selfupdate.Failure{Kind: selfupdate.KindNonInteractive}
 // when no interactive terminal is available
@@ -44,12 +51,16 @@ type ConfirmOptions struct {
 // selfupdate/cliui.Confirm documents: nobody was actually asked, so
 // reporting a decline (which callers may read as "nothing failed") would
 // let a script believe the refusal never happened.
-func Confirm(opts ConfirmOptions) func(names []string) (bool, error) {
+func Confirm(opts ConfirmOptions) func(planned []cliinstall.Result) (bool, error) {
 	interactive := opts.Interactive
 	if interactive == nil {
 		interactive = selfcliui.IsTerminal
 	}
-	return func(names []string) (bool, error) {
+	return func(planned []cliinstall.Result) (bool, error) {
+		names := make([]string, len(planned))
+		for i, r := range planned {
+			names[i] = r.Target
+		}
 		if !interactive() {
 			return false, &selfupdate.Failure{
 				Kind: selfupdate.KindNonInteractive,

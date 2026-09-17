@@ -105,11 +105,18 @@ type Result struct {
 	// CaskArgv is the exact `brew install --cask <token>` argv for a
 	// MethodHomebrew plan, redirect, or install; nil for MethodDirect.
 	CaskArgv []string
-	// Version and Tag are the release that was (or, for a dry run, would
-	// be) installed. Tag is the exact published tag, which may differ from
-	// Version by a repository's TagPrefix and/or a leading "v".
+	// Version and Tag are the release that was (or, for a dry run or a
+	// still-planned pending target, would be) installed. Tag is the exact
+	// published tag, which may differ from Version by a repository's
+	// TagPrefix and/or a leading "v". Both are resolved exactly once, by
+	// Plan, and Execute installs precisely this Tag — never re-resolving
+	// "latest" a second time (cli-install#req:direct-release-install).
 	Version string
 	Tag     string
+	// AssetURL is the exact release-asset URL a MethodDirect plan will
+	// download; empty for MethodHomebrew
+	// (cli-install#req:details-before-install: "the exact... asset URL").
+	AssetURL string
 	// UpdateHint names the command that updates Target, set only for
 	// OutcomeAlreadyInstalled (cli-install#req:already-installed-no-op).
 	UpdateHint string
@@ -124,6 +131,14 @@ type Result struct {
 	// hint after a real install, a shadowing notice, a PATH or
 	// post-install-verification remedy, or Status's own warnings.
 	Warnings []string
+
+	// createDir records whether Execute must create Destination's directory
+	// before placing the verified binary — Plan's own
+	// cli-install#req:per-user-bin-dir decision ("created only for a real
+	// install... when missing"), carried on the planned Result so Execute
+	// never needs to re-run planMethod. Unexported: it is this package's
+	// own plan-to-execute handoff, never a fact a caller or a writer shows.
+	createDir bool
 }
 
 // BatchResult is the outcome of one batch Install call: the running host's
@@ -145,6 +160,72 @@ func (b BatchResult) Failed() bool {
 		}
 	}
 	return false
+}
+
+// Failure returns nil when b did not fail, and otherwise a *BatchFailure
+// carrying EVERY failed target's typed *selfupdate.Failure, in Results'
+// own order (cli-install#req:host-owned-exit-codes: "A batch failure MUST
+// expose each target's typed failure" — task-5 review S3, which found a
+// mapper that only ever saw the FIRST failed target). A host's ErrorMapper
+// receives this single error and decides its own exit code from it — see
+// BatchFailure's own doc comment for the suggested precedence rule.
+func (b BatchResult) Failure() error {
+	var failures []*selfupdate.Failure
+	for _, r := range b.Results {
+		if r.Outcome == OutcomeFailed && r.Failure != nil {
+			failures = append(failures, r.Failure)
+		}
+	}
+	if len(failures) == 0 {
+		return nil
+	}
+	return &BatchFailure{Failures: failures}
+}
+
+// BatchFailure aggregates every failed target's typed
+// *selfupdate.Failure from one batch (see BatchResult.Failure).
+//
+// It implements Unwrap() []error, so errors.Is/errors.As still work
+// against it exactly as they do against a single *selfupdate.Failure — for
+// example errors.As(err, &batchFailure) or, for one specific kind,
+// errors.As(err, &oneFailure) finds any matching entry. selfupdate.KindOf
+// resolves through errors.As too, so KindOf(batchFailure) reports the
+// FIRST failure's kind for a caller that only wants one classification; a
+// host that wants full precedence should type-assert to *BatchFailure and
+// walk every Failures entry itself.
+//
+// Suggested precedence for a host that wants ONE exit code for a mixed
+// batch: usage-level treatment (mapping selfupdate.KindUnknownTarget to an
+// invalid-arguments code) applies ONLY when it is the batch's one and only
+// failure kind. A typo named alongside a target that failed for a real
+// operational reason (a checksum mismatch, a permission error, a denied
+// destination) is not "just a usage error" — something real also broke,
+// and folding that into a usage exit code would hide it from a script that
+// branches on exit codes. This package does not enforce the rule; each
+// host's ErrorMapper is where it is applied, as every exit-code decision
+// is (cli-install#req:host-owned-exit-codes).
+type BatchFailure struct {
+	Failures []*selfupdate.Failure
+}
+
+// Error joins every failure's own message, one per line, so a caller that
+// never inspects Failures individually still gets a complete report.
+func (b *BatchFailure) Error() string {
+	msgs := make([]string, len(b.Failures))
+	for i, f := range b.Failures {
+		msgs[i] = f.Error()
+	}
+	return strings.Join(msgs, "; ")
+}
+
+// Unwrap exposes every failure to errors.Is/errors.As (and, transitively,
+// selfupdate.KindOf) via Go's multi-error unwrapping.
+func (b *BatchFailure) Unwrap() []error {
+	errs := make([]error, len(b.Failures))
+	for i, f := range b.Failures {
+		errs[i] = f
+	}
+	return errs
 }
 
 // InstallEnv extends Env with the additional side-effecting dependencies
@@ -223,16 +304,21 @@ type Options struct {
 	// Env carries every side-effecting dependency.
 	Env InstallEnv
 	// Confirm asks whether to proceed with every target that would be
-	// installed, called at most once per batch, only when at least one
-	// target needs it and Yes is false
-	// (cli-install#req:confirmation-gate). Its own refusal — no
-	// interactive terminal and Yes false — is reported by returning a
-	// *selfupdate.Failure{Kind: selfupdate.KindNonInteractive}, exactly as
-	// selfupdate.Options.Confirm documents
-	// (self-update#req:non-interactive-refusal); Install has no
+	// installed, called at most once per batch by Execute, only when at
+	// least one target needs it and Yes is false
+	// (cli-install#req:confirmation-gate). It receives the already-planned
+	// []Result for exactly those pending targets — version, tag, asset URL,
+	// destination or cask argv all already resolved by Plan — so a caller
+	// renders the confirmation prompt (and, in a Cobra host, the
+	// details-before-install preview) from the SAME data Execute is about
+	// to act on, never a second, independently-resolved lookup. Its own
+	// refusal — no interactive terminal and Yes false — is reported by
+	// returning a *selfupdate.Failure{Kind: selfupdate.KindNonInteractive},
+	// exactly as selfupdate.Options.Confirm documents
+	// (self-update#req:non-interactive-refusal); Execute has no
 	// interactive-terminal opinion of its own; it relies entirely on this
 	// callback to enforce it.
-	Confirm func(names []string) (bool, error)
+	Confirm func(planned []Result) (bool, error)
 	// ConfigureRelease optionally overrides a target's resolved
 	// selfupdate.Config before it is used to install or resolve that
 	// target's release — the release-endpoint injection point
@@ -282,14 +368,16 @@ func shadowWarning(pathDirs []string, status Status, destDir string) string {
 	return ""
 }
 
-// dirOf returns path's directory using "/" as the separator, matching how
-// status.go's own probeOne builds Status.Path (filepath.Join, which on the
-// platform this module actually runs on is "/" outside Windows and "\" on
-// it — this package's own tests keep fixture paths POSIX-style even under
-// an injected Windows goos, exactly as status_test.go's fixtures already
-// do, so a single separator here is sufficient).
+// dirOf returns path's directory, splitting on EITHER "/" or "\" —
+// filepath-agnostic on purpose (task-5 review S6): a real Windows path uses
+// "\", and this package's own tests exercise Windows-shaped fixtures (an
+// injected goos) from a POSIX test binary, where path/filepath's own
+// separator handling always follows the BUILD platform, never the goos
+// under test. Splitting on both separators unconditionally is safe on
+// POSIX too, since a POSIX filename practically never contains a literal
+// backslash in this fleet's own paths.
 func dirOf(path string) string {
-	if i := strings.LastIndex(path, "/"); i >= 0 {
+	if i := strings.LastIndexAny(path, `/\`); i >= 0 {
 		return path[:i]
 	}
 	return path
@@ -317,15 +405,6 @@ func alreadyInstalledResult(target Entry, status Status) Result {
 		Status:     status,
 		UpdateHint: target.ID + " self-update",
 		Warnings:   status.Warnings,
-	}
-}
-
-// unknownTargetFailure builds cli-install#req:unknown-target-refused's
-// typed failure, naming every valid id.
-func unknownTargetFailure(name string) *selfupdate.Failure {
-	return &selfupdate.Failure{
-		Kind: selfupdate.KindUnknownTarget,
-		Err:  fmt.Errorf("%q is not a known install target; valid ids: %s", name, strings.Join(IDs(), ", ")),
 	}
 }
 

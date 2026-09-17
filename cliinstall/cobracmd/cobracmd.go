@@ -26,7 +26,6 @@ package cobracmd
 import (
 	"context"
 	"fmt"
-	"io"
 
 	"github.com/spf13/cobra"
 
@@ -56,10 +55,39 @@ func (e *UsageError) Unwrap() error { return e.Err }
 // (cli-install#req:host-owned-exit-codes).
 type ErrorMapper interface {
 	// Failure maps a non-nil command error into the host's own error type:
-	// a *UsageError, the confirmation gate's own batch-level
-	// *selfupdate.Failure (no interactive terminal and --yes not given), or
-	// one target's typed *selfupdate.Failure from BatchResult.Results.
+	// a *UsageError, Plan's own batch-level *selfupdate.Failure (an unknown
+	// name), Execute's own batch-level *selfupdate.Failure (no interactive
+	// terminal and --yes not given), or a *cliinstall.BatchFailure carrying
+	// every failed target's own typed *selfupdate.Failure
+	// (cli-install#req:host-owned-exit-codes: "A batch failure MUST expose
+	// each target's typed failure" — task-5 review S3). See
+	// cliinstall.BatchFailure's own doc comment for the suggested
+	// precedence a host applies when it wants one exit code for a batch
+	// that failed for more than one reason.
 	Failure(err error) error
+}
+
+// UpgradeErrorMapper extends ErrorMapper with the method a future
+// `upgrade` command's Cobra adapter will call when at least one looked-up
+// target has an update available or an undetermined verdict
+// (cli-install#req:upgrade-check: "the Cobra adapter MUST call the host's
+// error mapper's upgrades-available method"), mirroring how
+// selfupdate/cobracmd.ErrorMapper already has its own UpdateAvailable.
+// Declared here, now, as a SEPARATE interface — not a new method on
+// ErrorMapper itself — precisely so that adding it later never breaks a
+// host's existing `install`-only ErrorMapper implementation (task-5 review
+// M15). A host that wires `upgrade` implements both by implementing this
+// one interface; a host that only wires `install` never needs to know it
+// exists.
+type UpgradeErrorMapper interface {
+	ErrorMapper
+	// UpgradesAvailable is called with every target whose upgrade check
+	// found one, mirroring self-update's own UpdateAvailable mapping.
+	// Results is deliberately untyped for now ([]cliinstall.Result may not
+	// be the shape upgrade's own check settles on) — this method exists so
+	// the INTERFACE shape is reserved today; its real signature lands with
+	// the upgrade command itself.
+	UpgradesAvailable(results []cliinstall.Result) error
 }
 
 // CommandOptions configures the command New builds. Use and Short default
@@ -143,14 +171,25 @@ func New(opts CommandOptions) *cobra.Command {
 		Aliases: opts.Aliases,
 		Short:   short,
 		Args:    cobra.ArbitraryArgs,
+		// A runtime failure (a target's own typed Failure, a non-interactive
+		// refusal, an unknown target) is not a flag-parsing mistake, and
+		// printing the full flag usage block after one is just noise
+		// (task-5 review M7, verified against a real run). RunE prints
+		// Cobra's usage itself, via UsageError's own message, for the one
+		// case that IS a usage mistake (an invalid --format, --all with
+		// names): SilenceUsage/SilenceErrors turn off Cobra's own
+		// automatic printing for every error uniformly, and the *UsageError
+		// path below writes the same "Usage:" block back deliberately.
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			format, _ := cmd.Flags().GetString("format")
 			if format != "text" && format != "json" {
-				return mapFailure(opts, &UsageError{Err: fmt.Errorf("invalid --format %q: expected text or json", format)})
+				return usageFailure(cmd, opts, fmt.Errorf("invalid --format %q: expected text or json", format))
 			}
 			all, _ := cmd.Flags().GetBool("all")
 			if all && len(args) > 0 {
-				return mapFailure(opts, &UsageError{Err: fmt.Errorf("--all takes no target names")})
+				return usageFailure(cmd, opts, fmt.Errorf("--all takes no target names"))
 			}
 			dir, _ := cmd.Flags().GetString("dir")
 
@@ -263,94 +302,110 @@ func runList(cmd *cobra.Command, opts CommandOptions, all bool, dir, format stri
 	return nil
 }
 
-// runInstall implements `install <name>...`: a pre-confirmation preview
-// (text format only, and only when --dry-run itself was not given, since a
-// real --dry-run run's own output already is that preview), then the batch
-// install itself, then the final report — installed, already installed,
-// redirected, declined, dry run, or failed, one per target
-// (cli-install#req:multi-target-batch).
+// runInstall implements `install <name>...` as Plan, confirm, Execute
+// (task-5 review B1): Plan resolves every target's method, destination (or
+// cask) and — for a not-yet-installed direct target — its exact release,
+// exactly once; that SAME plan is shown to the user
+// (cli-install#req:details-before-install) and handed to Execute, which
+// asks at most one confirmation and installs precisely what was shown,
+// never re-probing or re-resolving anything.
+//
+// In text format the plan is printed once, to stdout, before any
+// confirmation — this IS `--dry-run`'s own final answer, unchanged, when
+// dryRun is set. In --format json the SAME preview goes to stderr instead
+// (interactive prompts move there too, so stdout only ever carries the
+// final JSON document), and the terminal report — dry run or executed —
+// is the one and only document written to stdout, always, even for a
+// batch-level refusal (task-5 review S2).
 func runInstall(cmd *cobra.Command, opts CommandOptions, names []string, dir string, yes, dryRun bool, format string) error {
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
-	interactionOut := out
+	previewOut := out
 	if format == "json" {
-		// Keep stdout valid JSON while still streaming the confirmation
-		// prompt and any Homebrew command's own output to stderr.
-		interactionOut = errOut
+		previewOut = errOut
 	}
 
 	env := resolveEnv(opts)
-	env.RunManaged = selfcliui.ManagedCommandRunner(cmd.InOrStdin(), interactionOut, errOut)
+	env.RunManaged = selfcliui.ManagedCommandRunner(cmd.InOrStdin(), previewOut, errOut)
 
 	core := cliinstall.Options{
-		HostID:            opts.HostID,
-		Dir:               dir,
-		Yes:               yes,
-		DryRun:            dryRun,
-		HomebrewPrintOnly: opts.HomebrewPrintOnly,
-		Env:               env,
-		ConfigureRelease:  opts.ConfigureRelease,
-		ProbeOptions:      opts.ProbeOptions,
-		Confirm: cliui.Confirm(cliui.ConfirmOptions{
-			In:          cmd.InOrStdin(),
-			Out:         interactionOut,
-			Interactive: opts.Interactive,
-		}),
+		HostID:           opts.HostID,
+		Dir:              dir,
+		Env:              env,
+		ConfigureRelease: opts.ConfigureRelease,
+		ProbeOptions:     opts.ProbeOptions,
 	}
 
-	if !dryRun && format == "text" {
-		writePreview(cmd, opts.HostID, names, core, out, errOut)
+	plan, planErr := cliinstall.Plan(cmd.Context(), names, core)
+	rows := resultRows(opts.HostID, plan.Results)
+
+	// The text preview doubles as `--dry-run`'s own final answer and as a
+	// batch-level refusal's report, so it is always shown in text format.
+	// In JSON format it is skipped here: neither a batch-level refusal nor
+	// a dry run ever reaches a confirmation prompt, so there is nothing on
+	// stderr for a human to read before one — the single JSON document
+	// below is the whole report, and printing the same rows a second time
+	// to stderr would only duplicate that document's own warnings.
+	if format == "text" {
+		cliui.WriteResult(out, errOut, opts.HostID, rows, planErr)
 	}
 
-	result, err := cliinstall.Install(cmd.Context(), names, core)
-	if err != nil {
-		return mapFailure(opts, err)
+	if planErr != nil {
+		if format == "json" {
+			if werr := cliui.WriteResultJSON(out, errOut, opts.HostID, rows, planErr); werr != nil {
+				return mapFailure(opts, werr)
+			}
+		}
+		return mapFailure(opts, planErr)
 	}
 
-	rows := resultRows(opts.HostID, result.Results)
+	if dryRun {
+		if format == "json" {
+			if werr := cliui.WriteResultJSON(out, errOut, opts.HostID, rows, nil); werr != nil {
+				return mapFailure(opts, werr)
+			}
+		}
+		return mapFailure(opts, plan.Failure())
+	}
+
 	if format == "json" {
-		if err := cliui.WriteResultJSON(out, errOut, opts.HostID, rows); err != nil {
-			return mapFailure(opts, err)
+		// A real, non-dry run may still ask for confirmation (an
+		// interactive terminal without --yes): show the plan on stderr
+		// first, exactly once, so that prompt is never asked blind.
+		cliui.WriteResult(previewOut, errOut, opts.HostID, rows, nil)
+	}
+
+	execOpts := core
+	execOpts.Yes = yes
+	execOpts.HomebrewPrintOnly = opts.HomebrewPrintOnly
+	execOpts.Confirm = cliui.Confirm(cliui.ConfirmOptions{
+		In:          cmd.InOrStdin(),
+		Out:         previewOut,
+		Interactive: opts.Interactive,
+	})
+
+	result, execErr := cliinstall.Execute(cmd.Context(), plan, execOpts)
+	finalRows := resultRows(opts.HostID, result.Results)
+	if format == "json" {
+		if werr := cliui.WriteResultJSON(out, errOut, opts.HostID, finalRows, execErr); werr != nil {
+			return mapFailure(opts, werr)
 		}
 	} else {
-		cliui.WriteResult(out, errOut, opts.HostID, rows)
+		cliui.WriteOutcome(out, errOut, finalRows, execErr)
 	}
-
-	return failureFromResult(opts, result)
+	if execErr != nil {
+		return mapFailure(opts, execErr)
+	}
+	return mapFailure(opts, result.Failure())
 }
 
-// writePreview walks the full decision path with a DryRun pass — never
-// asking for confirmation, downloading, or writing anything
-// (cli-install#req:install-dry-run) — purely to print
-// cli-install#req:details-before-install's required preview ahead of the
-// real pass's own confirmation prompt. names is always non-empty here (the
-// caller only reaches runInstall, and so writePreview, with one or more
-// target names) and core.HostID is always a valid catalog id (New panics
-// otherwise), so — unlike the real pass right after it, which does ask a
-// confirmation that can refuse — cliinstall.Install can never return a
-// batch-level error for a DryRun call: every target either resolves
-// (possibly to OutcomeFailed) or is skipped, and a DryRun target is never
-// added to Install's own pending-confirmation list at all.
-func writePreview(cmd *cobra.Command, hostID string, names []string, core cliinstall.Options, out, errOut io.Writer) {
-	preview := core
-	preview.DryRun = true
-	previewResult, _ := cliinstall.Install(cmd.Context(), names, preview)
-	rows := resultRows(hostID, previewResult.Results)
-	cliui.WriteResult(out, errOut, hostID, rows)
-}
-
-// failureFromResult maps the first OutcomeFailed target's typed Failure
-// through opts.Errors, so the process exit code reflects it
-// (cli-install#req:multi-target-batch: "the command fails when at least
-// one target failed"). Every target's own outcome was already reported in
-// full by the caller before this runs.
-func failureFromResult(opts CommandOptions, result cliinstall.BatchResult) error {
-	for _, r := range result.Results {
-		if r.Outcome == cliinstall.OutcomeFailed {
-			return mapFailure(opts, r.Failure)
-		}
-	}
-	return nil
+// usageFailure prints cmd's own usage block (Cobra's automatic printing is
+// off — see New's SilenceUsage/SilenceErrors doc comment) and maps err
+// through opts.Errors as a *UsageError, for the one class of failure that
+// IS a usage mistake: an invalid --format, or --all combined with names.
+func usageFailure(cmd *cobra.Command, opts CommandOptions, err error) error {
+	fmt.Fprint(cmd.ErrOrStderr(), cmd.UsageString()) //nolint:errcheck
+	return mapFailure(opts, &UsageError{Err: err})
 }
 
 // mapFailure routes a non-nil error through opts.Errors when configured,

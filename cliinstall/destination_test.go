@@ -3,6 +3,7 @@ package cliinstall
 import (
 	"errors"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/strongo/cli-helpers/selfupdate"
@@ -26,6 +27,11 @@ func TestIsAbsPath(t *testing.T) {
 		{"windows", "//server/share", true},
 		{"windows", `Users\alex`, false},
 		{"windows", "C", false},
+		// M12: a bare drive letter with no separator ("C:foo", "C:") names
+		// a path relative to that drive's own current directory, not an
+		// absolute one.
+		{"windows", "C:foo", false},
+		{"windows", "C:", false},
 	}
 	for _, c := range cases {
 		if got := isAbsPath(c.goos, c.path); got != c.want {
@@ -116,6 +122,49 @@ func TestResolveDir_WindowsAbsoluteNeverCallsGetwd(t *testing.T) {
 	}
 }
 
+// --- cleanPath / samePath ---------------------------------------------------
+
+func TestCleanPath(t *testing.T) {
+	cases := []struct {
+		name, in, goos, want string
+	}{
+		{"empty", "", "linux", ""},
+		{"posix already clean", "/home/alex/bin", "linux", "/home/alex/bin"},
+		{"posix dot segments", "/home/alex/./bin", "linux", "/home/alex/bin"},
+		{"posix dotdot collapses", "/home/alex/tmp/../bin", "linux", "/home/alex/bin"},
+		{"posix dotdot past root stays at root", "/../../bin", "linux", "/bin"},
+		{"posix relative", "sub/./dir/../other", "linux", "sub/other"},
+		{"windows drive root", `C:\Program Files\..\Go\bin`, "windows", `C:\Go\bin`},
+		{"windows forward slashes", `C:/Go/./bin`, "windows", `C:\Go\bin`},
+		{"windows UNC root", `\\host\share\..\other`, "windows", `\\host\other`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := cleanPath(c.in, c.goos); got != c.want {
+				t.Errorf("cleanPath(%q, %q) = %q, want %q", c.in, c.goos, got, c.want)
+			}
+		})
+	}
+}
+
+func TestSamePath(t *testing.T) {
+	if !samePath("/home/alex/bin/ovdb", "/home/alex/./bin/ovdb", "linux") {
+		t.Error("samePath(linux) = false for two spellings of the same path")
+	}
+	if samePath("/home/alex/bin/ovdb", "/home/alex/bin/ingitdb", "linux") {
+		t.Error("samePath(linux) = true for different files")
+	}
+	if !samePath("/Users/Alex/bin/ovdb", "/users/alex/bin/ovdb", "darwin") {
+		t.Error("samePath(darwin) = false for a case variant, want case-insensitive match")
+	}
+	if samePath("/Users/Alex/bin/ovdb", "/users/alex/bin/ovdb", "linux") {
+		t.Error("samePath(linux) = true for a case variant, want byte-exact comparison")
+	}
+	if !samePath(`C:\Go\bin\ovdb.exe`, `c:/go/bin/OVDB.exe`, "windows") {
+		t.Error("samePath(windows) = false for a case- and slash-style variant")
+	}
+}
+
 // --- normalizeSlashes -----------------------------------------------------
 
 func TestNormalizeSlashes(t *testing.T) {
@@ -158,19 +207,66 @@ func TestDeniedRoots_PosixNoGoroot(t *testing.T) {
 	}
 }
 
+// TestDeniedRoots_GorootFallback proves M2's fix: an unset $GOROOT falls
+// back to runtime.GOROOT() when goos is the real running host's own OS.
+func TestDeniedRoots_GorootFallback(t *testing.T) {
+	orig := goroot
+	t.Cleanup(func() { goroot = orig })
+	goroot = func() string { return "/opt/go-toolchain" }
+
+	got := deniedRoots(runtime.GOOS, func(string) string { return "" })
+	found := false
+	for _, g := range got {
+		if g == "/opt/go-toolchain" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("deniedRoots(%s) = %v, want it to include the runtime.GOROOT() fallback", runtime.GOOS, got)
+	}
+}
+
+// A goos this package was merely asked to evaluate (not the real running
+// host's own OS) must never pick up THIS process's own GOROOT: a foreign
+// goos being planned for has no relationship to the toolchain that built
+// the current test binary.
+func TestDeniedRoots_GorootFallbackSkippedForForeignGoos(t *testing.T) {
+	orig := goroot
+	t.Cleanup(func() { goroot = orig })
+	goroot = func() string { return "/opt/go-toolchain" }
+
+	foreign := "windows"
+	if runtime.GOOS == "windows" {
+		foreign = "linux"
+	}
+	got := deniedRoots(foreign, func(string) string { return "" })
+	for _, g := range got {
+		if g == "/opt/go-toolchain" {
+			t.Errorf("deniedRoots(%s) = %v, must not include this process's own GOROOT for a foreign goos", foreign, got)
+		}
+	}
+}
+
 func TestDeniedRoots_WindowsOnlySetVars(t *testing.T) {
+	// GOROOT is set explicitly so this test's exact-length assertion holds
+	// regardless of platform: deniedRoots' runtime.GOROOT() fallback (M2)
+	// applies only when goos equals the REAL running host's OS, which is
+	// windows on an actual Windows CI job — this test must not depend on
+	// which platform runs it.
 	getenv := func(k string) string {
 		switch k {
 		case "ProgramData":
 			return `C:\ProgramData`
 		case "SystemRoot":
 			return `C:\Windows`
+		case "GOROOT":
+			return `C:\Go`
 		default:
 			return ""
 		}
 	}
 	got := deniedRoots("windows", getenv)
-	want := []string{`C:\ProgramData`, `C:\Windows`}
+	want := []string{`C:\ProgramData`, `C:\Windows`, `C:\Go`}
 	if len(got) != len(want) {
 		t.Fatalf("deniedRoots(windows) = %v, want %v", got, want)
 	}

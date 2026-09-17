@@ -56,7 +56,11 @@ func shortCommit(commit string) string {
 
 // methodLabel renders s.Method/s.Manager as the one word REQ: list-relevant
 // wants next to a located copy's path: the owning manager's name for a
-// managed install, "direct" for a manual one, "ambiguous" otherwise.
+// managed install, "manual" otherwise (or "ambiguous"). "manual" is
+// selfupdate.InstallMethod's OWN word — this used to say "direct" here,
+// which meant text and JSON disagreed about the exact same fact (task-5
+// review M5); using the library's own vocabulary in both places removes
+// that disagreement rather than inventing a synonym.
 func methodLabel(s cliinstall.Status) string {
 	switch s.Method {
 	case selfupdate.Managed:
@@ -65,10 +69,28 @@ func methodLabel(s cliinstall.Status) string {
 		}
 		return "managed"
 	case selfupdate.Manual:
-		return "direct"
+		return "manual"
 	default:
 		return "ambiguous"
 	}
+}
+
+// versionLabel renders a status/plan version for text output: "v1.2.3" for
+// an ordinary release version, but the bare token unprefixed when it isn't
+// one — "dev", "unknown", "(devel)" and similar undetermined placeholders
+// (cli-install#req:version-json-contract's own "dev when the build cannot
+// determine it") read as "installed vdev" with an unconditional "v" prefix,
+// which looks like a typo, not a deliberate placeholder (task-5 review
+// M5). A leading digit is treated as an ordinary version; anything else is
+// shown as-is.
+func versionLabel(v string) string {
+	if v == "" {
+		return ""
+	}
+	if v[0] >= '0' && v[0] <= '9' {
+		return "v" + v
+	}
+	return v
 }
 
 // installMethodJSON renders s.Method for JSON the way s.Method is
@@ -92,24 +114,36 @@ func pluralCopies(n int) string {
 	return "copies"
 }
 
-// statusSummary renders s as the one-line status REQ: list-relevant and
+// statusSummary renders s as the status line REQ: list-relevant and
 // REQ: details-before-install both show: the state, and — for a located
 // copy — its path, install method and additional-copy count, plus, for an
-// installed copy, its version, labelled date and short commit.
+// installed copy, its version, labelled date and short commit. An
+// unrecognized copy with observed output carries a second, indented
+// "Output:" line (cli-install#req:status-probe-order: "reported with its
+// path and the output that was seen" — task-5 review S4). An unrecognized
+// copy's method reads "layout: <word>", not a bare "(<word>)": an
+// unrecognized copy is never trusted or verified
+// (cli-install#req:unrecognized-copy-not-trusted), and "(manual)" alone
+// reads like a trust verdict this package never gave it — "layout:" makes
+// clear the word only classifies the PATH's shape, nothing about what runs
+// there (task-5 review M5).
 func statusSummary(s cliinstall.Status) string {
 	switch s.State {
 	case cliinstall.NotInstalled:
 		return "not installed"
 	case cliinstall.Unrecognized:
-		line := fmt.Sprintf("unrecognized copy at %s (%s)", s.Path, methodLabel(s))
+		line := fmt.Sprintf("unrecognized copy at %s (layout: %s)", s.Path, methodLabel(s))
 		if n := len(s.OtherPaths); n > 0 {
 			line += fmt.Sprintf("; %d other %s", n, pluralCopies(n))
+		}
+		if s.Output != "" {
+			line += "\n  Output: " + firstLine(s.Output, outputPreviewLimit)
 		}
 		return line
 	case cliinstall.Installed:
 		var parts []string
-		if s.Version != "" {
-			parts = append(parts, "installed v"+s.Version)
+		if v := versionLabel(s.Version); v != "" {
+			parts = append(parts, "installed "+v)
 		} else {
 			parts = append(parts, "installed")
 		}
@@ -128,6 +162,31 @@ func statusSummary(s cliinstall.Status) string {
 	default:
 		return "unknown"
 	}
+}
+
+// outputPreviewLimit bounds how much of an unrecognized copy's observed
+// output a text row shows inline — enough to identify what actually
+// answered without letting a chatty or malformed binary's output swamp the
+// listing (cli-install#req:status-probe-order: "reported with its path and
+// the output that was seen" — task-5 review S4).
+const outputPreviewLimit = 160
+
+// firstLine returns s's first line, truncated to at most limit runes with
+// a trailing ellipsis when either the line or s itself was longer.
+func firstLine(s string, limit int) string {
+	truncatedMultiline := false
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+		truncatedMultiline = true
+	}
+	r := []rune(s)
+	if len(r) > limit {
+		return string(r[:limit]) + "..."
+	}
+	if truncatedMultiline {
+		return s + "..."
+	}
+	return s
 }
 
 // dedupedWarnings unions row.Status.Warnings with row.Plan.Warnings (when
