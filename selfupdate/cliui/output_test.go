@@ -205,6 +205,22 @@ func TestWriteOutcome_AlreadyCurrent(t *testing.T) {
 	}
 }
 
+// REQ: ahead-of-latest — text output is clear and distinct from "already up
+// to date".
+func TestWriteOutcome_Ahead(t *testing.T) {
+	var out bytes.Buffer
+	WriteOutcome(&out, &bytes.Buffer{}, testConfig(), selfupdate.Outcome{
+		Action: selfupdate.ActionAhead,
+		Result: selfupdate.CheckResult{Current: "2.0.0", Latest: "1.0.0", Verdict: selfupdate.Ahead},
+	})
+	if !strings.Contains(out.String(), "ahead") || !strings.Contains(out.String(), "2.0.0") || !strings.Contains(out.String(), "1.0.0") {
+		t.Errorf("stdout %q does not report ahead-of-latest with both versions", out.String())
+	}
+	if strings.Contains(out.String(), "up to date") {
+		t.Errorf("stdout %q must not read as an ordinary already-up-to-date report", out.String())
+	}
+}
+
 func TestWriteOutcome_Aborted(t *testing.T) {
 	var out bytes.Buffer
 	WriteOutcome(&out, &bytes.Buffer{}, testConfig(), selfupdate.Outcome{Action: selfupdate.ActionAborted})
@@ -411,6 +427,16 @@ func TestWriteCheck_UpToDate(t *testing.T) {
 	WriteCheck(&out, testConfig(), selfupdate.CheckResult{Current: "1.0.0", Latest: "1.0.0", Verdict: selfupdate.UpToDate})
 	if !strings.Contains(out.String(), "up to date") {
 		t.Errorf("stdout %q does not report up to date", out.String())
+	}
+}
+
+// REQ: ahead-of-latest — a check on an ahead-of-latest build reads clearly
+// and is never confused with an ordinary "up to date" report.
+func TestWriteCheck_Ahead(t *testing.T) {
+	var out bytes.Buffer
+	WriteCheck(&out, testConfig(), selfupdate.CheckResult{Current: "2.0.0", Latest: "1.0.0", Verdict: selfupdate.Ahead})
+	if !strings.Contains(out.String(), "ahead") || !strings.Contains(out.String(), "2.0.0") || !strings.Contains(out.String(), "1.0.0") {
+		t.Errorf("stdout %q does not report ahead-of-latest with both versions", out.String())
 	}
 }
 
