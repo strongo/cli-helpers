@@ -480,6 +480,7 @@ Adversarial review of the first draft (2 blocking, 11 serious, 12 minor):
 - M10 guessed tags — fixed: consumers pin the next minor tag read from `gh release list`.
 - M11 catalog text churn — fixed: text frozen after an adversarial pass in task-2; later fixes batched into one final wave.
 - M12 task-19 ownership — fixed: coordinator on the VM, founder on the Mac; Stable move is an explicit coordinator commit.
+- (task-2 catalog review) No entry declares `LegacyVersionSignatures` — the two real old-build outputs found on this VM (a stale synchestra binary's bare `--version` printing `synchestra version 0.9.0 (92c5a01)`, and a from-source ingitdb's `--version` printing `ingitdb version unknown (built from source)`) are both multi-token lines, not the single version token REQ: status-probe-order's step 3 requires, so a declared signature could never match either one. Left empty rather than widening step 3's shape to accommodate them; that REQ is unchanged.
 
 ## Open Questions
 

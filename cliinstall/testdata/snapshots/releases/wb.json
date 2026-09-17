@@ -1,0 +1,12 @@
+{
+  "repo": "sneat-dev/wb",
+  "tag": "v0.135.0",
+  "version": "0.135.0",
+  "assets": [
+    "wb_0.135.0_checksums.txt",
+    "wb_0.135.0_darwin_amd64.tar.gz",
+    "wb_0.135.0_darwin_arm64.tar.gz",
+    "wb_0.135.0_linux_amd64.tar.gz",
+    "wb_0.135.0_linux_arm64.tar.gz"
+  ]
+}
