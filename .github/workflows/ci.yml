@@ -22,13 +22,9 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - name: Exercise native durability and enforce platform coverage
+      - name: Enforce Windows skills-sync platform coverage
         shell: pwsh
         run: |
-          go test ./daemonlifecycle
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
           $coveragePath = Join-Path $PWD 'coverage-windows.out'
           go test "-coverprofile=$coveragePath" ./skillsync
           if ($LASTEXITCODE -ne 0) {
@@ -50,6 +46,28 @@ jobs:
           if ($uncovered.Count -ne 0) {
             throw "Windows directory-sync coverage is incomplete: $uncovered"
           }
+
+  # daemonlifecycle's detach, pipe-EOF and process-identity tests exercise
+  # each OS's own process model, so they run natively on all three. cgo is off
+  # to prove the start-time lookups need no C toolchain.
+  daemonlifecycle:
+    name: Daemon lifecycle (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Test daemonlifecycle
+        run: go test -count=1 -v ./daemonlifecycle
 
   strongo_workflow:
     uses: strongo/cicd/.github/workflows/workflow.yml@main
