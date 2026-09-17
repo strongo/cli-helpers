@@ -26,9 +26,12 @@ import "strings"
 //     update wrote — fight over the same path, which is the failure mode
 //     this check exists to avoid, not a refusal on our part. The Nix store
 //     (`/nix/store`) is the same rule under a different mechanism: it is
-//     content-addressed and, on a normal install, kept read-only by Nix
-//     itself regardless of the invoking user's privilege, so a self-update
-//     write there would fail outright rather than silently get reverted;
+//     content-addressed, and nothing but Nix is meant to write into it.
+//     Whether a write there fails depends on the setup (NixOS mounts the
+//     store read-only; a root process on other Linux or macOS, or the
+//     owning user of a single-user install, can still write), but a
+//     replaced file breaks the store path's content hash, and
+//     `nix-store --verify --check-contents` reports it as corrupted;
 //     NixOS's `/run/current-system` (and nix-darwin's, on macOS) is the
 //     live symlink into that same store.
 //
@@ -49,8 +52,9 @@ import "strings"
 //     GitHub release channel, bypassing the distribution's signed package
 //     channel and its own integrity verification, as the machine's most
 //     privileged user. (A single-user Nix install is the exception to
-//     "writable only by root": there the protection instead comes from the
-//     Nix store's own read-only, immutable-by-design mount, per point 1.)
+//     "writable only by root": the store belongs to that user, so the
+//     reason to refuse is the store's content-addressing, per point 1, not
+//     file ownership.)
 //
 //  4. This module's own destination-choosing logic (cliinstall's install
 //     command) never plans a write into these directories in the first

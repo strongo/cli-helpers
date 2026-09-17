@@ -104,9 +104,11 @@ silently overwrites it again with the package's own bytes — undoing the
 self-update without any error — while `dpkg --verify`, `rpm -V`, and
 `pacman -Qkk` report the file as modified against what the manager's database
 recorded in the meantime. The Nix store (`/nix/store`) is the same rule under
-a different mechanism: on a normal install it is kept read-only by Nix itself
-regardless of the invoking user's privilege, so a write there fails outright
-rather than getting silently reverted. This is the same principle the package
+a different mechanism: it is content-addressed and nothing but Nix is meant to
+write into it. Only NixOS mounts it read-only; elsewhere root (or the owning
+user of a single-user install) can overwrite a file, which breaks the store
+path's content hash and makes `nix-store --verify --check-contents` report it
+as corrupted. This is the same principle the package
 already applies to Homebrew, Scoop, WinGet, and Snap: never overwrite a
 manager-owned install in place, redirect to that manager's own upgrade command
 instead. On a typical multi-user install these directories are writable only
@@ -114,8 +116,8 @@ by root (Administrator/TrustedInstaller on Windows), so a process able to
 replace a file there is normally running elevated, and doing so means
 replacing a file from the distribution's signed package channel with one
 downloaded outside it, as the machine's most privileged user — except a
-single-user Nix install, where the protection instead comes from the store's
-own read-only, immutable-by-design mount, not from file ownership. This
+single-user Nix install, where the store belongs to the user and the reason to
+refuse is the store's content-addressing, not file ownership. This
 package's own installers never write into these directories in the first
 place, so any copy found inside one was placed by something else — almost
 always the OS's own package manager.
