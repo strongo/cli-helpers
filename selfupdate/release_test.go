@@ -2,6 +2,7 @@ package selfupdate
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -181,6 +182,103 @@ func TestLatestStableTag_EmptyTagPrefixUnchanged(t *testing.T) {
 	}
 	if tag != "cli-v0.15.1" {
 		t.Fatalf("latest stable tag = %q, want %q (newest release, prefix filtering is a no-op)", tag, "cli-v0.15.1")
+	}
+}
+
+// --- LatestRelease (exported) ---
+
+// LatestRelease exposes exactly the same lookup latestStableTag performs
+// internally, so a caller (e.g. the cliinstall upgrade command) can resolve
+// a target once and pass it back through Options.ResolvedTag
+// (REQ: update-at-classified-copy).
+func TestLatestRelease_ReturnsLatestStableTag(t *testing.T) {
+	srv := newReleasesServer(t, `[{"tag_name":"v1.2.3","prerelease":false,"draft":false}]`)
+	tag, err := testConfig(srv.URL).LatestRelease(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tag != "v1.2.3" {
+		t.Fatalf("LatestRelease() = %q, want %q", tag, "v1.2.3")
+	}
+}
+
+func TestLatestRelease_FailureIsTypedReleaseLookup(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "rate limited", http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := testConfig(srv.URL).LatestRelease(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if KindOf(err) != KindReleaseLookup {
+		t.Errorf("KindOf(err) = %v, want KindReleaseLookup", KindOf(err))
+	}
+}
+
+// --- resolvedLatestTag / errReleaseMoved ---
+
+// An empty resolvedTag is exactly latestStableTag, unchanged.
+func TestResolvedLatestTag_EmptyBehavesAsLatestStableTag(t *testing.T) {
+	srv := newReleasesServer(t, `[{"tag_name":"v1.2.3","prerelease":false,"draft":false}]`)
+	tag, err := testConfig(srv.URL).resolvedLatestTag(context.Background(), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tag != "v1.2.3" {
+		t.Fatalf("resolvedLatestTag(\"\") = %q, want %q", tag, "v1.2.3")
+	}
+}
+
+// A resolvedTag that is still the current latest succeeds, unchanged.
+func TestResolvedLatestTag_MatchingTagSucceeds(t *testing.T) {
+	srv := newReleasesServer(t, `[{"tag_name":"v1.2.3","prerelease":false,"draft":false}]`)
+	tag, err := testConfig(srv.URL).resolvedLatestTag(context.Background(), "v1.2.3")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tag != "v1.2.3" {
+		t.Fatalf("resolvedLatestTag() = %q, want %q", tag, "v1.2.3")
+	}
+}
+
+// A resolvedTag that a newer release has since superseded fails distinctly
+// (REQ: update-at-classified-copy: "fails ... if that tag is no longer the
+// latest stable release").
+func TestResolvedLatestTag_MovedReleaseFails(t *testing.T) {
+	srv := newReleasesServer(t, `[{"tag_name":"v1.3.0","prerelease":false,"draft":false}]`)
+	_, err := testConfig(srv.URL).resolvedLatestTag(context.Background(), "v1.2.3")
+	if err == nil {
+		t.Fatal("expected error for a moved release, got nil")
+	}
+	var moved *errReleaseMoved
+	if !errors.As(err, &moved) {
+		t.Fatalf("error = %v (%T), want *errReleaseMoved", err, err)
+	}
+	if moved.Resolved != "v1.2.3" || moved.Current != "v1.3.0" {
+		t.Errorf("moved = %+v, want Resolved v1.2.3 Current v1.3.0", moved)
+	}
+	if !strings.Contains(err.Error(), "v1.2.3") || !strings.Contains(err.Error(), "v1.3.0") {
+		t.Errorf("error %q does not name both tags", err.Error())
+	}
+}
+
+// A plain lookup failure (not a moved release) propagates unwrapped, exactly
+// as latestStableTag's own failure does.
+func TestResolvedLatestTag_LookupFailurePropagates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "rate limited", http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := testConfig(srv.URL).resolvedLatestTag(context.Background(), "v1.2.3")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var moved *errReleaseMoved
+	if errors.As(err, &moved) {
+		t.Fatal("a plain lookup failure must not be reported as a moved release")
 	}
 }
 

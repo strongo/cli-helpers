@@ -215,6 +215,56 @@ func TestUpdate_ManagedAvailabilityReportsNewerEqualAndUnknownCurrent(t *testing
 	}
 }
 
+// REQ: ahead-of-latest applies to a managed install too: no redirect is
+// reported and no manager command runs, unlike an ordinary managed check
+// (which always redirects/executes regardless of version comparison).
+func TestUpdate_ManagedRedirect_Ahead(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.CurrentVersion = "2.0.0"
+	h.cfg.Managers = []Manager{Homebrew("brew upgrade --cask wb")}
+	h.setReleases(stableReleaseJSON("v1.0.0"))
+
+	outcome, err := h.cfg.Update(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome.Action != ActionAhead {
+		t.Fatalf("Action = %v, want ActionAhead", outcome.Action)
+	}
+	if outcome.Result.Verdict != Ahead || outcome.Result.Current != "2.0.0" || outcome.Result.Latest != "1.0.0" {
+		t.Errorf("Result = %+v, want Ahead current=2.0.0 latest=1.0.0", outcome.Result)
+	}
+}
+
+// The same ahead-of-latest no-op applies to an executable manager: the
+// runner must never be invoked.
+func TestUpdate_ManagedExecutable_Ahead(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.CurrentVersion = "2.0.0"
+	h.cfg.Managers = []Manager{
+		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
+	}
+	h.setReleases(stableReleaseJSON("v1.0.0"))
+
+	run := false
+	outcome, err := h.cfg.Update(context.Background(), Options{
+		Confirm:    func(string) (bool, error) { t.Fatal("Confirm was called for an ahead-of-latest managed install"); return true, nil },
+		RunManaged: func(context.Context, string, []string) error { run = true; return nil },
+		VerifyManaged: func(context.Context, Detection, string, []string, string) (ExecutableIdentity, error) {
+			return ExecutableIdentity{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome.Action != ActionAhead {
+		t.Fatalf("Action = %v, want ActionAhead", outcome.Action)
+	}
+	if run {
+		t.Error("managed command ran for an ahead-of-latest build")
+	}
+}
+
 func TestUpdate_ManagedAvailabilityLookupFailureIsAdvisory(t *testing.T) {
 	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
 	h.cfg.Managers = []Manager{Homebrew("brew upgrade --cask wb")}
@@ -674,6 +724,42 @@ func TestUpdate_AlreadyCurrent(t *testing.T) {
 	}
 	if h.targetBytes() != "old binary" {
 		t.Error("target file was modified when already current")
+	}
+}
+
+// --- Manual: ahead of latest ---
+
+// AC: only-verified-bytes-are-installed — REQ: ahead-of-latest: a running
+// build strictly newer than the latest stable release downloads nothing and
+// is reported distinctly from "already current".
+func TestUpdate_Manual_Ahead(t *testing.T) {
+	h := newUpdateHarness(t, "bin/wb", "old binary")
+	h.cfg.CurrentVersion = "2.0.0"
+	h.setReleases(stableReleaseJSON("v1.0.0"))
+
+	afterUpdateCalled := false
+	outcome, err := h.cfg.Update(context.Background(), Options{
+		Confirm:     func(string) (bool, error) { t.Fatal("Confirm was called for an ahead-of-latest build"); return true, nil },
+		AfterUpdate: func(context.Context, AfterUpdate) error { afterUpdateCalled = true; return nil },
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome.Action != ActionAhead {
+		t.Fatalf("Action = %v, want ActionAhead", outcome.Action)
+	}
+	if outcome.Result.Verdict != Ahead || outcome.Result.Current != "2.0.0" || outcome.Result.Latest != "1.0.0" {
+		t.Errorf("Result = %+v, want Ahead current=2.0.0 latest=1.0.0", outcome.Result)
+	}
+	if h.targetBytes() != "old binary" {
+		t.Error("target file was modified for an ahead-of-latest build")
+	}
+	// Only the /releases request should have happened — never a download.
+	if atomic.LoadInt32(&h.hits) != 1 {
+		t.Errorf("HTTP requests = %d, want exactly 1 (the releases lookup)", h.hits)
+	}
+	if afterUpdateCalled {
+		t.Error("AfterUpdate ran for an ahead-of-latest build; REQ: after-update-integration does not list it")
 	}
 }
 
@@ -1509,6 +1595,208 @@ func TestUpdate_AfterUpdateManagerReusesVerifiedExecutableAndKeepsCancellationNo
 	}
 	if !errors.Is(outcome.AfterUpdateWarning, context.Canceled) {
 		t.Errorf("AfterUpdateWarning = %v, want context canceled", outcome.AfterUpdateWarning)
+	}
+}
+
+// --- UpdateAt: a classified copy other than the running executable ---
+
+// UpdateAt never calls DetectSelf itself — it replaces exactly the Detection
+// it was given, so a caller updating a different, already-classified copy
+// (e.g. cliinstall upgrading a non-host target) never touches the calling
+// process's own binary (REQ: update-at-classified-copy; Update is exactly
+// DetectSelf followed by UpdateAt).
+func TestUpdateAt_NonRunningSymlinkedCopyReplacesResolvedPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake binary not portable to windows")
+	}
+	h := newUpdateHarness(t, "bin/wb", "running binary")
+	h.setReleases(stableReleaseJSON("v1.1.0"))
+	h.addAsset("v1.1.0", "1.1.0", "#!/bin/sh\necho \"wb version 1.1.0\"\n")
+
+	// A second, already-installed copy at a different manual location —
+	// standing in for a symlinked copy a caller resolved and classified
+	// itself, not the process currently executing.
+	other := filepath.Join(h.dir, "other", "bin", "wb")
+	if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(other, []byte("other binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	detection := Classify(other, h.cfg.Managers)
+	if detection.Method != Manual {
+		t.Fatalf("Classify(%q) = %v, want Manual", other, detection.Method)
+	}
+
+	outcome, err := h.cfg.UpdateAt(context.Background(), detection, Options{
+		Confirm: func(string) (bool, error) { return true, nil },
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome.Action != ActionUpdated {
+		t.Fatalf("Action = %v, want ActionUpdated", outcome.Action)
+	}
+	otherBytes, err := os.ReadFile(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(otherBytes), "1.1.0") {
+		t.Errorf("other copy content = %q, does not look like the swapped-in script", otherBytes)
+	}
+	if h.targetBytes() != "running binary" {
+		t.Error("UpdateAt modified the running binary instead of the classified copy it was given")
+	}
+}
+
+// --- UpdateAt: Options.ResolvedTag ---
+
+// AC: only-verified-bytes-are-installed — a caller that resolves the latest
+// release itself via LatestRelease and passes it back through ResolvedTag
+// gets exactly that release installed, with the confirmation naming it.
+func TestUpdateAt_ResolvedTagSkipsOwnLookupAndSucceeds(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake binary not portable to windows")
+	}
+	h := newUpdateHarness(t, "bin/wb", "old binary")
+	h.setReleases(stableReleaseJSON("v1.1.0"))
+	h.addAsset("v1.1.0", "1.1.0", "#!/bin/sh\necho \"wb version 1.1.0\"\n")
+
+	tag, err := h.cfg.LatestRelease(context.Background())
+	if err != nil {
+		t.Fatalf("LatestRelease() error = %v", err)
+	}
+	if tag != "v1.1.0" {
+		t.Fatalf("LatestRelease() = %q, want v1.1.0", tag)
+	}
+	detection, err := h.cfg.DetectSelf()
+	if err != nil {
+		t.Fatalf("DetectSelf() error = %v", err)
+	}
+
+	var gotTransition string
+	outcome, err := h.cfg.UpdateAt(context.Background(), detection, Options{
+		ResolvedTag: tag,
+		Confirm:     func(transition string) (bool, error) { gotTransition = transition; return true, nil },
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome.Action != ActionUpdated || outcome.Target != "1.1.0" {
+		t.Fatalf("outcome = %+v, want ActionUpdated to 1.1.0", outcome)
+	}
+	if gotTransition != "1.0.0 → 1.1.0" {
+		t.Errorf("transition = %q, want %q", gotTransition, "1.0.0 → 1.1.0")
+	}
+	if got := h.targetBytes(); !strings.Contains(got, "1.1.0") {
+		t.Errorf("target content = %q, does not look like the swapped-in script", got)
+	}
+}
+
+// AC: only-verified-bytes-are-installed — a newer release published between
+// the caller's LatestRelease call and the eventual UpdateAt call fails that
+// target without changes, so a caller that confirmed one version never
+// installs another (REQ: update-at-classified-copy).
+func TestUpdateAt_ResolvedTagFailsWhenReleaseMoved(t *testing.T) {
+	h := newUpdateHarness(t, "bin/wb", "old binary")
+	h.setReleases(stableReleaseJSON("v1.1.0"))
+
+	tag, err := h.cfg.LatestRelease(context.Background())
+	if err != nil {
+		t.Fatalf("LatestRelease() error = %v", err)
+	}
+	// A newer release is published after the caller resolved and confirmed
+	// tag, but before UpdateAt actually runs.
+	h.setReleases(stableReleaseJSON("v1.2.0"))
+	detection, err := h.cfg.DetectSelf()
+	if err != nil {
+		t.Fatalf("DetectSelf() error = %v", err)
+	}
+
+	_, err = h.cfg.UpdateAt(context.Background(), detection, Options{
+		ResolvedTag: tag,
+		Confirm:     func(string) (bool, error) { t.Fatal("Confirm was called for a moved release"); return true, nil },
+	})
+	if err == nil {
+		t.Fatal("expected error for a moved release, got nil")
+	}
+	if KindOf(err) != KindReleaseLookup {
+		t.Errorf("KindOf(err) = %v, want KindReleaseLookup", KindOf(err))
+	}
+	if h.targetBytes() != "old binary" {
+		t.Error("target file was modified after a moved-release failure")
+	}
+}
+
+// The same moved-release protection applies to a managed install: the
+// manager command must never run against an unconfirmed release, and a
+// moved release is a hard failure, not the advisory warning an ordinary
+// lookup failure would be (REQ: update-at-classified-copy).
+func TestUpdateAt_ManagedResolvedTagFailsWhenReleaseMoved(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.Managers = []Manager{
+		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
+	}
+	h.setReleases(stableReleaseJSON("v1.1.0"))
+
+	tag, err := h.cfg.LatestRelease(context.Background())
+	if err != nil {
+		t.Fatalf("LatestRelease() error = %v", err)
+	}
+	h.setReleases(stableReleaseJSON("v1.2.0"))
+	detection, err := h.cfg.DetectSelf()
+	if err != nil {
+		t.Fatalf("DetectSelf() error = %v", err)
+	}
+
+	run := false
+	_, err = h.cfg.UpdateAt(context.Background(), detection, Options{
+		ResolvedTag: tag,
+		RunManaged:  func(context.Context, string, []string) error { run = true; return nil },
+	})
+	if err == nil {
+		t.Fatal("expected error for a moved release, got nil")
+	}
+	if KindOf(err) != KindReleaseLookup {
+		t.Errorf("KindOf(err) = %v, want KindReleaseLookup", KindOf(err))
+	}
+	if run {
+		t.Error("managed command ran despite a moved release")
+	}
+}
+
+// A managed install's ResolvedTag path succeeds exactly like the ordinary
+// unpinned path when the resolved tag is still latest.
+func TestUpdateAt_ManagedResolvedTagSucceeds(t *testing.T) {
+	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
+	h.cfg.Managers = []Manager{
+		Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb"),
+	}
+	h.setReleases(stableReleaseJSON("v1.1.0"))
+
+	tag, err := h.cfg.LatestRelease(context.Background())
+	if err != nil {
+		t.Fatalf("LatestRelease() error = %v", err)
+	}
+	detection, err := h.cfg.DetectSelf()
+	if err != nil {
+		t.Fatalf("DetectSelf() error = %v", err)
+	}
+
+	run := false
+	outcome, err := h.cfg.UpdateAt(context.Background(), detection, Options{
+		ResolvedTag: tag,
+		RunManaged:  func(context.Context, string, []string) error { run = true; return nil },
+		VerifyManaged: func(context.Context, Detection, string, []string, string) (ExecutableIdentity, error) {
+			return ExecutableIdentity{Path: "/tmp/wb", ResolvedPath: "/tmp/wb"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome.Action != ActionManagerExecuted || !run {
+		t.Fatalf("outcome = %+v, run = %v; want manager executed", outcome, run)
 	}
 }
 
