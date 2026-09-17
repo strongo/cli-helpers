@@ -1,6 +1,7 @@
 package cobracmd
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -136,6 +137,37 @@ func equivReleaseServer(t *testing.T, tag string) *httptest.Server {
 	return srv
 }
 
+// equivArchiveFixture builds the single-binary archive selfupdate.
+// extractBinary expects for the current runtime.GOOS — a .zip with the
+// entry named binName+".exe" on windows, a .tar.gz with the entry named
+// binName everywhere else (see selfupdate/download.go's own doc comment:
+// "The archive format is chosen by goos (.zip for windows, .tar.gz
+// otherwise), matching GoReleaser's own per-platform archive format").
+// Building only a .tar.gz unconditionally (as this fixture did before
+// task-22 third review S5 first ran it on Windows) made "manual real
+// replacement (--yes)" fail there with "open zip archive: zip: not a valid
+// zip file" — extractBinary never even looks at a .tar.gz payload once
+// goos is windows.
+func equivArchiveFixture(t *testing.T, binName string, content []byte) (archive []byte, ext string) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return makeTarGzFixture(t, binName, content), ".tar.gz"
+	}
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	fw, err := zw.Create(binName + ".exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes(), ".zip"
+}
+
 // equivAssetReleaseServer is equivReleaseServer plus a real downloadable
 // asset and checksums file matching cover100's own GoReleaser-shaped
 // defaults (task-22 review S4: "a release server that also serves the
@@ -144,9 +176,9 @@ func equivReleaseServer(t *testing.T, tag string) *httptest.Server {
 func equivAssetReleaseServer(t *testing.T, tag, content string) *httptest.Server {
 	t.Helper()
 	version := strings.TrimPrefix(tag, "v")
-	archive := makeTarGzFixture(t, "cover100", []byte(content))
+	archive, ext := equivArchiveFixture(t, "cover100", []byte(content))
 	checksum := sha256HexFixture(archive)
-	assetName := fmt.Sprintf("cover100_%s_%s_%s.tar.gz", version, runtime.GOOS, runtime.GOARCH)
+	assetName := fmt.Sprintf("cover100_%s_%s_%s%s", version, runtime.GOOS, runtime.GOARCH, ext)
 	checksumsName := fmt.Sprintf("cover100_%s_checksums.txt", version)
 	checksumsBody := fmt.Sprintf("%s  %s\n", checksum, assetName)
 
@@ -426,8 +458,19 @@ func TestSelfUpdateEqualsUpgradeSelf(t *testing.T) {
 		if target.Action != "dry_run" {
 			t.Errorf("upgrade <self> action = %q, want dry_run (a decoy on PATH must not change the outcome)", target.Action)
 		}
-		if target.ResolvedPath != dest {
-			t.Errorf("upgrade <self> resolved_path = %q, want the REAL running binary %q, never the decoy", target.ResolvedPath, dest)
+		// Both selfupdate.Config.DetectSelf and cliinstall's own host
+		// detection resolve the running binary's path through
+		// filepath.EvalSymlinks (selfupdate/detect.go's own DetectSelf), so
+		// the comparison must too — on Windows, EvalSymlinks canonicalizes
+		// a short (8.3, e.g. "RUNNER~1") temp-dir path as t.TempDir() may
+		// report it into its long form, and comparing the raw strings
+		// fails even though both name the identical file.
+		wantResolved, err := filepath.EvalSymlinks(dest)
+		if err != nil {
+			t.Fatalf("resolve dest via EvalSymlinks: %v", err)
+		}
+		if target.ResolvedPath != wantResolved {
+			t.Errorf("upgrade <self> resolved_path = %q, want the REAL running binary %q, never the decoy", target.ResolvedPath, wantResolved)
 		}
 		foundWarning := false
 		for _, w := range target.Warnings {

@@ -776,7 +776,10 @@ func TestPlanUpgrade_NonReleaseBuildSkippedUnderAll(t *testing.T) {
 			hostResult = &result.Results[i]
 		}
 	}
-	if ovdbResult == nil || ovdbResult.Outcome != UpgradeOutcomeSkippedNonRelease {
+	if ovdbResult == nil {
+		t.Fatalf("ovdb result = nil, want SkippedNonRelease (result.Results = %+v)", result.Results)
+	}
+	if ovdbResult.Outcome != UpgradeOutcomeSkippedNonRelease {
 		t.Errorf("ovdb result = %+v, want SkippedNonRelease", ovdbResult)
 	}
 	if ovdbResult.Latest != "" || ovdbResult.Tag != "" {
