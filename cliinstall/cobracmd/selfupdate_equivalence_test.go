@@ -57,23 +57,34 @@ func equivBinaryName() string {
 // so one build is reused for every scenario in this file.
 func buildSelfUpdateEquivFixture(t *testing.T) string {
 	t.Helper()
+	return buildEquivGoFixture(t, "./testdata/selfupdateequiv", "built-"+equivBinaryName())
+}
+
+// buildEquivProbe builds testdata/selfupdateequivprobe once — task-22 third
+// review S4's "real --yes through an executable manager ... with host hook
+// count" needs a real, separately-built executable that can stand in for
+// what a package manager's own upgrade step leaves on PATH (see that
+// fixture's own doc comment for why a fake RunManaged step alone is not
+// enough to reach AfterUpdate).
+func buildEquivProbe(t *testing.T) string {
+	t.Helper()
+	return buildEquivGoFixture(t, "./testdata/selfupdateequivprobe", "built-probe-"+equivBinaryName())
+}
+
+// buildEquivGoFixture builds the package at pkgDir into a binary named
+// outName under a fresh t.TempDir(), hermetically (task-22 review S5): no
+// network, no toolchain surprise, and a PATH reduced to exactly the
+// directory containing the resolved `go` binary so the build can never
+// accidentally exec a different `go` or a shell-shadowed `cover100` from the
+// real environment.
+func buildEquivGoFixture(t *testing.T, pkgDir, outName string) string {
+	t.Helper()
 	goBin, err := exec.LookPath("go")
 	if err != nil {
 		t.Skip("go toolchain not found on PATH; skipping the self-update equivalence matrix (task-22 review S5)")
 	}
-	out := filepath.Join(t.TempDir(), "built-"+equivBinaryName())
-	cmd := exec.Command(goBin, "build", "-o", out, "./testdata/selfupdateequiv")
-	// task-22 review S5: hermetic build — GOFLAGS=-mod=mod keeps this
-	// module's own go.mod/go.sum authoritative without a toolchain
-	// upgrade/module-graph surprise; GOPROXY=off and GOFLAGS=-mod=mod
-	// together refuse any network fetch (this fixture imports only
-	// packages already vendored in this module's own build cache);
-	// GOTOOLCHAIN=local pins the toolchain actually installed, never
-	// downloading a directive-pinned one; GOWORK=off ignores any stray
-	// go.work outside this module. PATH is reduced to exactly the
-	// directory containing the resolved `go` binary, so this build can
-	// never accidentally exec a DIFFERENT `go` or a shell-shadowed
-	// `cover100` from the real environment.
+	out := filepath.Join(t.TempDir(), outName)
+	cmd := exec.Command(goBin, "build", "-o", out, pkgDir)
 	cmd.Env = append(os.Environ(),
 		"GOFLAGS=-mod=mod",
 		"GOPROXY=off",
@@ -83,7 +94,7 @@ func buildSelfUpdateEquivFixture(t *testing.T) string {
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("build testdata/selfupdateequiv fixture: %v\n%s", err, output)
+		t.Fatalf("build %s fixture: %v\n%s", pkgDir, err, output)
 	}
 	return out
 }
@@ -224,17 +235,18 @@ type selfUpdateOutcomeJSON struct {
 type upgradeDocForTest struct {
 	FailureKind string `json:"failure_kind"`
 	Targets     []struct {
-		Name         string   `json:"name"`
-		Action       string   `json:"action"`
-		Current      string   `json:"current"`
-		Latest       string   `json:"latest"`
-		Verdict      string   `json:"verdict"`
-		Manager      string   `json:"manager"`
-		Command      string   `json:"command"`
-		ResolvedPath string   `json:"resolved_path"`
-		OtherPaths   []string `json:"other_paths"`
-		Warnings     []string `json:"warnings"`
-		FailureKind  string   `json:"failure_kind"`
+		Name            string   `json:"name"`
+		Action          string   `json:"action"`
+		Current         string   `json:"current"`
+		Latest          string   `json:"latest"`
+		Verdict         string   `json:"verdict"`
+		Manager         string   `json:"manager"`
+		Command         string   `json:"command"`
+		ResolvedPath    string   `json:"resolved_path"`
+		OtherPaths      []string `json:"other_paths"`
+		Warnings        []string `json:"warnings"`
+		FailureKind     string   `json:"failure_kind"`
+		NonReleaseBuild bool     `json:"non_release_build"`
 	} `json:"targets"`
 }
 
@@ -532,6 +544,200 @@ func TestSelfUpdateEqualsUpgradeSelf(t *testing.T) {
 		}
 		if len(upHookLines) != 1 {
 			t.Errorf("upgrade <self> hook invocations = %v, want exactly 1 (task-22 review B2)", upHookLines)
+		}
+	})
+
+	// task-22 third review S4: --check with a failed lookup, across every
+	// install-method classification — not just ambiguous (already covered
+	// above) — proving self-update and upgrade <self> both fail with the
+	// SAME mapped exit code regardless of method, exactly the parity D1's
+	// own reordering (lookup before classification) is meant to guarantee
+	// structurally, not just for the one classification the original
+	// review happened to find broken.
+	t.Run("--check with a failed lookup fails identically per install method", func(t *testing.T) {
+		failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		}))
+		t.Cleanup(failing.Close)
+
+		cases := []struct {
+			name       string
+			subdir     string
+			marker     string
+			executable string
+		}{
+			{"manual", "checkfail/manual/bin", "", ""},
+			{"executable-managed", "checkfail/execmgr", "/checkfailexecmgr/", "1"},
+			{"redirect-only", "checkfail/redirectmgr", "/checkfailredirectmgr/", ""},
+			{"ambiguous", "checkfail/plain", "", ""},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				dest := placeEquivFixture(t, built, c.subdir)
+				env := equivEnv(t, failing.URL, "1.0.0", c.marker, c.executable)
+
+				selfRes := runEquivFixture(t, dest, env, "self-update", "--check", "--format", "json")
+				if selfRes.exitCode != 4 {
+					t.Fatalf("self-update --check exit code = %d, want 4 (release-lookup, per fixtureErrors): stdout=%s stderr=%s", selfRes.exitCode, selfRes.stdout, selfRes.stderr)
+				}
+
+				upRes := runEquivFixture(t, dest, env, "upgrade", "cover100", "--check", "--format", "json")
+				if upRes.exitCode != 4 {
+					t.Fatalf("upgrade <self> --check exit code = %d, want 4 (same reason, same mapped code): stdout=%s stderr=%s", upRes.exitCode, upRes.stdout, upRes.stderr)
+				}
+				var doc upgradeDocForTest
+				if err := json.Unmarshal([]byte(upRes.stdout), &doc); err != nil {
+					t.Fatalf("decode upgrade JSON: %v (raw %s)", err, upRes.stdout)
+				}
+				if len(doc.Targets) != 1 || doc.Targets[0].Action != "failed" || doc.Targets[0].FailureKind != "release_lookup" {
+					t.Errorf("doc.Targets = %+v, want exactly one failed/release_lookup target", doc.Targets)
+				}
+			})
+		}
+	})
+
+	// task-22 third review S4: a REAL --yes run through an EXECUTABLE
+	// manager (not merely --dry-run's own preview of one), proving
+	// self-update and upgrade <self> both reach
+	// ActionManagerExecuted/manager_executed AND both run the host's
+	// after-update hook exactly once. selfupdate.Config.UpdateAt's managed
+	// path only calls AfterUpdate once Options.VerifyManaged has found and
+	// probed a real "cover100" executable on PATH reporting the expected
+	// post-upgrade version (selfupdate/cliui.VerifyManagedBinary) — a fake
+	// RunManaged step alone (e.g. running `go version`) never leaves such a
+	// binary behind, so this uses buildEquivProbe's own fixture as BOTH the
+	// manager's executable-upgrade step (a harmless no-op) and, placed on
+	// PATH under the fixture's exact BinaryName, the thing VerifyManaged
+	// finds and probes with --version.
+	t.Run("executable manager real run (--yes)", func(t *testing.T) {
+		probe := buildEquivProbe(t)
+		srv := equivReleaseServer(t, "v2.0.0")
+
+		selfDest := placeEquivFixture(t, built, "selfmgr/mgr")
+		selfProbeDest := placeEquivFixture(t, probe, "selfmgr/verify")
+		selfMarker := filepath.Join(t.TempDir(), "self-hook.log")
+		selfEnv := append(equivEnv(t, srv.URL, "1.0.0", "/selfmgr/", "1", filepath.Dir(selfProbeDest)),
+			"FIXTURE_MANAGER_EXECUTABLE_PATH="+probe,
+			"FIXTURE_HOOK_MARKER="+selfMarker,
+			"PROBE_VERSION=2.0.0",
+		)
+		selfRes := runEquivFixture(t, selfDest, selfEnv, "self-update", "--yes", "--format", "json")
+		if selfRes.exitCode != 0 {
+			t.Fatalf("self-update exit code = %d, want 0: stdout=%s stderr=%s", selfRes.exitCode, selfRes.stdout, selfRes.stderr)
+		}
+		var selfOutcome selfUpdateOutcomeJSON
+		if err := json.Unmarshal([]byte(selfRes.stdout), &selfOutcome); err != nil {
+			t.Fatalf("decode self-update JSON: %v (raw %s)", err, selfRes.stdout)
+		}
+		if selfOutcome.Action != "manager_executed" {
+			t.Fatalf("self-update action = %q, want manager_executed", selfOutcome.Action)
+		}
+		selfHookLines := readHookMarker(t, selfMarker)
+
+		upDest := placeEquivFixture(t, built, "upmgr/mgr")
+		upProbeDest := placeEquivFixture(t, probe, "upmgr/verify")
+		upMarker := filepath.Join(t.TempDir(), "up-hook.log")
+		upEnv := append(equivEnv(t, srv.URL, "1.0.0", "/upmgr/", "1", filepath.Dir(upProbeDest)),
+			"FIXTURE_MANAGER_EXECUTABLE_PATH="+probe,
+			"FIXTURE_HOOK_MARKER="+upMarker,
+			"PROBE_VERSION=2.0.0",
+		)
+		upRes := runEquivFixture(t, upDest, upEnv, "upgrade", "cover100", "--yes", "--format", "json")
+		if upRes.exitCode != 0 {
+			t.Fatalf("upgrade <self> exit code = %d, want 0: stdout=%s stderr=%s", upRes.exitCode, upRes.stdout, upRes.stderr)
+		}
+		var doc upgradeDocForTest
+		if err := json.Unmarshal([]byte(upRes.stdout), &doc); err != nil {
+			t.Fatalf("decode upgrade JSON: %v (raw %s)", err, upRes.stdout)
+		}
+		if len(doc.Targets) != 1 || doc.Targets[0].Action != "manager_executed" {
+			t.Fatalf("doc.Targets = %+v, want exactly one manager_executed target", doc.Targets)
+		}
+		upHookLines := readHookMarker(t, upMarker)
+
+		if len(selfHookLines) != 1 {
+			t.Errorf("self-update hook invocations = %v, want exactly 1", selfHookLines)
+		}
+		if len(upHookLines) != 1 {
+			t.Errorf("upgrade <self> hook invocations = %v, want exactly 1", upHookLines)
+		}
+	})
+
+	// task-22 third review S4: an explicitly-named dev (non-release) build
+	// — the one case cli-install#req:upgrade-skips-non-release-builds
+	// offers instead of skipping. self-update has no such concept at all
+	// (a single-target tool never "skips" itself); its own Undetermined
+	// verdict for a "dev" CurrentVersion is exactly what upgrade <self>
+	// cover100 (explicit naming required — a dev build is never offered
+	// implicitly) must also reach — including BOTH commands' own --check
+	// exit code: selfupdate/cobracmd.runCheck calls opts.Errors.
+	// UpdateAvailable for any verdict other than UpToDate/Ahead, which
+	// includes Undetermined (its own doc comment: "covers both selfupdate.
+	// UpdateAvailable and selfupdate.Undetermined"), and cliinstall/
+	// cobracmd's own runUpgradeReport mirrors that exactly (its Undetermined
+	// arm feeding UpgradeErrorMapper.UpgradesAvailable) — so fixtureErrors
+	// maps both to exit 2, not 0.
+	t.Run("explicitly named dev build", func(t *testing.T) {
+		srv := equivReleaseServer(t, "v1.0.0")
+		dest := placeEquivFixture(t, built, "devbuild/bin")
+		env := equivEnv(t, srv.URL, "dev", "", "")
+
+		selfRes := runEquivFixture(t, dest, env, "self-update", "--check", "--format", "json")
+		if selfRes.exitCode != 2 {
+			t.Fatalf("self-update --check exit code = %d, want 2 (undetermined maps to UpdateAvailable, per fixtureErrors): stdout=%s stderr=%s", selfRes.exitCode, selfRes.stdout, selfRes.stderr)
+		}
+		var selfCheck struct {
+			Verdict string `json:"verdict"`
+		}
+		if err := json.Unmarshal([]byte(selfRes.stdout), &selfCheck); err != nil {
+			t.Fatalf("decode self-update JSON: %v (raw %s)", err, selfRes.stdout)
+		}
+		if selfCheck.Verdict != "undetermined" {
+			t.Fatalf("self-update verdict = %q, want undetermined", selfCheck.Verdict)
+		}
+
+		upRes := runEquivFixture(t, dest, env, "upgrade", "cover100", "--check", "--format", "json")
+		if upRes.exitCode != 2 {
+			t.Fatalf("upgrade <self> --check exit code = %d, want 2 (same reason, same mapped code): stdout=%s stderr=%s", upRes.exitCode, upRes.stdout, upRes.stderr)
+		}
+		var doc upgradeDocForTest
+		if err := json.Unmarshal([]byte(upRes.stdout), &doc); err != nil {
+			t.Fatalf("decode upgrade JSON: %v (raw %s)", err, upRes.stdout)
+		}
+		if len(doc.Targets) != 1 || doc.Targets[0].Verdict != "undetermined" {
+			t.Fatalf("doc.Targets = %+v, want exactly one undetermined target", doc.Targets)
+		}
+		if !doc.Targets[0].NonReleaseBuild {
+			t.Errorf("NonReleaseBuild = false, want true for an explicitly-named dev build")
+		}
+
+		// Both sides also agree once actually offered (--dry-run --yes):
+		// self-update's own Undetermined path still proceeds to plan a
+		// replacement (there is no "current" to already equal), and so
+		// does upgrade <self> for the same explicitly-named non-release
+		// build (cli-install#req:upgrade-skips-non-release-builds).
+		selfDry := runEquivFixture(t, dest, env, "self-update", "--dry-run", "--yes", "--format", "json")
+		if selfDry.exitCode != 0 {
+			t.Fatalf("self-update --dry-run exit code = %d, want 0: stdout=%s stderr=%s", selfDry.exitCode, selfDry.stdout, selfDry.stderr)
+		}
+		var selfOutcome selfUpdateOutcomeJSON
+		if err := json.Unmarshal([]byte(selfDry.stdout), &selfOutcome); err != nil {
+			t.Fatalf("decode self-update JSON: %v (raw %s)", err, selfDry.stdout)
+		}
+		if selfOutcome.Action != "planned" {
+			t.Errorf("self-update action = %q, want planned", selfOutcome.Action)
+		}
+
+		upDry := runEquivFixture(t, dest, env, "upgrade", "cover100", "--dry-run", "--yes", "--format", "json")
+		if upDry.exitCode != 0 {
+			t.Fatalf("upgrade <self> --dry-run exit code = %d, want 0: stdout=%s stderr=%s", upDry.exitCode, upDry.stdout, upDry.stderr)
+		}
+		var upDoc upgradeDocForTest
+		if err := json.Unmarshal([]byte(upDry.stdout), &upDoc); err != nil {
+			t.Fatalf("decode upgrade JSON: %v (raw %s)", err, upDry.stdout)
+		}
+		if len(upDoc.Targets) != 1 || upDoc.Targets[0].Action != "dry_run" {
+			t.Errorf("doc.Targets = %+v, want exactly one dry_run target", upDoc.Targets)
 		}
 	})
 }

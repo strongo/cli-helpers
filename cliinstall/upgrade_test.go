@@ -717,10 +717,18 @@ func TestPlanUpgrade_HostDetectFails(t *testing.T) {
 	}
 }
 
+// TestCheckUpgrades_HostDetectFails is task-22 second review D2: a host
+// detection failure under --check must NOT fail the row — it falls back to
+// Ambiguous (Refused) and the check still reports current/latest/verdict,
+// exactly as selfupdate/cobracmd's own runCheck falls back on a detectFunc
+// failure (checkFunc's own success is unaffected by detectFunc failing
+// afterward).
 func TestCheckUpgrades_HostDetectFails(t *testing.T) {
 	env := batchEnv(nil, "", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.1.0")}, nil)
 	opts := UpgradeOptions{
 		HostID: "cover100", Env: env,
+		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
 		DetectHost: failingDetectHost(errors.New("os.Executable failed")),
 	}
 
@@ -729,8 +737,14 @@ func TestCheckUpgrades_HostDetectFails(t *testing.T) {
 		t.Fatalf("CheckUpgrades error = %v", err)
 	}
 	r := result.Results[0]
-	if r.Outcome != UpgradeOutcomeFailed || r.Failure == nil || r.Failure.Kind != selfupdate.KindUnexpected {
-		t.Errorf("result = %+v, want Failed/KindUnexpected", r)
+	if r.Outcome != UpgradeOutcomeRefused || r.InstallMethod != selfupdate.Ambiguous {
+		t.Errorf("result = %+v, want Refused/Ambiguous (D2 fallback), not Failed", r)
+	}
+	if r.Failure == nil || r.Failure.Kind != selfupdate.KindAmbiguous {
+		t.Errorf("Failure = %+v, want KindAmbiguous", r.Failure)
+	}
+	if r.Latest != "1.1.0" {
+		t.Errorf("Latest = %q, want 1.1.0 (the lookup still ran and succeeded)", r.Latest)
 	}
 }
 
@@ -1087,6 +1101,56 @@ func TestPlanUpgrade_LookupFailure(t *testing.T) {
 	r := result.Results[0]
 	if r.Outcome != UpgradeOutcomeFailed || r.Failure == nil || r.Failure.Kind != selfupdate.KindReleaseLookup {
 		t.Errorf("result = %+v, want Failed/KindReleaseLookup", r)
+	}
+}
+
+// TestPlanUpgrade_LookupRetrySucceedsCarriesTagForward is task-22 third
+// review N1: a transient failure on resolveUpgradeRow's own first
+// LatestRelease attempt must not leave row.Tag empty when a retry (or,
+// previously, only UpdateAt's own internal lookup) would have resolved a
+// real one — Execute must reuse EXACTLY the tag PlanUpgrade showed and
+// confirmed, per cli-install#req:upgrade-resolves-release-once, not
+// independently re-search for "latest" a second time.
+func TestPlanUpgrade_LookupRetrySucceedsCarriesTagForward(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			http.Error(w, "transient", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(releasesJSON("v1.1.0")))
+	}))
+	t.Cleanup(srv.Close)
+
+	env := batchEnv(
+		[]string{"/usr/bin"}, "/opt/cover100",
+		map[string]bool{"/usr/bin/ovdb": true},
+		jsonRunFor("/usr/bin/ovdb", "ovdb", "1.0.0"),
+		noRunManaged,
+	)
+	opts := UpgradeOptions{
+		HostID: "cover100", Env: env,
+		ConfigureRelease: func(_ Entry, cfg selfupdate.Config) selfupdate.Config {
+			cfg.ReleasesAPIURL = srv.URL
+			cfg.HTTPClient = srv.Client()
+			return cfg
+		},
+	}
+
+	result, err := PlanUpgrade(context.Background(), []string{"ovdb"}, opts)
+	if err != nil {
+		t.Fatalf("PlanUpgrade error = %v", err)
+	}
+	r := result.Results[0]
+	if r.Outcome != UpgradeOutcomeDryRun {
+		t.Fatalf("result = %+v, want DryRun (pending) despite the first lookup attempt failing", r)
+	}
+	if r.Tag != "v1.1.0" || r.Latest != "1.1.0" {
+		t.Errorf("Tag/Latest = %q/%q, want v1.1.0/1.1.0 carried forward from the successful retry", r.Tag, r.Latest)
+	}
+	if atomic.LoadInt32(&calls) < 2 {
+		t.Fatalf("server received %d calls, want at least 2 (first failed, retry succeeded)", calls)
 	}
 }
 
@@ -1732,6 +1796,75 @@ func TestExecuteUpgrade_HostAlreadyCurrentHookRunsEvenWhenOtherTargetDeclined(t 
 	}
 }
 
+// TestExecuteUpgrade_HostAlreadyCurrentHookRunsOnNonInteractiveRefusal is
+// task-22 third review N2: a non-interactive refusal of the OTHER pending
+// target's confirmation (no --yes, no Confirm callback) must not suppress
+// the already-current host's own after-update hook — that host row was
+// never part of the confirmation set at all (nothing to download or
+// write), so REQ: confirmation-gate's own "before any download or write"
+// scope never applies to it, exactly as self-update itself never gates
+// this hook behind any prompt.
+func TestExecuteUpgrade_HostAlreadyCurrentHookRunsOnNonInteractiveRefusal(t *testing.T) {
+	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.0.0"), "ovdb": releasesJSON("v2.0.0")}, nil)
+	calls := 0
+	hostPath := realHostPath(t)
+	plan := UpgradeBatchResult{Host: "cover100", Results: []UpgradeResult{
+		pendingManualResult("ovdb", "v2.0.0", "1.0.0"),
+		{Target: "cover100", Host: true, Outcome: UpgradeOutcomeAlreadyCurrent, InstallMethod: selfupdate.Manual, ResolvedPath: hostPath, Current: "1.0.0", Tag: "v1.0.0"},
+	}}
+	opts := UpgradeOptions{
+		HostID: "cover100", Env: batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged),
+		HostConfig:      hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
+		HostAfterUpdate: func(context.Context, selfupdate.AfterUpdate) error { calls++; return nil },
+		// Yes is false and Confirm is nil: ovdb's own pending upgrade hits
+		// the non-interactive refusal.
+	}
+
+	result, err := ExecuteUpgrade(context.Background(), plan, opts)
+	if selfupdate.KindOf(err) != selfupdate.KindNonInteractive {
+		t.Fatalf("KindOf(err) = %v, want KindNonInteractive", selfupdate.KindOf(err))
+	}
+	if result.Results[0].Outcome != UpgradeOutcomeFailed {
+		t.Errorf("ovdb outcome = %v, want Failed (the non-interactive refusal)", result.Results[0].Outcome)
+	}
+	if result.Results[1].Outcome != UpgradeOutcomeAlreadyCurrent {
+		t.Errorf("host outcome = %v, want AlreadyCurrent unchanged", result.Results[1].Outcome)
+	}
+	if calls != 1 {
+		t.Errorf("HostAfterUpdate called %d times, want exactly 1 despite ovdb's non-interactive refusal", calls)
+	}
+}
+
+// TestExecuteUpgrade_HostAlreadyCurrentHookRunsOnConfirmError is the same
+// N2 invariant for the OTHER early-return path: Confirm itself returning an
+// error for the pending (non-host) target.
+func TestExecuteUpgrade_HostAlreadyCurrentHookRunsOnConfirmError(t *testing.T) {
+	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.0.0"), "ovdb": releasesJSON("v2.0.0")}, nil)
+	calls := 0
+	hostPath := realHostPath(t)
+	plan := UpgradeBatchResult{Host: "cover100", Results: []UpgradeResult{
+		pendingManualResult("ovdb", "v2.0.0", "1.0.0"),
+		{Target: "cover100", Host: true, Outcome: UpgradeOutcomeAlreadyCurrent, InstallMethod: selfupdate.Manual, ResolvedPath: hostPath, Current: "1.0.0", Tag: "v1.0.0"},
+	}}
+	opts := UpgradeOptions{
+		HostID: "cover100", Env: batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged),
+		HostConfig:      hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
+		Confirm:         func([]UpgradeResult) (bool, error) { return false, errors.New("boom") },
+		HostAfterUpdate: func(context.Context, selfupdate.AfterUpdate) error { calls++; return nil },
+	}
+
+	result, err := ExecuteUpgrade(context.Background(), plan, opts)
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("err = %v, want boom", err)
+	}
+	if result.Results[1].Outcome != UpgradeOutcomeAlreadyCurrent {
+		t.Errorf("host outcome = %v, want AlreadyCurrent unchanged", result.Results[1].Outcome)
+	}
+	if calls != 1 {
+		t.Errorf("HostAfterUpdate called %d times, want exactly 1 despite ovdb's Confirm error", calls)
+	}
+}
+
 // TestUpgrade_HostAlreadyCurrentRunsAfterUpdateExactlyOnceEndToEnd proves
 // the same invariant through the full Upgrade (Plan+confirm+Execute)
 // convenience call, with --yes set — the case task-22's own coordinator
@@ -2019,9 +2152,10 @@ func TestCheckUpgrades_HostOtherCopyWarning(t *testing.T) {
 		jsonRunFor("/usr/bin/cover100", "cover100", "1.0.0"),
 		noRunManaged,
 	)
+	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.0.0")}, nil)
 	opts := UpgradeOptions{
 		HostID: "cover100", Env: env,
-		HostConfig: selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"},
+		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
 		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
 	}
 	result, err := CheckUpgrades(context.Background(), []string{"cover100"}, opts)
@@ -2091,7 +2225,17 @@ func TestCheckUpgrades_HostAmbiguous(t *testing.T) {
 // row's own Check() lookup failing must not produce a SECOND, different
 // failure — the row is already terminal (Refused/KindAmbiguous); the
 // lookup failure is folded into a warning instead.
-func TestCheckUpgrades_AmbiguousLookupFailureBecomesWarning(t *testing.T) {
+// TestCheckUpgrades_AmbiguousLookupFailureFailsExactlyLikeSelfUpdate is
+// task-22 second review D1's own regression test: self-update --check
+// fails on the Check() error BEFORE it ever consults classification
+// (selfupdate/cobracmd's own runCheck calls checkFunc, then returns
+// immediately on its error, never reaching detectFunc) — so an ambiguous
+// host whose lookup fails MUST fail the row with the release-lookup kind,
+// exactly like any other target, not be folded into a mere warning on an
+// already-"refused" row. This was the exact gap an earlier revision left:
+// classifying ambiguous BEFORE the lookup let the row's own Refused
+// classification swallow the lookup failure as a warning.
+func TestCheckUpgrades_AmbiguousLookupFailureFailsExactlyLikeSelfUpdate(t *testing.T) {
 	env := batchEnv(nil, "/opt/cover100", map[string]bool{"/opt/weird/ovdb": true}, jsonRunFor("/opt/weird/ovdb", "ovdb", "1.0.0"), noRunManaged)
 	env.PathDirs = func() []string { return []string{"/opt/weird"} }
 	srv := upgradeReleaseServer(t, nil, nil) // no "ovdb" key -> lookup fails
@@ -2102,17 +2246,38 @@ func TestCheckUpgrades_AmbiguousLookupFailureBecomesWarning(t *testing.T) {
 		t.Fatalf("CheckUpgrades error = %v", err)
 	}
 	r := result.Results[0]
-	if r.Outcome != UpgradeOutcomeRefused || r.Failure == nil || r.Failure.Kind != selfupdate.KindAmbiguous {
-		t.Errorf("result = %+v, want Refused/KindAmbiguous (unchanged by the failed lookup)", r)
+	if r.Outcome != UpgradeOutcomeFailed || r.Failure == nil || r.Failure.Kind != selfupdate.KindReleaseLookup {
+		t.Errorf("result = %+v, want Failed/KindReleaseLookup, exactly like self-update --check on the same lookup failure", r)
 	}
-	found := false
-	for _, w := range r.Warnings {
-		if strings.Contains(w, "unavailable") || strings.Contains(w, "release") {
-			found = true
-		}
+	// Classification was never even attempted: InstallMethod stays at its
+	// zero value (Managed, per selfupdate.InstallMethod's own doc comment
+	// on why Managed is deliberately the zero value) since resolveCheckRow
+	// returns before ever calling row.classification() here.
+	if r.Command != "" {
+		t.Errorf("Command = %q, want empty (classification never ran)", r.Command)
 	}
-	if !found {
-		t.Errorf("Warnings = %v, want a lookup-unavailable warning", r.Warnings)
+}
+
+// TestCheckUpgrades_AmbiguousHostLookupFailureFailsExactlyLikeSelfUpdate is
+// the same D1 regression, exercised through the HOST row specifically
+// (buildCheckHostRow/resolveCheckRow's own deferred-classification path,
+// separate code from the non-host one above).
+func TestCheckUpgrades_AmbiguousHostLookupFailureFailsExactlyLikeSelfUpdate(t *testing.T) {
+	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	srv := upgradeReleaseServer(t, nil, nil) // no "cover100" key -> lookup fails
+	opts := UpgradeOptions{
+		HostID: "cover100", Env: env,
+		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
+		DetectHost: fakeDetectHost(selfupdate.Ambiguous, nil, "/src/cover100/cover100"),
+	}
+
+	result, err := CheckUpgrades(context.Background(), []string{"cover100"}, opts)
+	if err != nil {
+		t.Fatalf("CheckUpgrades error = %v", err)
+	}
+	r := result.Results[0]
+	if r.Outcome != UpgradeOutcomeFailed || r.Failure == nil || r.Failure.Kind != selfupdate.KindReleaseLookup {
+		t.Errorf("result = %+v, want Failed/KindReleaseLookup", r)
 	}
 }
 

@@ -617,7 +617,17 @@ ingitdb MUST NOT gain one, because its `update` command edits records.
 
 `upgrade` MUST make at most one latest-release lookup per looked-up target, at
 most four concurrently, each bounded by a 15 second timeout, and MUST NOT look
-up releases for targets that are not installed, unrecognized, or skipped. When
+up releases for targets that are not installed, unrecognized, or skipped. This
+bounds the ONE search `upgrade` itself performs per target (a single retry on
+its own first attempt failing counts as the same one search, not a second —
+task-22 third review N1: without it, a transient failure could leave the tag
+`UpdateAt` resolves during planning uncarried, and Execute would search again
+independently). It does not bound `UpdateAt`'s own, separate re-verification
+that a resolved tag is still latest ([REQ: upgrade-resolves-release-once](#req-upgrade-resolves-release-once)),
+which runs once more during planning and once more during execution for a
+target that reaches both — so a single fully-executed target can cost on the
+order of three GitHub requests, not one; `--check` and `--dry-run` alone never
+reach the execution-time one. When
 `GH_TOKEN` or `GITHUB_TOKEN` is set, lookups to `api.github.com` MUST send it as
 a bearer token — attached only over `https`, never to a plain-`http` request —
 through the library's `HTTPClient` seam, and this applies even when a host or

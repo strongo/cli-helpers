@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -74,13 +75,26 @@ func fixtureConfig() selfupdate.Config {
 			PathMarkers:    []string{marker},
 		}
 		if os.Getenv("FIXTURE_MANAGER_EXECUTABLE") == "1" {
-			// "true" is never actually invoked by the test's own dry-run
-			// scenarios (selfupdate.Config.UpdateAt's managed dry-run branch
-			// returns ActionPlanned before ever calling RunManaged), but a
-			// real, portable no-op executable name keeps this fixture
+			// "true" is a real, portable no-op that keeps this fixture
 			// honest about what CanExecuteUpgrade() means rather than
-			// naming something that could never run at all.
-			m = m.WithExecutableUpgrade("true")
+			// naming something that could never run at all — safe as the
+			// default because most scenarios only ever reach it under
+			// --dry-run (selfupdate.Config.UpdateAt's managed dry-run
+			// branch returns ActionPlanned before ever calling RunManaged).
+			// A REAL --yes run DOES invoke it, so a caller that wants one
+			// (task-22 third review S4: "real --yes through an executable
+			// manager") can point it at any other real, harmless command —
+			// e.g. the `go` toolchain's own binary — via
+			// FIXTURE_MANAGER_EXECUTABLE_PATH/_ARGS instead.
+			exe := os.Getenv("FIXTURE_MANAGER_EXECUTABLE_PATH")
+			if exe == "" {
+				exe = "true"
+			}
+			var args []string
+			if raw := os.Getenv("FIXTURE_MANAGER_EXECUTABLE_ARGS"); raw != "" {
+				args = strings.Split(raw, ",")
+			}
+			m = m.WithExecutableUpgrade(exe, args...)
 		}
 		cfg.Managers = []selfupdate.Manager{m}
 	}
