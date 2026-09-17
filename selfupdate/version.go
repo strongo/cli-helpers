@@ -19,6 +19,13 @@ const (
 	// meaningfully compared at all — it is reported as neither up to date
 	// nor available, per REQ: undetermined-version.
 	Undetermined
+	// Ahead means the running version is known and orders strictly above the
+	// latest stable release — a Go pseudo-version after the newest tag, or a
+	// build from a newer version line than the releases (REQ: ahead-of-
+	// latest). Appended after the existing values so no consumer's existing
+	// switch on this type changes meaning (see
+	// TestVerdict_ExistingValuesPinned).
+	Ahead
 )
 
 // String renders v the way a consumer's machine-readable output (e.g.
@@ -32,6 +39,8 @@ func (v Verdict) String() string {
 		return "update_available"
 	case Undetermined:
 		return "undetermined"
+	case Ahead:
+		return "ahead"
 	default:
 		return "unknown"
 	}
@@ -53,9 +62,18 @@ type CheckResult struct {
 // usable on its own (a "--check" flag) or before deciding whether to call
 // Update at all.
 func (c Config) Check(ctx context.Context) (CheckResult, error) {
+	return c.checkAgainst(ctx, "")
+}
+
+// checkAgainst is Check's implementation, shared with the managed-
+// availability lookup inside Update/UpdateAt so both honor
+// Options.ResolvedTag identically (REQ: update-at-classified-copy). With
+// resolvedTag empty it behaves exactly as Check always has. With resolvedTag
+// set, see resolvedLatestTag.
+func (c Config) checkAgainst(ctx context.Context, resolvedTag string) (CheckResult, error) {
 	cfg := c.withDefaults()
 
-	latestTag, err := cfg.latestStableTag(ctx)
+	latestTag, err := cfg.resolvedLatestTag(ctx, resolvedTag)
 	if err != nil {
 		return CheckResult{}, &Failure{Kind: KindReleaseLookup, Err: err}
 	}
@@ -67,8 +85,12 @@ func (c Config) Check(ctx context.Context) (CheckResult, error) {
 
 	current := normalize(cfg.CurrentVersion)
 	verdict := UpdateAvailable
-	if CompareVersions(current, latest) == 0 {
+	switch cmp := CompareVersions(current, latest); {
+	case cmp == 0:
 		verdict = UpToDate
+	case cmp > 0:
+		// REQ: ahead-of-latest.
+		verdict = Ahead
 	}
 	return CheckResult{Current: current, Latest: latest, Verdict: verdict}, nil
 }

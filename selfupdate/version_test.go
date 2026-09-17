@@ -25,11 +25,31 @@ func TestVerdict_String(t *testing.T) {
 		{UpToDate, "up_to_date"},
 		{UpdateAvailable, "update_available"},
 		{Undetermined, "undetermined"},
+		{Ahead, "ahead"},
 		{Verdict(99), "unknown"},
 	}
 	for _, c := range cases {
 		if got := c.v.String(); got != c.want {
 			t.Errorf("Verdict(%d).String() = %q, want %q", c.v, got, c.want)
+		}
+	}
+}
+
+// Appending Ahead after the existing values (REQ: ahead-of-latest) must
+// never renumber a value a consumer already switches on.
+func TestVerdict_ExistingValuesPinned(t *testing.T) {
+	cases := []struct {
+		v    Verdict
+		want int
+	}{
+		{UpToDate, 0},
+		{UpdateAvailable, 1},
+		{Undetermined, 2},
+		{Ahead, 3},
+	}
+	for _, c := range cases {
+		if got := int(c.v); got != c.want {
+			t.Errorf("%s = %d, want %d (a Verdict value must never change once shipped)", c.v, got, c.want)
 		}
 	}
 }
@@ -165,6 +185,25 @@ func TestCheck_TagPrefixReportsOwnProductOnly(t *testing.T) {
 	}
 	if got.Verdict != UpdateAvailable {
 		t.Fatalf("Verdict = %v, want UpdateAvailable", got.Verdict)
+	}
+}
+
+// AC: only-verified-bytes-are-installed — a running build ahead of the
+// latest stable release (REQ: ahead-of-latest) is reported distinctly, never
+// as an available update.
+func TestCheck_Ahead(t *testing.T) {
+	srv := newReleasesServer(t, `[{"tag_name":"v1.0.0","prerelease":false,"draft":false}]`)
+	cfg := Config{Repository: "acme/tool", CurrentVersion: "2.0.0", ReleasesAPIURL: srv.URL, HTTPClient: srv.Client()}
+
+	got, err := cfg.Check(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Verdict != Ahead {
+		t.Fatalf("verdict = %v, want Ahead", got.Verdict)
+	}
+	if got.Current != "2.0.0" || got.Latest != "1.0.0" {
+		t.Fatalf("result = %+v", got)
 	}
 }
 

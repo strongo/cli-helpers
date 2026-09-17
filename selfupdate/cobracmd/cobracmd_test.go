@@ -396,6 +396,26 @@ func TestCheck_Undetermined_RoutesThroughUpdateAvailable(t *testing.T) {
 	}
 }
 
+// REQ: ahead-of-latest — a check-only report must not treat Ahead as an
+// available update, so neither mapper's UpdateAvailable is called and the
+// command exits clean.
+func TestCheck_Ahead_DoesNotCallUpdateAvailable(t *testing.T) {
+	withStubCheck(t, selfupdate.CheckResult{Current: "2.0.0", Latest: "1.0.0", Verdict: selfupdate.Ahead}, nil)
+	var calls int
+	cmd := New(testConfig(), CommandOptions{Errors: specscoreStyleErrors{updateAvailableCalls: &calls}})
+
+	out, _, err := runCmd(t, cmd, "--check")
+	if err != nil {
+		t.Fatalf("an ahead-of-latest check returned error (want nil/exit 0): %v", err)
+	}
+	if calls != 0 {
+		t.Errorf("UpdateAvailable called %d times, want 0", calls)
+	}
+	if !strings.Contains(out, "ahead") {
+		t.Errorf("stdout %q does not report ahead-of-latest", out)
+	}
+}
+
 // A release-lookup failure routes through Failure, not UpdateAvailable, and
 // each mapper's own code survives.
 func TestCheck_Failure_MapperReceivesIt(t *testing.T) {
@@ -873,6 +893,9 @@ func TestWriteOutcomeJSON_AllActions(t *testing.T) {
 			Action: selfupdate.ActionUpdated, Target: "0.9.0", Downgrade: true,
 			PostSwapWarning: errors.New("mismatch"),
 		}, "updated"},
+		{"ahead", selfupdate.Outcome{
+			Action: selfupdate.ActionAhead, Result: selfupdate.CheckResult{Current: "2.0.0", Latest: "1.0.0", Verdict: selfupdate.Ahead},
+		}, "ahead"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -976,6 +999,42 @@ func TestCheck_UpToDateHasNoNextStep(t *testing.T) {
 	}
 	if strings.Contains(out, "brew upgrade") {
 		t.Errorf("an up-to-date check told the user to upgrade:\n%s", out)
+	}
+}
+
+// An ahead-of-latest build needs no next step either — there is nothing to
+// do (REQ: ahead-of-latest).
+func TestCheck_AheadHasNoNextStep(t *testing.T) {
+	mgr := selfupdate.Homebrew("brew upgrade --cask tool")
+	withStubCheck(t, selfupdate.CheckResult{Current: "2.0.0", Latest: "1.0.0", Verdict: selfupdate.Ahead}, nil)
+	withStubDetect(t, selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr}, nil)
+
+	cmd := New(testConfig(), CommandOptions{})
+	out, _, err := runCmd(t, cmd, "--check")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(out, "brew upgrade") {
+		t.Errorf("an ahead-of-latest check told the user to upgrade:\n%s", out)
+	}
+}
+
+// The JSON verdict is the distinct "ahead" token, not folded into
+// "update_available" (REQ: ahead-of-latest).
+func TestCheck_JSONVerdictAhead(t *testing.T) {
+	withStubCheck(t, selfupdate.CheckResult{Current: "2.0.0", Latest: "1.0.0", Verdict: selfupdate.Ahead}, nil)
+
+	cmd := New(testConfig(), CommandOptions{JSONFormat: true})
+	out, _, err := runCmd(t, cmd, "--check", "--format", "json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got map[string]any
+	if uerr := json.Unmarshal([]byte(out), &got); uerr != nil {
+		t.Fatalf("check JSON does not parse: %v\n%s", uerr, out)
+	}
+	if got["verdict"] != "ahead" {
+		t.Errorf("check JSON[verdict] = %v, want %q\n%s", got["verdict"], "ahead", out)
 	}
 }
 

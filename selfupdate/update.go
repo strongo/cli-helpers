@@ -35,6 +35,13 @@ const (
 	// exited successfully. The manager remains the install authority; the
 	// core did not download or replace the executable itself.
 	ActionManagerExecuted
+	// ActionAhead means the running version is known and orders strictly
+	// above the latest stable release (REQ: ahead-of-latest): nothing was
+	// downloaded, written, replaced, or — for a managed install — redirected
+	// or run through a manager command. Appended after the existing values
+	// so no consumer's existing switch on this type changes meaning (see
+	// TestAction_ExistingValuesPinned).
+	ActionAhead
 )
 
 // String renders the action as a stable, lower_snake_case token suitable
@@ -53,6 +60,8 @@ func (a Action) String() string {
 		return "planned"
 	case ActionManagerExecuted:
 		return "manager_executed"
+	case ActionAhead:
+		return "ahead"
 	default:
 		return "unknown"
 	}
@@ -203,6 +212,18 @@ type Options struct {
 	// binary. An error becomes Outcome.AfterUpdateWarning; it never changes a
 	// completed binary update into a failure.
 	AfterUpdate AfterUpdateFunc
+	// ResolvedTag, when set, names the release tag a caller already resolved
+	// via Config.LatestRelease and had confirmed (REQ: update-at-classified-
+	// copy). Neither the manual nor the managed path performs its own
+	// independent latest-release search when this is set: the target is
+	// this tag, not whatever the package would otherwise pick. The one
+	// lookup the unpinned path always makes is still performed, but only to
+	// confirm this tag is STILL the latest stable release; if a newer one
+	// was published in between, the update fails with KindReleaseLookup and
+	// changes nothing, so a caller that confirmed one version never installs
+	// another. Ignored when PinnedVersion is set — a pin already names an
+	// exact target by construction.
+	ResolvedTag string
 }
 
 var (
@@ -214,7 +235,8 @@ var (
 // exact pin), and — unless the install is managed, the platform is
 // unsupported, the downgrade guard refuses, Options.DryRun stops it first,
 // or Options.Confirm declines — downloads, verifies, and atomically swaps
-// the running binary.
+// the running binary. Update is exactly DetectSelf followed by UpdateAt
+// (REQ: update-at-classified-copy).
 //
 // Every return, error or not, carries the Detection so a caller can build
 // its own message without a second DetectSelf call.
@@ -225,6 +247,20 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 	if err != nil {
 		return Outcome{}, &Failure{Kind: KindUnexpected, Err: fmt.Errorf("resolve running executable: %w", err)}
 	}
+	return cfg.UpdateAt(ctx, detection, opts)
+}
+
+// UpdateAt performs the update path for a copy the caller has already
+// classified and — for the unpinned path, via Options.ResolvedTag — whose
+// latest release it has already resolved (REQ: update-at-classified-copy).
+// detection.Path is the symlink-resolved file to replace; c.CurrentVersion
+// is that copy's version, exactly as for any other Config. Update is exactly
+// DetectSelf followed by UpdateAt, so calling UpdateAt directly on a
+// classified non-running copy (a different installed target, or a
+// symlinked one that is not the process currently executing) replaces that
+// resolved path, never the calling process's own binary.
+func (c Config) UpdateAt(ctx context.Context, detection Detection, opts Options) (Outcome, error) {
+	cfg := c.withDefaults()
 
 	if detection.Method == Managed {
 		if opts.PinnedVersion != "" && (detection.Manager == nil || !detection.Manager.CanExecuteUpgrade()) {
@@ -237,7 +273,20 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 				Err:  fmt.Errorf("%s cannot install the requested version %q; package-manager updates do not support release pins", managerName, opts.PinnedVersion),
 			}
 		}
-		availability := cfg.managedAvailability(ctx, detection)
+		// REQ: update-at-classified-copy — ResolvedTag only applies to the
+		// unpinned path; a pin already names an exact target.
+		resolvedTag := opts.ResolvedTag
+		if opts.PinnedVersion != "" {
+			resolvedTag = ""
+		}
+		availability, err := cfg.managedAvailability(ctx, detection, resolvedTag)
+		if err != nil {
+			// A resolved tag that is no longer latest is a hard failure,
+			// changing nothing — distinct from an ordinary lookup failure,
+			// which managedAvailability instead folds into an advisory
+			// Availability.Warning below.
+			return Outcome{Detection: detection, Result: availability.Result}, err
+		}
 		if opts.PinnedVersion != "" {
 			availability.Pinned = true
 			availability.Target = normalize(opts.PinnedVersion)
@@ -259,6 +308,12 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 			}
 		}
 		cfg.reportAvailability(opts, availability)
+		if opts.PinnedVersion == "" && availability.Warning == nil && availability.Result.Verdict == Ahead {
+			// REQ: ahead-of-latest — acts as for no-op-when-current: no
+			// download, replacement, confirmation, redirect, or manager
+			// command.
+			return Outcome{Action: ActionAhead, Detection: detection, Result: availability.Result}, nil
+		}
 		// REQ: managed-no-overwrite — this branch never reaches the
 		// download/write path below. Redirect-only managers preserve the
 		// original behavior exactly; executable managers remain under the
@@ -291,12 +346,12 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 	)
 
 	if pinned := opts.PinnedVersion; pinned != "" {
-		resolvedTag, err := cfg.resolveTag(ctx, pinned)
+		pinnedTag, err := cfg.resolveTag(ctx, pinned)
 		if err != nil {
 			return Outcome{Detection: detection}, err
 		}
-		tag = resolvedTag
-		target = cfg.versionFromTag(resolvedTag)
+		tag = pinnedTag
+		target = cfg.versionFromTag(pinnedTag)
 
 		result.Latest = target
 		if undetermined {
@@ -315,7 +370,10 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 		}
 		cfg.reportAvailability(opts, Availability{Result: result, Target: target, Pinned: true, Detection: detection})
 	} else {
-		latestTag, err := cfg.latestStableTag(ctx)
+		// REQ: update-at-classified-copy — with opts.ResolvedTag set, this
+		// does not search for a target on its own; it confirms that tag is
+		// still latest and uses it as-is.
+		latestTag, err := cfg.resolvedLatestTag(ctx, opts.ResolvedTag)
 		if err != nil {
 			return Outcome{Detection: detection}, &Failure{Kind: KindReleaseLookup, Err: err}
 		}
@@ -329,13 +387,26 @@ func (c Config) Update(ctx context.Context, opts Options) (Outcome, error) {
 		} else {
 			result.Current = normalize(cfg.CurrentVersion)
 			result.Verdict = UpdateAvailable
-			if CompareVersions(result.Current, target) == 0 {
+			switch cmp := CompareVersions(result.Current, target); {
+			case cmp == 0:
 				result.Verdict = UpToDate
+			case cmp > 0:
+				// REQ: ahead-of-latest.
+				result.Verdict = Ahead
 			}
 		}
 
-		if result.Verdict == UpToDate {
+		if result.Verdict == UpToDate || result.Verdict == Ahead {
 			cfg.reportAvailability(opts, Availability{Result: result, Target: target, Detection: detection})
+			if result.Verdict == Ahead {
+				// REQ: ahead-of-latest — acts as for no-op-when-current: no
+				// download, replacement, or confirmation. Unlike
+				// ActionAlreadyCurrent, AfterUpdate is deliberately not run:
+				// REQ: after-update-integration lists only a completed
+				// manual replacement, an already-current result, or a
+				// completed executable package-manager update.
+				return Outcome{Action: ActionAhead, Detection: detection, Result: result}, nil
+			}
 			// REQ: no-op-when-current.
 			outcome := Outcome{Action: ActionAlreadyCurrent, Detection: detection, Result: result}
 			cfg.runAfterUpdate(ctx, opts, &outcome, nil)
@@ -463,18 +534,32 @@ func (c Config) updateManaged(ctx context.Context, opts Options, detection Detec
 	return outcome, nil
 }
 
-func (c Config) managedAvailability(ctx context.Context, detection Detection) Availability {
+// managedAvailability resolves the advisory current/latest comparison for a
+// managed install. With resolvedTag empty it behaves exactly as before
+// Options.ResolvedTag existed: any lookup failure is folded into
+// Availability.Warning and the caller proceeds with the redirect or manager
+// command regardless (REQ: managed-availability-report). With resolvedTag
+// set, a release that has moved since the caller resolved it is NOT folded
+// into that advisory warning — it is returned as a hard error, because
+// REQ: update-at-classified-copy requires the update to fail, changing
+// nothing, rather than proceed with a manager command against an
+// unconfirmed release.
+func (c Config) managedAvailability(ctx context.Context, detection Detection, resolvedTag string) (Availability, error) {
 	lookupCtx, cancel := context.WithTimeout(ctx, managedAvailabilityTimeout)
 	defer cancel()
-	result, err := c.Check(lookupCtx)
+	result, err := c.checkAgainst(lookupCtx, resolvedTag)
 	if err != nil {
+		var moved *errReleaseMoved
+		if errors.As(err, &moved) {
+			return Availability{Detection: detection}, err
+		}
 		current := c.CurrentVersion
 		if !c.isUndetermined(current) {
 			current = normalize(current)
 		}
-		return Availability{Result: CheckResult{Current: current}, Detection: detection, Warning: err}
+		return Availability{Result: CheckResult{Current: current}, Detection: detection, Warning: err}, nil
 	}
-	return Availability{Result: result, Target: result.Latest, Detection: detection}
+	return Availability{Result: result, Target: result.Latest, Detection: detection}, nil
 }
 
 func (c Config) reportAvailability(opts Options, availability Availability) {
