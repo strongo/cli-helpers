@@ -222,6 +222,54 @@ func TestClassifyForUpgrade(t *testing.T) {
 	}
 }
 
+// Review round 1 item 2: classifyForUpgrade's own resolved-path check MUST
+// reach the exact same Method selfupdate.Classify (and therefore
+// DetectSelf, which classifies only the resolved path) reaches for the
+// identical symlink — self-update's own self-update-equals-upgrade-self
+// contract, extended to the new built-in system-directory check. Both
+// directions are proven against the REAL running host's own system
+// directory (never a fakeAbsDir synthetic root — see
+// realHostSystemPackageDir's own doc comment), so this holds on the Linux,
+// macOS, and Windows CI runners this repository's own ci.yml already runs
+// ./cliinstall/... on.
+//
+// A shim whose unresolved PATH entry sits in a system directory but whose
+// REAL file resolves elsewhere (a manual /opt install) is the trade-off
+// this documents: it is classified by where the file actually lives, not
+// by the symlink pointing at it — exactly what DetectSelf itself does.
+func TestClassifyForUpgrade_SymlinkOutOfSystemDirMatchesSelfUpdate(t *testing.T) {
+	sysDir := realHostSystemPackageDir(t)
+	st := Status{
+		Path:         fakeAbsExe(sysDir, "foo"),                          // looks system
+		ResolvedPath: fakeAbsExe(fakeAbsDir("opt", "foo", "bin"), "foo"), // resolves out, to a manual /opt install
+	}
+	got := classifyForUpgrade(st, nil)
+	want := selfupdate.Classify(st.ResolvedPath, nil) // exactly what DetectSelf itself would classify
+	if got.Method != want.Method {
+		t.Errorf("classifyForUpgrade(%+v).Method = %v, want %v (selfupdate.Classify's own answer for the resolved path)", st, got.Method, want.Method)
+	}
+	if got.Method != selfupdate.Manual {
+		t.Errorf("classifyForUpgrade(%+v).Method = %v, want Manual: /opt is explicitly excluded from the system-directory check", st, got.Method)
+	}
+}
+
+// The mirror case: a symlink INTO a system directory (the resolved path is
+// managed) must also agree between the two — classifyForUpgrade's own
+// unresolved-path check (selfupdate.ClassifyManagers, markers only) never
+// short-circuits this to something else first.
+func TestClassifyForUpgrade_SymlinkIntoSystemDirMatchesSelfUpdate(t *testing.T) {
+	sysDir := realHostSystemPackageDir(t)
+	st := Status{
+		Path:         fakeAbsExe(fakeAbsDir("usr", "local", "bin"), "foo"), // looks manual
+		ResolvedPath: fakeAbsExe(sysDir, "foo"),                            // resolves into a system directory
+	}
+	got := classifyForUpgrade(st, nil)
+	want := selfupdate.Classify(st.ResolvedPath, nil)
+	if got.Method != want.Method || got.Method != selfupdate.Managed {
+		t.Errorf("classifyForUpgrade(%+v) = %+v, want Managed matching selfupdate.Classify(%q) = %+v", st, got, st.ResolvedPath, want)
+	}
+}
+
 func TestAmbiguousRefusal(t *testing.T) {
 	cfg := selfupdate.Config{BinaryName: "x", CurrentVersion: "1.0.0"}
 	det := selfupdate.Detection{Method: selfupdate.Ambiguous, Path: "/src/x/x"}
@@ -1023,8 +1071,15 @@ func TestPlanUpgrade_SystemPackageDirRedirect(t *testing.T) {
 	if r.Outcome != UpgradeOutcomeRedirected {
 		t.Fatalf("ovdb result = %+v, want Redirected (system package directory %q)", r, sysDir)
 	}
-	if r.Command == "" {
-		t.Error("Command is empty, want the built-in system package manager's redirect text")
+	// The built-in system package manager has no single copy-pasteable
+	// command — its redirect prose lives in Hint, not Command (item 1 of
+	// review round 1): Command MUST stay empty so no renderer ever prints
+	// "Run: <prose>".
+	if r.Command != "" {
+		t.Errorf("Command = %q, want empty (prose belongs in Hint)", r.Command)
+	}
+	if r.Hint == "" {
+		t.Error("Hint is empty, want the built-in system package manager's redirect prose")
 	}
 	if r.InstallMethod != selfupdate.Managed {
 		t.Errorf("InstallMethod = %v, want %v", r.InstallMethod, selfupdate.Managed)

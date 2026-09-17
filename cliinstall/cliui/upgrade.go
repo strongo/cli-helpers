@@ -137,6 +137,12 @@ func upgradeLine(row UpgradeRow) string {
 		if r.Manager != nil {
 			manager = r.Manager.Name
 		}
+		if r.Command == "" && r.Hint != "" {
+			// r.Hint is prose (e.g. the built-in system-package manager's
+			// "the package manager that installed it..."), never a
+			// copy-pasteable command — "run:" would make that prose lie.
+			return fmt.Sprintf("%s → %s  managed by %s — update it with %s", r.Current, r.Latest, manager, r.Hint)
+		}
 		return fmt.Sprintf("%s → %s  managed by %s — run: %s", r.Current, r.Latest, manager, r.Command)
 	case cliinstall.UpgradeOutcomeAlreadyCurrent:
 		return fmt.Sprintf("%s  up to date", r.Current)
@@ -274,6 +280,7 @@ type upgradeTargetJSON struct {
 	Verdict      string `json:"verdict,omitempty"`
 	Action       string `json:"action"`
 	Command      string `json:"command,omitempty"`
+	Hint         string `json:"hint,omitempty"`
 	ResolvedPath string `json:"resolved_path,omitempty"`
 	// AssetURL and NonReleaseBuild carry the same facts the text preview
 	// shows (task-22 review S3): the exact asset URL a pending manual
@@ -315,6 +322,7 @@ func rowToUpgradeJSON(row UpgradeRow) upgradeTargetJSON {
 		Tag:             r.Tag,
 		Action:          r.Outcome.String(),
 		Command:         r.Command,
+		Hint:            r.Hint,
 		ResolvedPath:    r.ResolvedPath,
 		AssetURL:        r.AssetURL,
 		NonReleaseBuild: r.NonReleaseBuild,

@@ -83,6 +83,20 @@ func TestUpgradeLine_AllOutcomes(t *testing.T) {
 			want: "0.14.1 → 0.15.0  managed by Homebrew — run: brew upgrade --cask wb",
 		},
 		{
+			// The built-in system-package manager has no single Command —
+			// its prose lives in Hint — so the line reads as a natural
+			// sentence, never "run: <prose>".
+			name: "redirected with hint, no command",
+			row: UpgradeRow{Result: cliinstall.UpgradeResult{
+				Target: "ingitdb", Outcome: cliinstall.UpgradeOutcomeRedirected,
+				InstallMethod: selfupdate.Managed,
+				Manager:       &selfupdate.Manager{Name: "the system package manager"},
+				Hint:          "the package manager that installed it (e.g. apt, dnf, pacman/AUR, apk, or nix)",
+				Current:       "0.14.1", Latest: "0.15.0",
+			}},
+			want: "0.14.1 → 0.15.0  managed by the system package manager — update it with the package manager that installed it (e.g. apt, dnf, pacman/AUR, apk, or nix)",
+		},
+		{
 			name: "already current",
 			row: UpgradeRow{Result: cliinstall.UpgradeResult{
 				Target: "ovdb", Outcome: cliinstall.UpgradeOutcomeAlreadyCurrent, Current: "0.14.1", Latest: "0.14.1",

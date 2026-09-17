@@ -303,16 +303,23 @@ func TestUpdate_ManagedAvailabilityLookupHasBoundedDeadline(t *testing.T) {
 // install — no download, no write, no replacement — even though the
 // consumer configured no Managers at all. The target file is never even
 // created on disk: a redirect touches nothing.
+// Review round 1 item 8: the "system directory" here is a REAL, but
+// entirely synthetic, directory t.TempDir() created — never a literal
+// "/usr/bin" or any other real path on the machine running this test, not
+// even for a read. It is injected through Windows's env-derived
+// SystemPackageDirs branch (goosName="windows", getenv("SystemRoot") = the
+// harness's own target directory): the exact same boundary-aware match
+// Classify performs against a real Windows host applies identically to any
+// string getenv returns, which is what makes this a safe seam rather than
+// a special case.
 func TestUpdate_SystemPackageDirRedirectsWithNoManagersConfigured(t *testing.T) {
-	// Pinned regardless of the real CI host (this file's tests run natively
-	// on Linux, macOS, and Windows runners — see .github/workflows/ci.yml):
-	// "/usr/bin" is only a system directory once goosName/getenvFunc say so.
-	withHostOS(t, "linux", nil)
-	h := newUpdateHarness(t, "unused/wb", "old binary")
-	origExe, origEval := osExecutable, evalSymlinksFunc
-	t.Cleanup(func() { osExecutable, evalSymlinksFunc = origExe, origEval })
-	osExecutable = func() (string, error) { return "/usr/bin/wb", nil }
-	evalSymlinksFunc = func(p string) (string, error) { return p, nil }
+	h := newUpdateHarness(t, "sysroot/wb", "old binary")
+	withHostOS(t, "windows", map[string]string{"SystemRoot": filepath.Dir(h.target)})
+
+	before, err := os.Stat(h.target)
+	if err != nil {
+		t.Fatalf("stat target before Update: %v", err)
+	}
 
 	h.setReleases(stableReleaseJSON("v1.1.0"))
 
@@ -331,11 +338,20 @@ func TestUpdate_SystemPackageDirRedirectsWithNoManagersConfigured(t *testing.T) 
 	if outcome.Detection.Manager.CanExecuteUpgrade() {
 		t.Error("built-in system package manager unexpectedly executes an upgrade")
 	}
+	// Exactly one HTTP request — the advisory availability lookup — proves
+	// no download was ever attempted despite the redirect.
 	if atomic.LoadInt32(&h.hits) != 1 {
-		t.Errorf("HTTP requests = %d, want exactly 1 (the advisory availability lookup)", h.hits)
+		t.Errorf("HTTP requests = %d, want exactly 1 (the advisory availability lookup; no download)", h.hits)
 	}
-	if _, err := os.Stat("/usr/bin/wb"); err == nil {
-		t.Error("a file was created at the classified system path; redirect must write nothing")
+	if h.targetBytes() != "old binary" {
+		t.Error("target file content changed; redirect must write nothing")
+	}
+	after, err := os.Stat(h.target)
+	if err != nil {
+		t.Fatalf("stat target after Update: %v", err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Errorf("target mtime changed from %v to %v; redirect must not touch the file", before.ModTime(), after.ModTime())
 	}
 }
 

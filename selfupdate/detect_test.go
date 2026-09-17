@@ -204,6 +204,8 @@ func TestClassify_SystemPackageDir_Darwin(t *testing.T) {
 	for _, path := range []string{
 		"/usr/bin/ingitdb", "/usr/sbin/ingitdb", "/usr/libexec/ingitdb",
 		"/bin/ingitdb", "/sbin/ingitdb", "/System/ingitdb",
+		// nix-darwin.
+		"/nix/store/abc123-ingitdb/bin/ingitdb", "/run/current-system/sw/bin/ingitdb",
 	} {
 		got := Classify(path, nil)
 		if got.Method != Managed || got.Manager == nil || got.Manager.Name != systemPackageManagerName {
@@ -211,9 +213,9 @@ func TestClassify_SystemPackageDir_Darwin(t *testing.T) {
 		}
 	}
 	// darwin's own list excludes /usr/local (Homebrew's own Intel prefix,
-	// already recognized through Manager.PathMarkers) and /usr/lib64/
-	// /nix/store (Linux-only).
-	for _, path := range []string{"/usr/local/bin/ingitdb", "/usr/lib64/ingitdb", "/nix/store/x/ingitdb"} {
+	// already recognized through Manager.PathMarkers) and /usr/lib64 and
+	// /lib (Linux-only spellings with no macOS equivalent).
+	for _, path := range []string{"/usr/local/bin/ingitdb", "/usr/lib64/ingitdb", "/lib/ingitdb"} {
 		if got := Classify(path, nil); got.Method == Managed {
 			t.Errorf("Classify(%q) = %+v, want NOT Managed on darwin", path, got)
 		}
@@ -355,6 +357,51 @@ func TestClassify_SystemPackageDir_AppliesWithNoManagersConfigured(t *testing.T)
 	got := Classify("/usr/bin/ingitdb", nil)
 	if got.Method != Managed || got.Manager == nil || got.Manager.Name != systemPackageManagerName {
 		t.Errorf("Classify(/usr/bin/ingitdb, nil managers) = %+v, want Managed/%q", got, systemPackageManagerName)
+	}
+}
+
+// WinGet's machine-scope markers (added specifically so this case redirects
+// to winget rather than the generic built-in system-package message) still
+// take precedence over the built-in check, even though a machine-scope
+// WinGet install genuinely sits under %ProgramFiles%, a system directory.
+func TestClassify_WinGetMachineScopePrecedesSystemPackageDir(t *testing.T) {
+	withHostOS(t, "windows", map[string]string{"ProgramFiles": `C:\Program Files`})
+	got := Classify(`C:\Program Files\WinGet\Packages\Strongo.WB_abc\wb.exe`, testManagers())
+	if got.Method != Managed || got.Manager == nil || got.Manager.Name != "WinGet" {
+		t.Errorf("Classify(machine-scope WinGet path) = %+v, want Managed/WinGet", got)
+	}
+	got = Classify(`C:\Program Files\WinGet\Links\wb.exe`, testManagers())
+	if got.Method != Managed || got.Manager == nil || got.Manager.Name != "WinGet" {
+		t.Errorf("Classify(machine-scope WinGet links path) = %+v, want Managed/WinGet", got)
+	}
+}
+
+// --- ClassifyManagers ---
+
+// ClassifyManagers matches exactly what Classify's own manager-marker loop
+// does, but never falls through to the system-directory check or the
+// Manual/Ambiguous fallback: an unmatched path is always Ambiguous here,
+// even one that Classify itself would call Manual or Managed via the
+// built-in check.
+func TestClassifyManagers(t *testing.T) {
+	got := ClassifyManagers("/opt/homebrew/Cellar/wb/0.6.0/bin/wb", testManagers())
+	if got.Method != Managed || got.Manager == nil || got.Manager.Name != "Homebrew" {
+		t.Errorf("ClassifyManagers(homebrew path) = %+v, want Managed/Homebrew", got)
+	}
+
+	// A system-package-directory path with no manager marker: Classify
+	// would call this Managed via the built-in check; ClassifyManagers
+	// never applies that check, so it is Ambiguous, not Manual or Managed.
+	got = ClassifyManagers("/usr/bin/ingitdb", nil)
+	if got.Method != Ambiguous {
+		t.Errorf("ClassifyManagers(/usr/bin/ingitdb, no managers) = %+v, want Ambiguous", got)
+	}
+
+	// A plausible manual path: ClassifyManagers still reports Ambiguous,
+	// never Manual — that fallback belongs to Classify alone.
+	got = ClassifyManagers("/usr/local/bin/wb", testManagers())
+	if got.Method != Ambiguous {
+		t.Errorf("ClassifyManagers(/usr/local/bin/wb) = %+v, want Ambiguous (never Manual)", got)
 	}
 }
 
