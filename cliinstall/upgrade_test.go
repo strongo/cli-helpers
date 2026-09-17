@@ -810,9 +810,9 @@ func TestCheckUpgrades_NonReleaseBuildSkippedUnderAll(t *testing.T) {
 func TestPlanUpgrade_NonReleaseBuildProceedsWhenExplicit(t *testing.T) {
 	srv := upgradeReleaseServer(t, map[string]string{"ovdb": releasesJSON("v1.0.0")}, nil)
 	env := batchEnv(
-		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
-		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true},
-		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"), "ovdb", "dev"),
+		[]string{fakeAbsDir("usr", "local", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "local", "bin"), "ovdb"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "local", "bin"), "ovdb"), "ovdb", "dev"),
 		noRunManaged,
 	)
 	opts := UpgradeOptions{HostID: "cover100", Env: env, ConfigureRelease: configureUpgradeRelease(srv)}
@@ -916,8 +916,8 @@ func TestCheckUpgrades_BareReportBehavesLikeAll(t *testing.T) {
 
 func TestPlanUpgrade_AlreadyCurrentAndAhead(t *testing.T) {
 	env := batchEnv(
-		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
-		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true, fakeAbsExe(fakeAbsDir("usr", "bin"), "synchestra"): true},
+		[]string{fakeAbsDir("usr", "local", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "local", "bin"), "ovdb"): true, fakeAbsExe(fakeAbsDir("usr", "local", "bin"), "synchestra"): true},
 		multiJSONRun(map[string]string{"ovdb": "1.0.0", "synchestra": "9.9.9"}),
 		noRunManaged,
 	)
@@ -944,8 +944,8 @@ func TestPlanUpgrade_AlreadyCurrentAndAhead(t *testing.T) {
 
 func TestCheckUpgrades_AlreadyCurrentAndAhead(t *testing.T) {
 	env := batchEnv(
-		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
-		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true, fakeAbsExe(fakeAbsDir("usr", "bin"), "synchestra"): true},
+		[]string{fakeAbsDir("usr", "local", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "local", "bin"), "ovdb"): true, fakeAbsExe(fakeAbsDir("usr", "local", "bin"), "synchestra"): true},
 		multiJSONRun(map[string]string{"ovdb": "1.0.0", "synchestra": "9.9.9"}),
 		noRunManaged,
 	)
@@ -992,6 +992,59 @@ func TestPlanUpgrade_ManagedRedirectAndExecutable(t *testing.T) {
 	if r := result.Results[1]; r.Outcome != UpgradeOutcomeDryRun || r.Command == "" {
 		t.Errorf("wb result = %+v, want DryRun (pending) with a Command", r)
 	}
+}
+
+// A target resolved inside an OS-package-manager directory redirects
+// through PlanUpgrade exactly like any other managed install
+// (self-update#req:system-package-dirs-are-managed) — nothing in THIS
+// package classifies it specially; classifyForUpgrade calls selfupdate.
+// Classify exactly as it always did, and Classify itself now recognizes the
+// directory. The directory is derived from the REAL running host, never
+// fakeAbsDir's synthetic roots, because the check is inherently
+// host-relative (see selfupdate.SystemPackageDirs' own doc comment) and
+// this test runs natively on Linux, macOS, and Windows CI (ci.yml's
+// windows_skillsync and daemonlifecycle jobs both run ./cliinstall/...).
+func TestPlanUpgrade_SystemPackageDirRedirect(t *testing.T) {
+	sysDir := realHostSystemPackageDir(t)
+	env := batchEnv(
+		[]string{sysDir}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(sysDir, "ovdb"): true},
+		jsonRunFor(fakeAbsExe(sysDir, "ovdb"), "ovdb", "1.0.0"),
+		noRunManaged,
+	)
+	srv := upgradeReleaseServer(t, map[string]string{"ovdb": releasesJSON("v1.1.0")}, nil)
+	opts := UpgradeOptions{HostID: "cover100", Env: env, ConfigureRelease: configureUpgradeRelease(srv)}
+
+	result, err := PlanUpgrade(context.Background(), []string{"ovdb"}, opts)
+	if err != nil {
+		t.Fatalf("PlanUpgrade error = %v", err)
+	}
+	r := result.Results[0]
+	if r.Outcome != UpgradeOutcomeRedirected {
+		t.Fatalf("ovdb result = %+v, want Redirected (system package directory %q)", r, sysDir)
+	}
+	if r.Command == "" {
+		t.Error("Command is empty, want the built-in system package manager's redirect text")
+	}
+	if r.InstallMethod != selfupdate.Managed {
+		t.Errorf("InstallMethod = %v, want %v", r.InstallMethod, selfupdate.Managed)
+	}
+}
+
+// realHostSystemPackageDir returns a directory this test's REAL running
+// host (never a fakeAbsDir synthetic root) recognizes as one of its own
+// system package directories, skipping if this particular host has none
+// available (an unusual Windows sandbox with no %SystemRoot% set).
+func realHostSystemPackageDir(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		v := os.Getenv("SystemRoot")
+		if v == "" {
+			t.Skip("SystemRoot is not set on this host")
+		}
+		return v
+	}
+	return "/usr/bin"
 }
 
 // TestPlanUpgrade_ManagedUpToDateStillOffered is task-22 review B3: a
@@ -1090,9 +1143,9 @@ func TestCheckUpgrades_AmbiguousRefusedButNeverFailsTheReport(t *testing.T) {
 
 func TestPlanUpgrade_LookupFailure(t *testing.T) {
 	env := batchEnv(
-		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
-		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true},
-		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"), "ovdb", "1.0.0"),
+		[]string{fakeAbsDir("usr", "local", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "local", "bin"), "ovdb"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "local", "bin"), "ovdb"), "ovdb", "1.0.0"),
 		noRunManaged,
 	)
 	srv := upgradeReleaseServer(t, nil, nil) // no "ovdb" key -> 404 from the handler's own NotFound
@@ -1128,9 +1181,9 @@ func TestPlanUpgrade_LookupRetrySucceedsCarriesTagForward(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	env := batchEnv(
-		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
-		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true},
-		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"), "ovdb", "1.0.0"),
+		[]string{fakeAbsDir("usr", "local", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "local", "bin"), "ovdb"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "local", "bin"), "ovdb"), "ovdb", "1.0.0"),
 		noRunManaged,
 	)
 	opts := UpgradeOptions{
@@ -1221,9 +1274,9 @@ func TestPlanUpgrade_RateLimitMessage(t *testing.T) {
 	t.Cleanup(rateLimited.Close)
 
 	env := batchEnv(
-		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
-		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true},
-		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"), "ovdb", "1.0.0"),
+		[]string{fakeAbsDir("usr", "local", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "local", "bin"), "ovdb"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "local", "bin"), "ovdb"), "ovdb", "1.0.0"),
 		noRunManaged,
 	)
 	opts := UpgradeOptions{
@@ -1302,9 +1355,9 @@ func TestPlanUpgrade_LookupTimeoutKillsSlowRequest(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	env := batchEnv(
-		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
-		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true},
-		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"), "ovdb", "1.0.0"),
+		[]string{fakeAbsDir("usr", "local", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "local", "bin"), "ovdb"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "local", "bin"), "ovdb"), "ovdb", "1.0.0"),
 		noRunManaged,
 	)
 	opts := UpgradeOptions{

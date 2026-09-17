@@ -359,11 +359,25 @@ how to add it to `PATH`, and `--dir`.
 
 Every direct-install destination, including `--dir` (resolved to an absolute,
 symlink-resolved path), MUST be refused with the no-install-directory failure
-when it is inside: `/usr`, `/bin`, `/sbin`, `/lib`, `/opt/homebrew`,
-`/home/linuxbrew/.linuxbrew`, `/snap`, `/nix`, `$GOROOT`, `%ProgramData%`,
-`%ProgramFiles%`, `%ProgramFiles(x86)%`, or `%SystemRoot%`; or when it matches
-any catalog manager's path markers. There is no override: a user who really
-wants a binary there can place the file themselves.
+when it is inside: the host OS's own package-manager directories, sourced from
+`SystemPackageDirs(goos, getenv)` per
+[self-update#req:system-package-dirs-are-managed](../self-update/README.md#req-system-package-dirs-are-managed)
+— the single place those directories are defined, reused here rather than
+duplicated — plus the broader roots this library refuses beyond what
+self-update itself protects: `/usr`, `/opt/homebrew`,
+`/home/linuxbrew/.linuxbrew`, `/snap`, `/nix`, `$GOROOT`, and `%ProgramData%`;
+or when it matches any catalog manager's path markers.
+
+Installing INTO `/usr/local` or `/opt/**` is refused here (via the broader
+`/usr` root) even though self-update's own directories deliberately exclude
+them, because this library never writes system-wide: there is no legitimate
+destination for a fresh install under `/usr` at all. An EXISTING manual copy
+already sitting in `/usr/local/bin`, by contrast, is not package-manager-owned
+and remains eligible for self-update, per that same self-update REQ — the two
+lists answer different questions ("where may I create a new file" versus "is
+this existing file owned by a package manager") and only happen to overlap
+under plain `/usr`. There is no override: a user who really wants a binary
+there can place the file themselves.
 
 #### REQ: homebrew-cask-install
 
@@ -924,13 +938,6 @@ Homebrew, and deviations; the behavior above is inherited, not restated.
   wb`) through a declared, timeout-bounded argv on the new binary, instead of
   the `<target> self-update` hint of
   [REQ: self-update-hook-hint](#req-self-update-hook-hint)?
-- Should `upgrade` and `self-update` treat a manual copy inside a system
-  prefix from [REQ: destination-denylist](#req-destination-denylist) (for
-  example an AUR-installed `/usr/bin/ingitdb`) as ambiguous and refuse it? Today
-  both replace it when writable, which keeps
-  [REQ: self-update-equals-upgrade-self](#req-self-update-equals-upgrade-self)
-  but lets a `sudo` run modify a system package manager's file; changing it
-  means amending the Stable Self-Update Feature.
 - Should a v2 offer interactive selection (a picker on a terminal) in addition
   to naming targets, given the fleet's preference for non-interactive,
   agent-friendly commands?

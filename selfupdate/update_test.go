@@ -298,6 +298,68 @@ func TestUpdate_ManagedAvailabilityLookupHasBoundedDeadline(t *testing.T) {
 	}
 }
 
+// A resolved copy inside an OS-package-manager directory (REQ: system-
+// package-dirs-are-managed) redirects exactly like any other managed
+// install — no download, no write, no replacement — even though the
+// consumer configured no Managers at all. The target file is never even
+// created on disk: a redirect touches nothing.
+func TestUpdate_SystemPackageDirRedirectsWithNoManagersConfigured(t *testing.T) {
+	// Pinned regardless of the real CI host (this file's tests run natively
+	// on Linux, macOS, and Windows runners — see .github/workflows/ci.yml):
+	// "/usr/bin" is only a system directory once goosName/getenvFunc say so.
+	withHostOS(t, "linux", nil)
+	h := newUpdateHarness(t, "unused/wb", "old binary")
+	origExe, origEval := osExecutable, evalSymlinksFunc
+	t.Cleanup(func() { osExecutable, evalSymlinksFunc = origExe, origEval })
+	osExecutable = func() (string, error) { return "/usr/bin/wb", nil }
+	evalSymlinksFunc = func(p string) (string, error) { return p, nil }
+
+	h.setReleases(stableReleaseJSON("v1.1.0"))
+
+	outcome, err := h.cfg.Update(context.Background(), Options{
+		Confirm: func(string) (bool, error) { t.Fatal("Confirm was called for a managed install"); return true, nil },
+	})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	if outcome.Action != ActionRedirected {
+		t.Fatalf("Action = %v, want ActionRedirected", outcome.Action)
+	}
+	if outcome.Detection.Method != Managed || outcome.Detection.Manager == nil || outcome.Detection.Manager.Name != systemPackageManagerName {
+		t.Fatalf("Detection = %+v, want Managed/%q", outcome.Detection, systemPackageManagerName)
+	}
+	if outcome.Detection.Manager.CanExecuteUpgrade() {
+		t.Error("built-in system package manager unexpectedly executes an upgrade")
+	}
+	if atomic.LoadInt32(&h.hits) != 1 {
+		t.Errorf("HTTP requests = %d, want exactly 1 (the advisory availability lookup)", h.hits)
+	}
+	if _, err := os.Stat("/usr/bin/wb"); err == nil {
+		t.Error("a file was created at the classified system path; redirect must write nothing")
+	}
+}
+
+// UpdateAt reaches the identical outcome for a copy the caller already
+// classified, without calling DetectSelf itself (REQ: update-at-classified-
+// copy applies to a system-directory copy exactly as it does to any other).
+func TestUpdateAt_SystemPackageDirRedirects(t *testing.T) {
+	h := newUpdateHarness(t, "unused/wb", "old binary")
+	h.setReleases(stableReleaseJSON("v1.1.0"))
+
+	builtin := systemPackageManagerFor("linux")
+	detection := Detection{Method: Managed, Manager: &builtin, Path: "/usr/bin/wb"}
+	outcome, err := h.cfg.UpdateAt(context.Background(), detection, Options{})
+	if err != nil {
+		t.Fatalf("UpdateAt() error = %v", err)
+	}
+	if outcome.Action != ActionRedirected || outcome.Detection.Manager == nil || outcome.Detection.Manager.Name != systemPackageManagerName {
+		t.Fatalf("Outcome = %+v, want redirected/%q", outcome, systemPackageManagerName)
+	}
+	if h.targetBytes() != "old binary" {
+		t.Error("target file was modified for a system-directory install")
+	}
+}
+
 func TestUpdate_ManagedAvailabilityReportPrecedesConfirmationAndRunner(t *testing.T) {
 	h := newUpdateHarness(t, "Cellar/wb/1.0.0/bin/wb", "old binary")
 	h.cfg.Managers = []Manager{Homebrew("brew upgrade --cask wb").WithExecutableUpgrade("brew", "upgrade", "--cask", "wb")}

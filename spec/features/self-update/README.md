@@ -60,6 +60,42 @@ lies inside a configured manager's layout, following symlinks first so a
 symlinked shim resolves to its real location. A managed classification MUST
 route to that manager's configured policy and MUST NOT self-replace.
 
+#### REQ: system-package-dirs-are-managed
+
+The package MUST classify a resolved executable path as package-managed, using a
+built-in redirect-only "system package manager", when it lies inside the host
+OS's own package-manager directories — `/usr/bin`, `/usr/sbin`, `/usr/lib`,
+`/usr/lib64`, `/usr/libexec`, `/usr/share`, `/bin`, `/sbin`, `/lib`, `/lib64`,
+`/nix/store`, `/run/current-system` on Linux and other Unix; `/usr/bin`,
+`/usr/sbin`, `/usr/libexec`, `/bin`, `/sbin`, `/System` on macOS; and the
+environment-derived `%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` on
+Windows — regardless of the consumer's configured `Managers`, and boundary-aware
+so a sibling directory whose name merely starts with the same characters (for
+example `/usr/binx`) never matches. `/usr/local/**`, `/opt/**`, and any path
+under the user's home directory (including `~/go/bin`) are explicitly excluded:
+they are conventional manual-install locations, not package-manager-owned ones,
+and a Homebrew Intel-Mac prefix under `/usr/local` is already recognized through
+`Manager.PathMarkers`.
+
+Files under these directories are tracked by the OS package manager's own
+database (dpkg/apt, rpm/dnf, pacman including the AUR, apk, or the Nix store);
+overwriting one desyncs that database from the filesystem — `dpkg --verify` and
+`rpm -V` report the file as modified, `pacman -Qkk` reports a checksum mismatch,
+and the package's next upgrade either silently reverts the overwrite or refuses,
+conflicting with a file it no longer recognizes — the same principle this
+package already applies to Homebrew, Scoop, WinGet, and Snap: never overwrite a
+manager-owned install in place, redirect to that manager's own upgrade command
+instead. Because these directories are writable only by an elevated user,
+replacing a file there means swapping a system binary, as that elevated user,
+with one downloaded outside the distribution's signed package channel. This
+package's own installers never write into these directories in the first place,
+so any copy found inside one was placed by something else — almost always the
+OS's own package manager.
+
+The package's list of these directories, `SystemPackageDirs(goos, getenv)`, MUST
+be the single exported source of truth a consumer's own install/destination
+denylist reuses rather than duplicates.
+
 #### REQ: detect-manual
 
 The package MUST classify the running binary as manual when it is not recognized
@@ -459,6 +495,14 @@ behavior above is inherited, not restated.
 **Given** a binary whose resolved path lies inside a configured manager's layout, reached through a symlink
 **When** an update is requested first with a redirect-only manager, then with executable argv, then as a dry run and with a version pin
 **Then** redirect-only reports the manager command without executing it; executable mode confirms and invokes every configured program and argv in order without a shell, stops on the first failure, streams its output, and proves the installed CLI reports the exact known target version; dry-run reports but does not execute; the pin is refused; and no branch downloads, writes, or directly replaces the manager-owned executable.
+
+### AC: system-directories-redirect-without-a-configured-manager
+
+**Requirements:** self-update#req:system-package-dirs-are-managed, self-update#req:managed-no-overwrite, self-update#req:managed-redirect-command
+
+**Given** a binary resolved inside an OS package-manager directory such as `/usr/bin`, with no `Managers` configured, and sibling paths that merely resemble one, such as `/usr/binx`, `/usr/local/bin`, or `/opt/tool/bin`
+**When** an update is requested
+**Then** the system-directory copy is classified managed by the built-in system package manager and redirected — naming that OS's own real tooling, never a wrong-OS example — with no download, write, or replacement, while the sibling paths remain classified manual or ambiguous exactly as they were before this check existed.
 
 ### AC: ambiguity-never-becomes-manual
 

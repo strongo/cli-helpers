@@ -317,6 +317,72 @@ func TestDestinationDenylistFailure_Allowed(t *testing.T) {
 	}
 }
 
+// deniedRoots reuses selfupdate.SystemPackageDirs rather than duplicating
+// its entries (destination.go's own doc comment on deniedRoots explains
+// why the two lists differ where they do). "/lib64" and "/usr/libexec" are
+// NOT in this library's own hand-written extras — they only appear here
+// because SystemPackageDirs contributes them, so their presence proves the
+// reuse actually happened rather than deniedRoots merely keeping its old,
+// separately-hand-written list.
+func TestDeniedRoots_ReusesSystemPackageDirs(t *testing.T) {
+	got := deniedRoots("linux", func(string) string { return "" })
+	for _, want := range []string{"/lib64", "/usr/libexec", "/usr/lib64", "/nix/store", "/run/current-system"} {
+		found := false
+		for _, g := range got {
+			if g == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("deniedRoots(linux) = %v, missing %q from selfupdate.SystemPackageDirs", got, want)
+		}
+	}
+}
+
+// The install destination denylist still refuses every directory
+// SystemPackageDirs names, even ones this library never separately
+// hand-listed before this reuse (self-update#req:system-package-dirs-are-
+// managed's own rationale applies to "MUST NOT plan a write here" exactly
+// as much as it does to "MUST NOT self-update an existing copy here").
+func TestDestinationDenylistFailure_ReusedSystemPackageDir(t *testing.T) {
+	f := destinationDenylistFailure("/lib64/ingitdb", "linux", func(string) string { return "" })
+	if f == nil || f.Kind != selfupdate.KindNoInstallDir {
+		t.Fatalf("destinationDenylistFailure(/lib64/ingitdb) = %v, want KindNoInstallDir", f)
+	}
+}
+
+// Windows: %SystemRoot%/%ProgramFiles%/%ProgramFiles(x86)% come from
+// SystemPackageDirs; %ProgramData% remains this library's own extra root
+// (see deniedRoots' doc comment) even though SystemPackageDirs does not
+// list it.
+func TestDeniedRoots_WindowsReusesSystemPackageDirsPlusProgramData(t *testing.T) {
+	getenv := func(k string) string {
+		switch k {
+		case "ProgramData":
+			return `C:\ProgramData`
+		case "ProgramFiles":
+			return `C:\Program Files`
+		case "ProgramFiles(x86)":
+			return `C:\Program Files (x86)`
+		case "SystemRoot":
+			return `C:\Windows`
+		default:
+			return ""
+		}
+	}
+	got := deniedRoots("windows", getenv)
+	want := []string{`C:\ProgramData`, `C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`}
+	if len(got) != len(want) {
+		t.Fatalf("deniedRoots(windows) = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("deniedRoots(windows)[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 // --- perUserBinDir ----------------------------------------------------------
 
 func TestPerUserBinDir_Posix(t *testing.T) {

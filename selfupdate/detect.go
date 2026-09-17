@@ -68,12 +68,30 @@ type Detection struct {
 // --explain-path-style tooling, exercise every manager without running on
 // that manager's platform.
 //
-// When no manager matches, a path ending in a `bin` directory, or containing
-// a `go/bin` segment (a `go install` target under GOBIN or GOPATH/bin), is
-// classified Manual. Anything else is Ambiguous: per REQ: ambiguous-safe-
-// default, an unrecognized location never resolves to Manual, because that
-// would make self-replace eligible for a binary the package cannot actually
-// place.
+// When no configured manager matches, Classify checks path against
+// SystemPackageDirs(goosName, getenvFunc) — the host's own OS-package-
+// manager directories — and returns Managed with the built-in, redirect-
+// only "system package manager" when it matches (REQ: system-package-dirs-
+// are-managed); see SystemPackageDirs' own doc comment for why. This check
+// runs regardless of what managers was passed, including nil, and always
+// AFTER every configured manager, so a catalog manager whose own markers
+// happen to match (e.g. Snap's "/snap/") still takes precedence. Unlike the
+// manager-marker loop above, this one reads goosName/getenvFunc (the real
+// host, in production; injectable, like every other filesystem/environment
+// fact this package reads, in this package's own tests) rather than working
+// from path's own shape, because — unlike a manager's PathMarkers, which are
+// a fixed string a consumer configured — "is this OS's package manager"
+// only makes sense relative to the OS actually running. It still performs no
+// filesystem or network access, so explainPath's "Classify is a pure
+// function" claim (no I/O beyond reading this process's own environment)
+// continues to hold.
+//
+// When neither a manager nor a system directory matches, a path ending in a
+// `bin` directory, or containing a `go/bin` segment (a `go install` target
+// under GOBIN or GOPATH/bin), is classified Manual. Anything else is
+// Ambiguous: per REQ: ambiguous-safe-default, an unrecognized location never
+// resolves to Manual, because that would make self-replace eligible for a
+// binary the package cannot actually place.
 func Classify(path string, managers []Manager) Detection {
 	p := normalizePath(path)
 
@@ -85,11 +103,34 @@ func Classify(path string, managers []Manager) Detection {
 		}
 	}
 
+	if inSystemPackageDir(p) {
+		m := systemPackageManagerFor(goosName)
+		return Detection{Method: Managed, Manager: &m, Path: path}
+	}
+
 	if looksLikeManualInstall(p) {
 		return Detection{Method: Manual, Path: path}
 	}
 
 	return Detection{Method: Ambiguous, Path: path}
+}
+
+// inSystemPackageDir reports whether normalizedPath (already run through
+// normalizePath) lies inside one of the host's own SystemPackageDirs,
+// boundary-aware so a sibling directory that merely starts with the same
+// characters (normalizePath("/usr/binx") never matches normalizePath("/usr/
+// bin")) is never mistaken for it. SystemPackageDirs never returns an empty
+// entry (its Windows branch only appends a getenv result once it has
+// confirmed that result is non-empty), so every dir here normalizes to a
+// non-empty string.
+func inSystemPackageDir(normalizedPath string) bool {
+	for _, dir := range SystemPackageDirs(goosName, getenvFunc) {
+		nd := normalizePath(dir)
+		if normalizedPath == nd || strings.HasPrefix(normalizedPath, nd+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizePath lowercases s and folds backslashes to forward slashes, so
@@ -117,9 +158,14 @@ func looksLikeManualInstall(normalized string) bool {
 // installed binary or a real symlink (REQ: no-network-in-tests extends to
 // "no faking the test binary's own location" — these seams are how the
 // package's tests satisfy that without ever calling os.Executable for real).
+// getenvFunc is the same kind of seam for inSystemPackageDir's Windows
+// environment-variable lookups (REQ: system-package-dirs-are-managed); it
+// follows replace.go's goosName, which this package already overrides in
+// tests to exercise Windows-only behavior from any host.
 var (
 	osExecutable     = os.Executable
 	evalSymlinksFunc = filepath.EvalSymlinks
+	getenvFunc       = os.Getenv
 )
 
 // DetectSelf resolves the running executable's path, following symlinks
