@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -1407,22 +1408,32 @@ func TestExecuteUpgrade_ConfirmReturnsTypedFailure(t *testing.T) {
 // reports the NEW version once the file has been replaced.
 func manualUpgradeFixture(t *testing.T) (*httptest.Server, InstallEnv, string) {
 	t.Helper()
-	dir := t.TempDir() + "/bin" // must look manual: looksLikeManualInstall requires a "bin"-suffixed directory
+	dir := filepath.Join(t.TempDir(), "bin") // must look manual: looksLikeManualInstall requires a "bin"-suffixed directory
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	destPath := dir + "/ovdb"
+	// fakeAbsExe (not a naive dir+"/ovdb" concat): probeOne's own real
+	// search appends goosName's platform suffix (".exe" on windows) to
+	// the filename it looks for, regardless of how this fixture spells
+	// its own path.
+	destPath := fakeAbsExe(dir, "ovdb")
 	if err := writeFile(destPath, []byte("old-binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	content := []byte("new-binary-content")
-	archive := makeTarGz(t, "ovdb", content)
+	// makeArchive (not makeTarGz): selfupdate's own extractBinary reads a
+	// real .zip on windows, a real .tar.gz elsewhere, matching GoReleaser's
+	// per-platform archive convention — packing a .tar.gz unconditionally
+	// (as this fixture did before task-22 fourth review) made every test
+	// built on it fail on Windows with "open zip archive: zip: not a
+	// valid zip file".
+	archive, ext := makeArchive(t, "ovdb", content)
 	sum := sha256Hex(archive)
-	checksums := []byte(sum + "  ovdb_1.1.0_" + goosName + "_" + archName() + ".tar.gz\n")
+	checksums := []byte(sum + "  ovdb_1.1.0_" + goosName + "_" + archName() + "." + ext + "\n")
 
 	files := map[string][]byte{
-		"/files/ovdb/v1.1.0/ovdb_1.1.0_" + goosName + "_" + archName() + ".tar.gz": archive,
+		"/files/ovdb/v1.1.0/ovdb_1.1.0_" + goosName + "_" + archName() + "." + ext: archive,
 		// ovdb's own catalog entry overrides ChecksumsName to a flat
 		// "checksums.txt" (matching its real .goreleaser.yaml), not the
 		// library's per-version default name.
