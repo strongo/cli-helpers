@@ -67,27 +67,34 @@ type ErrorMapper interface {
 	Failure(err error) error
 }
 
-// UpgradeErrorMapper extends ErrorMapper with the method a future
-// `upgrade` command's Cobra adapter will call when at least one looked-up
-// target has an update available or an undetermined verdict
-// (cli-install#req:upgrade-check: "the Cobra adapter MUST call the host's
-// error mapper's upgrades-available method"), mirroring how
-// selfupdate/cobracmd.ErrorMapper already has its own UpdateAvailable.
-// Declared here, now, as a SEPARATE interface — not a new method on
-// ErrorMapper itself — precisely so that adding it later never breaks a
-// host's existing `install`-only ErrorMapper implementation (task-5 review
-// M15). A host that wires `upgrade` implements both by implementing this
-// one interface; a host that only wires `install` never needs to know it
-// exists.
+// UpgradeErrorMapper extends ErrorMapper with the method the `upgrade`
+// command's Cobra adapter calls when at least one looked-up target has an
+// update available or an undetermined verdict (cli-install#req:upgrade-
+// check: "the Cobra adapter MUST call the host's error mapper's
+// upgrades-available method"), mirroring how selfupdate/cobracmd.
+// ErrorMapper already has its own UpdateAvailable. Declared here as a
+// SEPARATE interface — not a new method on ErrorMapper itself — precisely
+// so that adding it never breaks a host's existing `install`-only
+// ErrorMapper implementation (task-5 review M15). A host that wires
+// `upgrade` implements both by implementing this one interface; a host that
+// only wires `install` never needs to know it exists.
+//
+// Results is []cliinstall.UpgradeResult (task-21's real batch-result type,
+// not task-5's own placeholder []cliinstall.Result, which described the
+// unrelated install batch): task-5 deliberately reserved this method's
+// EXISTENCE without settling its final argument type, precisely so this
+// task could land the real shape without an ErrorMapper-breaking rename.
 type UpgradeErrorMapper interface {
 	ErrorMapper
-	// UpgradesAvailable is called with every target whose upgrade check
-	// found one, mirroring self-update's own UpdateAvailable mapping.
-	// Results is deliberately untyped for now ([]cliinstall.Result may not
-	// be the shape upgrade's own check settles on) — this method exists so
-	// the INTERFACE shape is reserved today; its real signature lands with
-	// the upgrade command itself.
-	UpgradesAvailable(results []cliinstall.Result) error
+	// UpgradesAvailable is called with every target whose Verdict is
+	// selfupdate.UpdateAvailable or selfupdate.Undetermined, mirroring
+	// self-update's own UpdateAvailable mapping (cli-install#req:upgrade-
+	// check: "Targets that are ahead of latest or skipped as non-release
+	// builds MUST NOT count"). Never called for the bare, no-argument
+	// report (cli-install#req:upgrade-no-args-reports: "MUST exit
+	// successfully... whether or not upgrades are available") — only for an
+	// explicit `--check` over named targets or `--all`.
+	UpgradesAvailable(results []cliinstall.UpgradeResult) error
 }
 
 // CommandOptions configures the command New builds. Use and Short default
@@ -185,11 +192,11 @@ func New(opts CommandOptions) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			format, _ := cmd.Flags().GetString("format")
 			if format != "text" && format != "json" {
-				return usageFailure(cmd, opts, fmt.Errorf("invalid --format %q: expected text or json", format))
+				return usageFailure(cmd, opts.Errors, fmt.Errorf("invalid --format %q: expected text or json", format))
 			}
 			all, _ := cmd.Flags().GetBool("all")
 			if all && len(args) > 0 {
-				return usageFailure(cmd, opts, fmt.Errorf("--all takes no target names"))
+				return usageFailure(cmd, opts.Errors, fmt.Errorf("--all takes no target names"))
 			}
 			dir, _ := cmd.Flags().GetString("dir")
 
@@ -211,15 +218,15 @@ func New(opts CommandOptions) *cobra.Command {
 	return cmd
 }
 
-// resolveEnv returns opts.Env when the host configured one (tests always
-// do), otherwise the real cliinstall.DefaultInstallEnv() — the same
-// "required, DefaultEnv unless a caller supplies one" contract
-// cliinstall.Env itself documents.
-func resolveEnv(opts CommandOptions) cliinstall.InstallEnv {
-	if opts.Env.PathDirs == nil {
+// resolveEnv returns env unchanged when the caller configured one (tests
+// always do, for both install's and upgrade's CommandOptions.Env), otherwise
+// the real cliinstall.DefaultInstallEnv() — the same "required, DefaultEnv
+// unless a caller supplies one" contract cliinstall.Env itself documents.
+func resolveEnv(env cliinstall.InstallEnv) cliinstall.InstallEnv {
+	if env.PathDirs == nil {
 		return cliinstall.DefaultInstallEnv()
 	}
-	return opts.Env
+	return env
 }
 
 // relevanceIndex maps hostID's relevant target ids to their relevance text
@@ -287,14 +294,14 @@ func resultRows(hostID string, results []cliinstall.Result) []cliui.Row {
 }
 
 func runList(cmd *cobra.Command, opts CommandOptions, all bool, dir, format string) error {
-	env := resolveEnv(opts)
+	env := resolveEnv(opts.Env)
 	rows := listRows(cmd.Context(), opts.HostID, all, dir, env.Env, opts.ProbeOptions)
 
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
 	if format == "json" {
 		if err := cliui.WriteListJSON(out, errOut, opts.HostID, rows); err != nil {
-			return mapFailure(opts, err)
+			return mapFailure(opts.Errors, err)
 		}
 		return nil
 	}
@@ -325,7 +332,7 @@ func runInstall(cmd *cobra.Command, opts CommandOptions, names []string, dir str
 		previewOut = errOut
 	}
 
-	env := resolveEnv(opts)
+	env := resolveEnv(opts.Env)
 	env.RunManaged = selfcliui.ManagedCommandRunner(cmd.InOrStdin(), previewOut, errOut)
 
 	core := cliinstall.Options{
@@ -353,19 +360,19 @@ func runInstall(cmd *cobra.Command, opts CommandOptions, names []string, dir str
 	if planErr != nil {
 		if format == "json" {
 			if werr := cliui.WriteResultJSON(out, errOut, opts.HostID, rows, planErr); werr != nil {
-				return mapFailure(opts, werr)
+				return mapFailure(opts.Errors, werr)
 			}
 		}
-		return mapFailure(opts, planErr)
+		return mapFailure(opts.Errors, planErr)
 	}
 
 	if dryRun {
 		if format == "json" {
 			if werr := cliui.WriteResultJSON(out, errOut, opts.HostID, rows, nil); werr != nil {
-				return mapFailure(opts, werr)
+				return mapFailure(opts.Errors, werr)
 			}
 		}
-		return mapFailure(opts, plan.Failure())
+		return mapFailure(opts.Errors, plan.Failure())
 	}
 
 	if format == "json" {
@@ -388,32 +395,48 @@ func runInstall(cmd *cobra.Command, opts CommandOptions, names []string, dir str
 	finalRows := resultRows(opts.HostID, result.Results)
 	if format == "json" {
 		if werr := cliui.WriteResultJSON(out, errOut, opts.HostID, finalRows, execErr); werr != nil {
-			return mapFailure(opts, werr)
+			return mapFailure(opts.Errors, werr)
 		}
 	} else {
 		cliui.WriteOutcome(out, errOut, finalRows, execErr)
 	}
 	if execErr != nil {
-		return mapFailure(opts, execErr)
+		return mapFailure(opts.Errors, execErr)
 	}
-	return mapFailure(opts, result.Failure())
+	return mapFailure(opts.Errors, result.Failure())
 }
 
 // usageFailure prints cmd's own usage block (Cobra's automatic printing is
 // off — see New's SilenceUsage/SilenceErrors doc comment) and maps err
-// through opts.Errors as a *UsageError, for the one class of failure that
-// IS a usage mistake: an invalid --format, or --all combined with names.
-func usageFailure(cmd *cobra.Command, opts CommandOptions, err error) error {
+// through errors as a *UsageError, for the one class of failure that IS a
+// usage mistake: an invalid --format, or --all combined with names.
+func usageFailure(cmd *cobra.Command, errors ErrorMapper, err error) error {
 	fmt.Fprint(cmd.ErrOrStderr(), cmd.UsageString()) //nolint:errcheck
-	return mapFailure(opts, &UsageError{Err: err})
+	return mapFailure(errors, &UsageError{Err: err})
 }
 
-// mapFailure routes a non-nil error through opts.Errors when configured,
-// otherwise returns it unchanged — either way, this package never picks the
-// resulting exit code itself.
-func mapFailure(opts CommandOptions, err error) error {
-	if opts.Errors != nil {
-		return opts.Errors.Failure(err)
+// mapFailure routes a non-nil err through errors.Failure when both are
+// non-nil, otherwise returns err unchanged — either way, this package never
+// picks the resulting exit code itself.
+//
+// err is nil at several call sites that pass through a Plan/Execute-style
+// *BatchResult.Failure() or *UpgradeBatchResult.Failure() result unchanged
+// after a successful (or successfully declined/dry-run) batch — those
+// Failure() methods return nil exactly when nothing failed. Without this
+// short-circuit, a configured ErrorMapper's own Failure method would be
+// called with a nil error on every success and every dry run, contradicting
+// its own doc comment ("Failure maps a non-nil command error..."); two
+// consumers hit this in practice building their own ErrorMapper
+// implementations, which is why this fix ships with a mapper that panics on
+// a nil argument in the test suite (TestMapFailure_NeverCallsMapperWithNil,
+// TestUpgrade_MapFailure_NeverCallsMapperWithNil) — a regression here would
+// panic every install/upgrade success and dry run outright.
+func mapFailure(errors ErrorMapper, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors != nil {
+		return errors.Failure(err)
 	}
 	return err
 }
