@@ -408,7 +408,7 @@ untested.
 
 | CLI | Feature |
 |---|---|
-| `ovdb` | `openvaultdb/ovdb` — Homebrew cask execution through structured argv; still on the retired `github.com/strongo/selfupdate` module until the [cli-install plan](../../plans/cli-install/README.md) migrates it |
+| `ovdb` | `openvaultdb/ovdb` — Homebrew cask execution through structured argv; still on the standalone `github.com/strongo/selfupdate` module until the [cli-install plan](../../plans/cli-install/README.md) migrates it |
 | `wb` | [sneat-dev/wb spec/features/self-update](https://specscore.studio/app/github.com/sneat-dev/wb/spec/features/self-update?op=explore) — three-code exit contract, Homebrew cask, `unknown` placeholder |
 | `specscore` | [specscore/specscore-cli spec/features/cli/self-update](https://specscore.studio/app/github.com/specscore/specscore-cli/spec/features/cli/self-update?op=explore) — dedicated exit code 10, Homebrew/Scoop/WinGet, `dev` placeholder |
 | `chatwright` | [chatwright/cli spec/features/self-update](https://specscore.studio/app/github.com/chatwright/cli/spec/features/self-update?op=explore) — redirect-only Homebrew, `--check` informational |
@@ -417,6 +417,8 @@ untested.
 | `synchestra` | `synchestra-io/synchestra` — planned: migrates from `github.com/strongo/selfupdate` per the [cli-install plan](../../plans/cli-install/README.md); `cli-` tag prefix on a mirror releases repository |
 | `ingitdb` | `ingitdb/ingitdb-cli` — planned: replaces its internal copy per the [cli-install plan](../../plans/cli-install/README.md) |
 | `datatug` | `datatug/datatug-cli` — planned: gains self-update per the [cli-install plan](../../plans/cli-install/README.md) |
+| `synchestra-channel` | `synchestra-io/synchestra-servers` — planned: migrates from `github.com/strongo/selfupdate` per the [cli-install plan](../../plans/cli-install/README.md); `servers-` tag prefix, flat `checksums.txt` |
+| `synchestra-vm-host` | `synchestra-io/synchestra-vm` — planned: migrates from `github.com/strongo/selfupdate` per the [cli-install plan](../../plans/cli-install/README.md); `vm-` tag prefix, flat `checksums.txt` |
 
 A consumer's Feature specifies only its configuration and its deviations; the
 behavior above is inherited, not restated.
