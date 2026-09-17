@@ -88,8 +88,8 @@ func TestProbe_InstalledOnPath_FirstMatchIsPrimary(t *testing.T) {
 	f := &fakeEnv{
 		pathDirs: []string{bin1, bin2},
 		executables: map[string]bool{
-			filepath.Join(bin1, "testcli"): true,
-			filepath.Join(bin2, "testcli"): true,
+			fakeAbsExe(bin1, "testcli"): true,
+			fakeAbsExe(bin2, "testcli"): true,
 		},
 		run: jsonRun("testcli", "1.2.3", "abc123", "2026-01-01T00:00:00Z", buildinfo.DateSourceBuild),
 	}
@@ -98,13 +98,13 @@ func TestProbe_InstalledOnPath_FirstMatchIsPrimary(t *testing.T) {
 	if s.State != Installed {
 		t.Fatalf("State = %v, want Installed", s.State)
 	}
-	if s.Path != filepath.Join(bin1, "testcli") {
+	if s.Path != fakeAbsExe(bin1, "testcli") {
 		t.Errorf("Path = %q, want /bin1 copy (first PATH match)", s.Path)
 	}
 	if !s.OnPath {
 		t.Errorf("OnPath = false, want true")
 	}
-	if want := []string{filepath.Join(bin2, "testcli")}; !equalStrings(s.OtherPaths, want) {
+	if want := []string{fakeAbsExe(bin2, "testcli")}; !equalStrings(s.OtherPaths, want) {
 		t.Errorf("OtherPaths = %v, want %v", s.OtherPaths, want)
 	}
 	if len(s.Warnings) != 0 {
@@ -123,7 +123,7 @@ func TestProbe_HostDirOnly_NotOnPathWarning(t *testing.T) {
 	f := &fakeEnv{
 		hostDir: hostDir,
 		executables: map[string]bool{
-			filepath.Join(hostDir, "testcli"): true,
+			fakeAbsExe(hostDir, "testcli"): true,
 		},
 		run: jsonRun("testcli", "9.9.9", "", "", ""),
 	}
@@ -132,7 +132,7 @@ func TestProbe_HostDirOnly_NotOnPathWarning(t *testing.T) {
 	if s.OnPath {
 		t.Errorf("OnPath = true, want false (found only in host dir)")
 	}
-	if s.Path != filepath.Join(hostDir, "testcli") {
+	if s.Path != fakeAbsExe(hostDir, "testcli") {
 		t.Errorf("Path = %q", s.Path)
 	}
 	found := false
@@ -163,13 +163,13 @@ func TestProbe_DirFlagSearched(t *testing.T) {
 	custom := fakeAbsDir("custom")
 	f := &fakeEnv{
 		executables: map[string]bool{
-			filepath.Join(custom, "testcli"): true,
+			fakeAbsExe(custom, "testcli"): true,
 		},
 		run: jsonRun("testcli", "1.0.0", "", "", ""),
 	}
 	got := Probe(context.Background(), []Entry{testEntry}, custom, f.env(), ProbeOptions{})
 	s := got[0]
-	if s.State != Installed || s.Path != filepath.Join(custom, "testcli") {
+	if s.State != Installed || s.Path != fakeAbsExe(custom, "testcli") {
 		t.Errorf("got %+v, want installed at /custom/testcli", s)
 	}
 	if s.OnPath {
@@ -198,7 +198,7 @@ func TestProbe_HostDirErrorSkipped(t *testing.T) {
 	f := &fakeEnv{
 		pathDirs:    []string{bin1},
 		hostErr:     errors.New("cannot resolve host dir"),
-		executables: map[string]bool{filepath.Join(bin1, "testcli"): true},
+		executables: map[string]bool{fakeAbsExe(bin1, "testcli"): true},
 		run:         jsonRun("testcli", "1.0.0", "", "", ""),
 	}
 	got := Probe(context.Background(), []Entry{testEntry}, "", f.env(), ProbeOptions{})
@@ -256,7 +256,7 @@ func TestProbe_Unrecognized_NoStepMatches(t *testing.T) {
 	bin := fakeAbsDir("bin")
 	f := &fakeEnv{
 		pathDirs:    []string{bin},
-		executables: map[string]bool{filepath.Join(bin, "testcli"): true},
+		executables: map[string]bool{fakeAbsExe(bin, "testcli"): true},
 		run: func(_ context.Context, _ string, args []string) ([]byte, error) {
 			switch {
 			case len(args) == 2 && args[0] == "version" && args[1] == "--json":
@@ -283,7 +283,7 @@ func TestProbe_Timeout(t *testing.T) {
 	bin := fakeAbsDir("bin")
 	f := &fakeEnv{
 		pathDirs:    []string{bin},
-		executables: map[string]bool{filepath.Join(bin, "testcli"): true},
+		executables: map[string]bool{fakeAbsExe(bin, "testcli"): true},
 		run: func(ctx context.Context, _ string, _ []string) ([]byte, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
@@ -327,7 +327,7 @@ func TestProbe_ConcurrencyBounded(t *testing.T) {
 	for i := range targets {
 		id := fmt.Sprintf("cli%d", i)
 		targets[i] = Entry{ID: id}
-		f.executables[filepath.Join(bin, id)] = true
+		f.executables[fakeAbsExe(bin, id)] = true
 	}
 	f.run = func(_ context.Context, _ string, args []string) ([]byte, error) {
 		mu.Lock()

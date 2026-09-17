@@ -268,18 +268,24 @@ func directInstallFixture(t *testing.T) (*httptest.Server, []byte, string, strin
 func TestExecuteDirectInstall_Success(t *testing.T) {
 	srv, binContent, version, tag := directInstallFixture(t)
 	destDir := t.TempDir()
+	// verifyInstalled's own post-install check runs a REAL Probe, which
+	// appends the platform's own executable suffix to target.ID itself
+	// (goosName == "windows" -> "ovdb.exe") regardless of how Destination
+	// is spelled — so Destination, the IsExecutable match, and the final
+	// on-disk read must all agree on that same, suffixed name too.
+	destPath := fakeAbsExe(destDir, "ovdb")
 
 	jr := jsonRun("ovdb", version, "abc123", "2026-01-01T00:00:00Z", buildinfo.DateSourceBuild)
 	env := InstallEnv{
 		Env: Env{
 			HostDir:      noHostDir,
 			PathDirs:     func() []string { return []string{destDir} },
-			IsExecutable: func(p string) bool { return p == filepath.Join(destDir, "ovdb") },
+			IsExecutable: func(p string) bool { return p == destPath },
 			Run:          jr,
 		},
 	}
 	opts := Options{Env: env, ConfigureRelease: configureReleaseFromServer(srv)}
-	planned := Result{Target: "ovdb", Method: MethodDirect, Destination: filepath.Join(destDir, "ovdb"), Version: version, Tag: tag}
+	planned := Result{Target: "ovdb", Method: MethodDirect, Destination: destPath, Version: version, Tag: tag}
 
 	got := executeDirectInstall(context.Background(), Entry{ID: "ovdb", Repository: "openvaultdb/ovdb"}, planned, false, opts)
 	if got.Outcome != OutcomeInstalled {
@@ -288,7 +294,7 @@ func TestExecuteDirectInstall_Success(t *testing.T) {
 	if got.Version != version || got.Tag != tag {
 		t.Errorf("Version/Tag = %q/%q", got.Version, got.Tag)
 	}
-	content, err := os.ReadFile(filepath.Join(destDir, "ovdb"))
+	content, err := os.ReadFile(destPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,18 +318,19 @@ func TestExecuteDirectInstall_Success(t *testing.T) {
 func TestExecuteDirectInstall_NotOnPathWarning(t *testing.T) {
 	srv, _, version, _ := directInstallFixture(t)
 	destDir := t.TempDir()
+	destPath := fakeAbsExe(destDir, "ovdb")
 
 	jr := jsonRun("ovdb", version, "", "", "")
 	env := InstallEnv{
 		Env: Env{
 			HostDir:      noHostDir,
 			PathDirs:     func() []string { return nil }, // destDir never on PATH
-			IsExecutable: func(p string) bool { return p == filepath.Join(destDir, "ovdb") },
+			IsExecutable: func(p string) bool { return p == destPath },
 			Run:          jr,
 		},
 	}
 	opts := Options{Env: env, ConfigureRelease: configureReleaseFromServer(srv)}
-	planned := Result{Target: "ovdb", Method: MethodDirect, Destination: filepath.Join(destDir, "ovdb"), Version: version, Tag: "v" + version}
+	planned := Result{Target: "ovdb", Method: MethodDirect, Destination: destPath, Version: version, Tag: "v" + version}
 
 	got := executeDirectInstall(context.Background(), Entry{ID: "ovdb", Repository: "openvaultdb/ovdb"}, planned, false, opts)
 	if got.Outcome != OutcomeInstalled {

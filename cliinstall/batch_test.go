@@ -79,13 +79,15 @@ func batchEnv(pathDirs []string, hostDir string, executables map[string]bool, ru
 }
 
 // multiJSONRun answers "version --json" for any probed path by looking up
-// that path's base filename in versions, naming itself after that base —
-// so one Run func can back several distinct targets probed at different
-// paths in the same test.
+// that path's base filename (with any platform executable suffix trimmed
+// — probeOne appends ".exe" on windows, but versions' own keys are the
+// bare catalog id, e.g. "ovdb" not "ovdb.exe") in versions, naming itself
+// after that base — so one Run func can back several distinct targets
+// probed at different paths in the same test.
 func multiJSONRun(versions map[string]string) func(context.Context, string, []string) ([]byte, error) {
 	return func(_ context.Context, path string, args []string) ([]byte, error) {
 		if len(args) == 2 && args[0] == "version" && args[1] == "--json" {
-			base := filepath.Base(path)
+			base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 			if v, ok := versions[base]; ok {
 				b, _ := json.Marshal(buildinfo.VersionJSON{Name: base, Version: v})
 				return b, nil
@@ -181,7 +183,7 @@ func TestPlan_HostDirErrorTreatedAsEmpty(t *testing.T) {
 
 func TestPlan_AlreadyInstalledIsNotReinstalled(t *testing.T) {
 	bin1 := fakeAbsDir("bin1")
-	executables := map[string]bool{filepath.Join(bin1, "ovdb"): true}
+	executables := map[string]bool{fakeAbsExe(bin1, "ovdb"): true}
 	run := multiJSONRun(map[string]string{"ovdb": "1.2.3"})
 	env := batchEnv([]string{bin1}, fakeAbsDir("usr", "bin"), executables, run, noRunManaged)
 	opts := Options{HostID: "datatug", Env: env}
@@ -316,6 +318,15 @@ func TestPlan_UnrecognizedElsewhereWarns(t *testing.T) {
 }
 
 func TestPlan_HomebrewNeedsNoNetwork(t *testing.T) {
+	// Homebrew casks are POSIX-only (wb/ovdb's own catalog entries declare
+	// CaskOS: darwin/linux, never windows), so caskSupportsOS only chooses
+	// MethodHomebrew there — pin goosName so this Homebrew-policy fixture
+	// exercises that regardless of the REAL host OS running the test (same
+	// pattern as TestPlanMethod_DirGivenAllowed).
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "darwin"
+
 	hostDir := fakeAbsDir("opt", "homebrew", "Caskroom", "wb", "1.0.0")
 	env := batchEnv(nil, hostDir, nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("should not run") }, noRunManaged)
 	opts := Options{HostID: "wb", Env: env}
@@ -522,6 +533,12 @@ func TestExecute_DeclinedKeepsStatusAndDestination(t *testing.T) {
 }
 
 func TestExecute_HomebrewPrintOnlyRedirectsWithoutRunning(t *testing.T) {
+	// Same reasoning as TestPlan_HomebrewNeedsNoNetwork: pin goosName so
+	// this Homebrew-policy fixture works regardless of the real host OS.
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "darwin"
+
 	hostDir := fakeAbsDir("opt", "homebrew", "Caskroom", "wb", "1.0.0")
 	env := batchEnv(nil, hostDir, nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("should not run") }, noRunManaged)
 	opts := Options{HostID: "wb", Env: env}
@@ -547,6 +564,12 @@ func TestExecute_HomebrewPrintOnlyRedirectsWithoutRunning(t *testing.T) {
 // managed command succeeds and one whose fails — both get a result, in
 // order, and the earlier failure never stops the later target.
 func TestExecute_AcceptedBatchInstallsIndependently(t *testing.T) {
+	// Same reasoning as TestPlan_HomebrewNeedsNoNetwork: pin goosName so
+	// this Homebrew-policy fixture works regardless of the real host OS.
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "darwin"
+
 	executables := map[string]bool{}
 	homebrewBin := fakeAbsDir("opt", "homebrew", "bin")
 	run := multiJSONRun(map[string]string{"ovdb": "2.0.0"})
@@ -679,6 +702,12 @@ func TestInstall_PanicsOnUnknownHost(t *testing.T) {
 }
 
 func TestInstall_DryRunNeverCallsExecute(t *testing.T) {
+	// Same reasoning as TestPlan_HomebrewNeedsNoNetwork: pin goosName so
+	// this Homebrew-policy fixture works regardless of the real host OS.
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "darwin"
+
 	hostDir := fakeAbsDir("opt", "homebrew", "Caskroom", "wb", "1.0.0")
 	env := batchEnv(nil, hostDir, nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("should not run") }, noRunManaged)
 	opts := Options{HostID: "wb", Env: env, DryRun: true} // no Confirm set: panics if Execute is ever reached
