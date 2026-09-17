@@ -20,26 +20,26 @@ func targetConfig(target Entry, opts Options) selfupdate.Config {
 	return cfg
 }
 
-// dryRunResult builds an OutcomeDryRun Result, walking the full decision
-// path including release resolution for a MethodDirect plan
-// (cli-install#req:install-dry-run) without downloading, running brew,
-// creating a directory, or asking for confirmation. A release-lookup
-// failure is reported as OutcomeFailed instead: a dry run that cannot
-// resolve what it would install has not walked the full decision path.
-func dryRunResult(ctx context.Context, target Entry, method Method, destDir, caskToken string, status Status, warnings []string, opts Options) Result {
-	if method == MethodHomebrew {
-		return Result{
-			Target: target.ID, Outcome: OutcomeDryRun, Method: MethodHomebrew,
-			CaskArgv: caskArgv(caskToken), Status: status, Warnings: warnings,
-		}
-	}
-
+// planDirectResult resolves target's latest stable release exactly once —
+// through selfupdate.Config.PlanInstall, which also performs the platform
+// check (REQ: unsupported-platform) — without downloading, verifying, or
+// writing anything (cli-install#req:install-dry-run,
+// cli-install#req:direct-release-install). The returned Result carries
+// OutcomeDryRun with Version, Tag and AssetURL already resolved: this is
+// BOTH `--dry-run`'s own final answer AND, for a real (non-dry) batch, the
+// single planned Result Execute later installs from — Plan never resolves a
+// target's release a second time (task-5 review B1: "resolve once →
+// confirm → install exactly that tag"). A release-lookup or
+// unsupported-platform failure is reported as OutcomeFailed instead: a plan
+// that cannot resolve what it would install has not walked the full
+// decision path.
+func planDirectResult(ctx context.Context, target Entry, destDir string, status Status, warnings []string, opts Options) Result {
 	destPath := installFilePath(goosName, destDir, target.ID)
-	result, err := targetConfig(target, opts).Check(ctx)
+	plan, err := targetConfig(target, opts).PlanInstall(ctx)
 	if err != nil {
-		// Config.Check always returns a *selfupdate.Failure (its own
-		// release-lookup failure path wraps every error that way), so this
-		// is never anything else to fall back on.
+		// PlanInstall always returns a *selfupdate.Failure (KindUnsupported
+		// Platform or KindReleaseLookup), so this is never anything else to
+		// fall back on.
 		var f *selfupdate.Failure
 		errors.As(err, &f)
 		return Result{Target: target.ID, Outcome: OutcomeFailed, Method: MethodDirect, Destination: destPath, Status: status, Failure: f, Warnings: warnings}
@@ -47,58 +47,65 @@ func dryRunResult(ctx context.Context, target Entry, method Method, destDir, cas
 
 	return Result{
 		Target: target.ID, Outcome: OutcomeDryRun, Method: MethodDirect,
-		Destination: destPath, Version: result.Latest, Tag: plannedTag(target, result.Latest),
+		Destination: destPath, Version: plan.Version, Tag: plan.Tag, AssetURL: plan.AssetURL,
 		Status: status, Warnings: warnings,
 	}
 }
 
-// plannedTag reconstructs the exact tag a bare version most likely
-// published under, for display only: TagPrefix + "v" + version, the
-// fleet's own tagging convention (see selfupdate.Config.TagPrefix and
-// e.g. synchestra's "cli-v0.15.1"). Never used to choose what is
-// downloaded — InstallNew resolves and downloads by its own tag lookup.
-func plannedTag(target Entry, version string) string {
-	return target.TagPrefix + "v" + version
-}
-
-// executeInstall performs target's already-confirmed install: a direct
-// release download/verify/place through selfupdate's InstallNew, or a
-// Homebrew cask install through opts.Env.RunManaged, then post-install
-// verification (cli-install#req:post-install-verification).
-func executeInstall(ctx context.Context, target Entry, method Method, destDir, caskToken string, createIfMissing bool, warnings []string, opts Options) Result {
-	if method == MethodHomebrew {
-		return executeHomebrewInstall(ctx, target, caskToken, warnings, opts)
+// planHomebrewResult builds an OutcomeDryRun Result for a Homebrew plan —
+// no network lookup is needed: the cask token is a compiled catalog
+// constant, and the exact command is known without resolving anything.
+func planHomebrewResult(target Entry, caskToken string, status Status, warnings []string) Result {
+	return Result{
+		Target: target.ID, Outcome: OutcomeDryRun, Method: MethodHomebrew,
+		CaskArgv: caskArgv(caskToken), Status: status, Warnings: warnings,
 	}
-	return executeDirectInstall(ctx, target, destDir, createIfMissing, warnings, opts)
 }
 
-// executeDirectInstall places target's latest verified release at destDir,
-// creating destDir first only when planMethod chose the per-user bin
-// directory and it was missing (cli-install#req:per-user-bin-dir).
-func executeDirectInstall(ctx context.Context, target Entry, destDir string, createIfMissing bool, warnings []string, opts Options) Result {
-	destPath := installFilePath(goosName, destDir, target.ID)
+// executeInstall performs target's already-planned-and-confirmed install: a
+// direct release download/verify/place through selfupdate's InstallNew,
+// installing EXACTLY planned.Tag (never re-resolving "latest"), or a
+// Homebrew cask install through opts.Env.RunManaged, then post-install
+// verification (cli-install#req:post-install-verification). planned is one
+// of Plan's own OutcomeDryRun Results — Execute never re-probes or
+// re-resolves before calling this.
+func executeInstall(ctx context.Context, target Entry, planned Result, createIfMissing bool, opts Options) Result {
+	if planned.Method == MethodHomebrew {
+		return executeHomebrewInstall(ctx, target, planned, opts)
+	}
+	return executeDirectInstall(ctx, target, planned, createIfMissing, opts)
+}
+
+// executeDirectInstall places target's already-planned release
+// (planned.Tag/Version/AssetURL) at planned.Destination, creating its
+// directory first only when planMethod chose the per-user bin directory and
+// it was missing (cli-install#req:per-user-bin-dir).
+func executeDirectInstall(ctx context.Context, target Entry, planned Result, createIfMissing bool, opts Options) Result {
+	destPath := planned.Destination
+	warnings := planned.Warnings
 
 	if createIfMissing {
-		if err := opts.Env.MkdirAll(destDir, 0o755); err != nil {
+		if err := opts.Env.MkdirAll(dirOf(destPath), 0o755); err != nil {
 			return Result{
 				Target: target.ID, Outcome: OutcomeFailed, Method: MethodDirect, Destination: destPath,
-				Failure:  &selfupdate.Failure{Kind: selfupdate.KindPermission, Path: destDir, Err: fmt.Errorf("create %s: %w", destDir, err)},
+				Failure:  &selfupdate.Failure{Kind: selfupdate.KindPermission, Path: dirOf(destPath), Err: fmt.Errorf("create %s: %w", dirOf(destPath), err)},
 				Warnings: warnings,
 			}
 		}
 	}
 
-	installResult, err := targetConfig(target, opts).InstallNew(ctx, destPath)
+	installPlan := selfupdate.InstallPlan{Tag: planned.Tag, Version: planned.Version, AssetURL: planned.AssetURL}
+	installResult, err := targetConfig(target, opts).InstallNew(ctx, destPath, installPlan)
 	if err != nil {
 		// InstallNew always returns a *selfupdate.Failure — every error
-		// path inside it (release lookup, download, checksum, staging,
-		// placement) wraps that way — so this is never anything else to
-		// fall back on.
+		// path inside it (download, checksum, staging, placement) wraps
+		// that way — so this is never anything else to fall back on.
 		var f *selfupdate.Failure
 		errors.As(err, &f)
 		return Result{Target: target.ID, Outcome: OutcomeFailed, Method: MethodDirect, Destination: destPath, Failure: f, Warnings: warnings}
 	}
 
+	destDir := dirOf(destPath)
 	finalStatus, verifyWarnings := verifyInstalled(ctx, target, opts, MethodDirect, destPath, installResult.Version)
 	warnings = append(warnings, verifyWarnings...)
 	if !dirOnPath(opts.Env.PathDirs(), destDir, goosName) {
@@ -117,8 +124,13 @@ func executeDirectInstall(ctx context.Context, target Entry, destDir string, cre
 // opts.Env.RunManaged (cli-install#req:homebrew-cask-install). A missing
 // runner or a non-zero exit both fail with KindManagedCommand, naming
 // `brew update` and --dir as remedies, exactly as that REQ requires.
-func executeHomebrewInstall(ctx context.Context, target Entry, caskToken string, warnings []string, opts Options) Result {
-	argv := caskArgv(caskToken)
+func executeHomebrewInstall(ctx context.Context, target Entry, planned Result, opts Options) Result {
+	argv := planned.CaskArgv
+	warnings := planned.Warnings
+	caskToken := ""
+	if len(argv) > 0 {
+		caskToken = argv[len(argv)-1]
+	}
 
 	if opts.Env.RunManaged == nil {
 		return Result{

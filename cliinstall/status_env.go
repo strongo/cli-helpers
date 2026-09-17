@@ -143,7 +143,36 @@ const waitDelay = 500 * time.Millisecond
 // grandchildren.
 func defaultRun(ctx context.Context, path string, args []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, path, args...) //nolint:gosec // path/args are caller-configured (a located catalog binary), not attacker input
-	cmd.Env = append(os.Environ(), "NO_COLOR=1")
+	cmd.Env = append(probeEnv(os.Environ()), "NO_COLOR=1")
 	cmd.WaitDelay = waitDelay
 	return cmd.CombinedOutput()
+}
+
+// probeTokenVars are environment variables that authenticate GitHub API
+// requests. Probing a target (even for a bare `install` listing, per
+// cli-install#req:list-offline-read-only) executes any binary named after a
+// catalog id found on PATH, the host directory, or --dir; that binary is
+// this package's own catalog CLI in the overwhelmingly common case, but
+// could be anything with that name (task-5 review M13). Stripping these
+// keeps a caller's own GH_TOKEN/GITHUB_TOKEN from ever reaching a probed
+// process, the same "least exposure" posture selfupdate's own release
+// lookups apply to the token they DO need.
+var probeTokenVars = []string{"GH_TOKEN", "GITHUB_TOKEN"}
+
+// probeEnv returns env with every probeTokenVars entry removed.
+func probeEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		strip := false
+		for _, tok := range probeTokenVars {
+			if strings.HasPrefix(kv, tok+"=") {
+				strip = true
+				break
+			}
+		}
+		if !strip {
+			out = append(out, kv)
+		}
+	}
+	return out
 }

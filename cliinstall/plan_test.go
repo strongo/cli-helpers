@@ -1,6 +1,7 @@
 package cliinstall
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -174,7 +175,57 @@ func TestIndexOfDir(t *testing.T) {
 	}
 }
 
-// --- alreadyInstalledResult / unknownTargetFailure / dedupeNames -----------
+// --- BatchResult.Failure / BatchFailure -------------------------------------
+
+func TestBatchResult_Failure_NoFailures(t *testing.T) {
+	b := BatchResult{Results: []Result{{Target: "ovdb", Outcome: OutcomeInstalled}}}
+	if err := b.Failure(); err != nil {
+		t.Errorf("Failure() = %v, want nil", err)
+	}
+}
+
+func TestBatchResult_Failure_AggregatesEveryFailedTarget(t *testing.T) {
+	f1 := &selfupdate.Failure{Kind: selfupdate.KindUnknownTarget, Err: errors.New("nosuch")}
+	f2 := &selfupdate.Failure{Kind: selfupdate.KindChecksum, Err: errors.New("bad hash")}
+	b := BatchResult{Results: []Result{
+		{Target: "a", Outcome: OutcomeFailed, Failure: f1},
+		{Target: "b", Outcome: OutcomeInstalled},
+		{Target: "c", Outcome: OutcomeFailed, Failure: f2},
+	}}
+	err := b.Failure()
+	var bf *BatchFailure
+	if !errors.As(err, &bf) {
+		t.Fatalf("Failure() = %v, want a *BatchFailure", err)
+	}
+	if len(bf.Failures) != 2 || bf.Failures[0] != f1 || bf.Failures[1] != f2 {
+		t.Errorf("Failures = %v, want [f1, f2] in Results order", bf.Failures)
+	}
+	// KindOf resolves through Unwrap to the FIRST failure for a caller that
+	// only wants one classification.
+	if selfupdate.KindOf(err) != selfupdate.KindUnknownTarget {
+		t.Errorf("KindOf(err) = %v, want KindUnknownTarget (the first failure)", selfupdate.KindOf(err))
+	}
+	// errors.As also finds a LATER failure by its own concrete pointer.
+	var found *selfupdate.Failure
+	if !errors.As(err, &found) || found != f1 {
+		t.Errorf("errors.As found %v, want f1 (the first match)", found)
+	}
+	if !strings.Contains(err.Error(), "nosuch") || !strings.Contains(err.Error(), "bad hash") {
+		t.Errorf("Error() = %q, want both messages", err.Error())
+	}
+}
+
+func TestBatchFailure_Unwrap(t *testing.T) {
+	f1 := &selfupdate.Failure{Kind: selfupdate.KindUnknownTarget, Err: errors.New("a")}
+	f2 := &selfupdate.Failure{Kind: selfupdate.KindChecksum, Err: errors.New("b")}
+	bf := &BatchFailure{Failures: []*selfupdate.Failure{f1, f2}}
+	unwrapped := bf.Unwrap()
+	if len(unwrapped) != 2 || unwrapped[0] != error(f1) || unwrapped[1] != error(f2) {
+		t.Errorf("Unwrap() = %v, want [f1, f2]", unwrapped)
+	}
+}
+
+// --- alreadyInstalledResult / unknownTargetsFailure / dedupeNames -----------
 
 func TestAlreadyInstalledResult(t *testing.T) {
 	target := Entry{ID: "ovdb"}
@@ -191,13 +242,15 @@ func TestAlreadyInstalledResult(t *testing.T) {
 	}
 }
 
-func TestUnknownTargetFailure(t *testing.T) {
-	f := unknownTargetFailure("nosuchcli")
+func TestUnknownTargetsFailure(t *testing.T) {
+	f := unknownTargetsFailure([]string{"nosuchcli", "alsobad"})
 	if f.Kind != selfupdate.KindUnknownTarget {
 		t.Errorf("Kind = %v, want KindUnknownTarget", f.Kind)
 	}
-	if !strings.Contains(f.Error(), "nosuchcli") {
-		t.Errorf("Error() = %q, want it to name the unknown target", f.Error())
+	for _, want := range []string{"nosuchcli", "alsobad"} {
+		if !strings.Contains(f.Error(), want) {
+			t.Errorf("Error() = %q, want it to name the unknown target %q", f.Error(), want)
+		}
 	}
 	for _, id := range IDs() {
 		if !strings.Contains(f.Error(), id) {

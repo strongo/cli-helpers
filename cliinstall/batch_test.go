@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/strongo/buildinfo"
@@ -56,44 +57,62 @@ func noRunManaged(context.Context, string, []string) error {
 	return errors.New("RunManaged must not be called")
 }
 
-// --- Install --------------------------------------------------------------
+// --- Plan ------------------------------------------------------------------
 
-func TestInstall_PanicsOnUnknownHost(t *testing.T) {
+func TestPlan_PanicsOnUnknownHost(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
-			t.Fatal("Install did not panic for a host id absent from the catalog")
+			t.Fatal("Plan did not panic for a host id absent from the catalog")
 		}
 	}()
-	_, _ = Install(context.Background(), nil, Options{HostID: "nosuchhost"})
+	_, _ = Plan(context.Background(), nil, Options{HostID: "nosuchhost"})
 }
 
-func TestInstall_UnknownTargetDoesNotStopOthers(t *testing.T) {
-	// "ovdb" also fails, but for a controlled planning reason (no PATH
-	// entry for the per-user bin dir, host dir denylisted) — this proves
-	// an unknown name and a distinct real failure are BOTH reported,
-	// independently, with no network access at all.
-	env := batchEnv(nil, "/usr/bin", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("no proc") }, noRunManaged)
+// S1: an unknown name refuses the WHOLE batch, before any valid target is
+// even probed — never a per-target failure that lets the rest proceed.
+func TestPlan_UnknownNameRefusesWholeBatchBeforeProbing(t *testing.T) {
+	probed := false
+	run := func(context.Context, string, []string) ([]byte, error) {
+		probed = true
+		return nil, errors.New("must not be called")
+	}
+	env := batchEnv(nil, "/usr/bin", nil, run, noRunManaged)
 	opts := Options{HostID: "datatug", Env: env, Yes: true}
 
-	result, err := Install(context.Background(), []string{"nosuchcli", "ovdb"}, opts)
-	if err != nil {
-		t.Fatalf("Install error = %v", err)
+	result, err := Plan(context.Background(), []string{"nosuchcli", "ovdb"}, opts)
+	if err == nil {
+		t.Fatal("Plan error = nil, want a batch-level unknown-target failure")
 	}
-	if len(result.Results) != 2 {
-		t.Fatalf("len(Results) = %d, want 2", len(result.Results))
+	if selfupdate.KindOf(err) != selfupdate.KindUnknownTarget {
+		t.Errorf("KindOf(err) = %v, want KindUnknownTarget", selfupdate.KindOf(err))
 	}
-	if result.Results[0].Target != "nosuchcli" || result.Results[0].Outcome != OutcomeFailed || result.Results[0].Failure.Kind != selfupdate.KindUnknownTarget {
-		t.Errorf("Results[0] = %+v", result.Results[0])
+	if !strings.Contains(err.Error(), "nosuchcli") {
+		t.Errorf("error %q does not name the unknown target", err.Error())
 	}
-	if result.Results[1].Target != "ovdb" || result.Results[1].Outcome != OutcomeFailed || result.Results[1].Failure.Kind != selfupdate.KindNoInstallDir {
-		t.Errorf("Results[1] = %+v", result.Results[1])
+	if len(result.Results) != 0 {
+		t.Errorf("result.Results = %v, want empty: nothing should have been probed", result.Results)
 	}
-	if !result.Failed() {
-		t.Error("BatchResult.Failed() = false, want true")
+	if probed {
+		t.Error("a valid target's probe ran despite an unknown name in the same batch")
 	}
 }
 
-func TestInstall_HostDirErrorTreatedAsEmpty(t *testing.T) {
+func TestPlan_MultipleUnknownNamesAllListed(t *testing.T) {
+	env := batchEnv(nil, "/usr/bin", nil, func(context.Context, string, []string) ([]byte, error) { return nil, nil }, noRunManaged)
+	opts := Options{HostID: "datatug", Env: env}
+
+	_, err := Plan(context.Background(), []string{"nosuch1", "nosuch2"}, opts)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	for _, want := range []string{"nosuch1", "nosuch2"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err.Error(), want)
+		}
+	}
+}
+
+func TestPlan_HostDirErrorTreatedAsEmpty(t *testing.T) {
 	// opts.Env.HostDir() failing (e.g. os.Executable() itself errored)
 	// must not be fatal to the whole batch — it is treated as "no host
 	// directory," the same as searchDirs itself already does for status
@@ -108,9 +127,9 @@ func TestInstall_HostDirErrorTreatedAsEmpty(t *testing.T) {
 	env.HostDir = func() (string, error) { return "", errors.New("os.Executable failed") }
 	opts := Options{HostID: "datatug", Env: env, Yes: true}
 
-	result, err := Install(context.Background(), []string{"ovdb"}, opts)
+	result, err := Plan(context.Background(), []string{"ovdb"}, opts)
 	if err != nil {
-		t.Fatalf("Install error = %v", err)
+		t.Fatalf("Plan error = %v", err)
 	}
 	r := result.Results[0]
 	if r.Outcome != OutcomeFailed || r.Failure == nil || r.Failure.Kind != selfupdate.KindNoInstallDir {
@@ -118,15 +137,15 @@ func TestInstall_HostDirErrorTreatedAsEmpty(t *testing.T) {
 	}
 }
 
-func TestInstall_AlreadyInstalledIsNotReinstalled(t *testing.T) {
+func TestPlan_AlreadyInstalledIsNotReinstalled(t *testing.T) {
 	executables := map[string]bool{"/bin1/ovdb": true}
 	run := multiJSONRun(map[string]string{"ovdb": "1.2.3"})
 	env := batchEnv([]string{"/bin1"}, "/usr/bin", executables, run, noRunManaged)
-	opts := Options{HostID: "datatug", Env: env, Yes: true}
+	opts := Options{HostID: "datatug", Env: env}
 
-	result, err := Install(context.Background(), []string{"ovdb"}, opts)
+	result, err := Plan(context.Background(), []string{"ovdb"}, opts)
 	if err != nil {
-		t.Fatalf("Install error = %v", err)
+		t.Fatalf("Plan error = %v", err)
 	}
 	r := result.Results[0]
 	if r.Outcome != OutcomeAlreadyInstalled || r.Version != "1.2.3" || r.UpdateHint != "ovdb self-update" {
@@ -134,22 +153,22 @@ func TestInstall_AlreadyInstalledIsNotReinstalled(t *testing.T) {
 	}
 }
 
-func TestInstall_DedupesNames(t *testing.T) {
+func TestPlan_DedupesNames(t *testing.T) {
 	executables := map[string]bool{"/bin1/ovdb": true}
 	run := multiJSONRun(map[string]string{"ovdb": "1.2.3"})
 	env := batchEnv([]string{"/bin1"}, "/usr/bin", executables, run, noRunManaged)
-	opts := Options{HostID: "datatug", Env: env, Yes: true}
+	opts := Options{HostID: "datatug", Env: env}
 
-	result, err := Install(context.Background(), []string{"ovdb", "ovdb"}, opts)
+	result, err := Plan(context.Background(), []string{"ovdb", "ovdb"}, opts)
 	if err != nil {
-		t.Fatalf("Install error = %v", err)
+		t.Fatalf("Plan error = %v", err)
 	}
 	if len(result.Results) != 1 {
 		t.Fatalf("len(Results) = %d, want 1 (de-duplicated)", len(result.Results))
 	}
 }
 
-func TestInstall_UnrecognizedAtDestinationFails(t *testing.T) {
+func TestPlan_UnrecognizedAtDestinationFails(t *testing.T) {
 	hostDir := "/home/alex/go/bin" // Manual, not denylisted
 	destPath := "/home/alex/go/bin/ovdb"
 	executables := map[string]bool{destPath: true}
@@ -157,11 +176,11 @@ func TestInstall_UnrecognizedAtDestinationFails(t *testing.T) {
 		return []byte("somethingelse 9.9.9 (abc) 2026-01-01"), nil
 	}
 	env := batchEnv(nil, hostDir, executables, run, noRunManaged)
-	opts := Options{HostID: "datatug", Env: env, Yes: true}
+	opts := Options{HostID: "datatug", Env: env}
 
-	result, err := Install(context.Background(), []string{"ovdb"}, opts)
+	result, err := Plan(context.Background(), []string{"ovdb"}, opts)
 	if err != nil {
-		t.Fatalf("Install error = %v", err)
+		t.Fatalf("Plan error = %v", err)
 	}
 	r := result.Results[0]
 	if r.Outcome != OutcomeFailed || r.Failure == nil || r.Failure.Kind != selfupdate.KindDestinationExists {
@@ -172,7 +191,38 @@ func TestInstall_UnrecognizedAtDestinationFails(t *testing.T) {
 	}
 }
 
-func TestInstall_UnrecognizedElsewhereWarnsAndDeclines(t *testing.T) {
+// S6: the collision check must catch a destination path that names the
+// SAME file as a located copy once case-folded, on a case-insensitive-by-
+// default platform (Windows/macOS), not just a byte-exact match — the real
+// scenario is a case-insensitive filesystem where the host's own directory
+// string and the literal PATH entry a copy was found under differ only in
+// letter case (e.g. "/Users/alex/..." vs "/Users/Alex/...").
+func TestPlan_UnrecognizedAtDestinationFails_CaseVariant(t *testing.T) {
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "darwin"
+
+	hostDir := "/Users/alex/go/bin"          // Manual, not denylisted; planning builds destPath from this
+	pathEntry := "/Users/Alex/go/bin"        // same directory, different case, found on PATH
+	locatedPath := "/Users/Alex/go/bin/ovdb" // located copy: pathEntry + id
+	executables := map[string]bool{locatedPath: true}
+	run := func(context.Context, string, []string) ([]byte, error) {
+		return []byte("somethingelse 9.9.9 (abc) 2026-01-01"), nil
+	}
+	env := batchEnv([]string{pathEntry}, hostDir, executables, run, noRunManaged)
+	opts := Options{HostID: "datatug", Env: env}
+
+	result, err := Plan(context.Background(), []string{"ovdb"}, opts)
+	if err != nil {
+		t.Fatalf("Plan error = %v", err)
+	}
+	r := result.Results[0]
+	if r.Outcome != OutcomeFailed || r.Failure == nil || r.Failure.Kind != selfupdate.KindDestinationExists {
+		t.Fatalf("Results[0] = %+v, want KindDestinationExists (case-insensitive match on darwin)", r)
+	}
+}
+
+func TestPlan_UnrecognizedElsewhereWarns(t *testing.T) {
 	// The unrecognized copy is on PATH at /bin1, earlier than the planned
 	// destination /home/alex/go/bin (not on PATH at all) — REQ:
 	// unrecognized-copy-not-trusted's shadowing case.
@@ -183,22 +233,16 @@ func TestInstall_UnrecognizedElsewhereWarnsAndDeclines(t *testing.T) {
 		return []byte("somethingelse 9.9.9 (abc) 2026-01-01"), nil
 	}
 	env := batchEnv([]string{"/bin1"}, hostDir, executables, run, noRunManaged)
-	confirmCalled := false
-	opts := Options{HostID: "datatug", Env: env, Confirm: func(names []string) (bool, error) {
-		confirmCalled = true
-		return false, nil
-	}}
+	srv := newReleaseServer(t, `[{"tag_name":"v1.0.0","prerelease":false,"draft":false}]`, nil)
+	opts := Options{HostID: "datatug", Env: env, ConfigureRelease: configureReleaseFromServer(srv)}
 
-	result, err := Install(context.Background(), []string{"ovdb"}, opts)
+	result, err := Plan(context.Background(), []string{"ovdb"}, opts)
 	if err != nil {
-		t.Fatalf("Install error = %v", err)
-	}
-	if !confirmCalled {
-		t.Fatal("Confirm was not called")
+		t.Fatalf("Plan error = %v", err)
 	}
 	r := result.Results[0]
-	if r.Outcome != OutcomeDeclined {
-		t.Fatalf("Outcome = %v, want OutcomeDeclined", r.Outcome)
+	if r.Outcome != OutcomeDryRun {
+		t.Fatalf("Outcome = %v, want OutcomeDryRun (a plan, still pending); failure=%v", r.Outcome, r.Failure)
 	}
 	found := false
 	for _, w := range r.Warnings {
@@ -207,21 +251,18 @@ func TestInstall_UnrecognizedElsewhereWarnsAndDeclines(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("Warnings = %v, want the shadowing warning even though declined", r.Warnings)
-	}
-	if result.Failed() {
-		t.Error("BatchResult.Failed() = true, want false: a decline is not a failure")
+		t.Errorf("Warnings = %v, want the shadowing warning", r.Warnings)
 	}
 }
 
-func TestInstall_DryRunSkipsConfirmAndNetwork_Homebrew(t *testing.T) {
+func TestPlan_HomebrewNeedsNoNetwork(t *testing.T) {
 	hostDir := "/opt/homebrew/Caskroom/wb/1.0.0"
 	env := batchEnv(nil, hostDir, nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("should not run") }, noRunManaged)
-	opts := Options{HostID: "wb", Env: env, DryRun: true} // no Confirm set: panics if ever called
+	opts := Options{HostID: "wb", Env: env}
 
-	result, err := Install(context.Background(), []string{"ovdb"}, opts)
+	result, err := Plan(context.Background(), []string{"ovdb"}, opts)
 	if err != nil {
-		t.Fatalf("Install error = %v", err)
+		t.Fatalf("Plan error = %v", err)
 	}
 	r := result.Results[0]
 	if r.Outcome != OutcomeDryRun || r.Method != MethodHomebrew {
@@ -232,14 +273,207 @@ func TestInstall_DryRunSkipsConfirmAndNetwork_Homebrew(t *testing.T) {
 	}
 }
 
-func TestInstall_HomebrewPrintOnlyRedirectsWithoutConfirmOrRun(t *testing.T) {
+// B1: a direct target's plan carries the exact resolved Tag/Version/
+// AssetURL, resolved through PlanInstall — never a guessed tag.
+func TestPlan_DirectResolvesReleaseOnce(t *testing.T) {
+	srv := newReleaseServer(t, `[{"tag_name":"v1.2.3","prerelease":false,"draft":false}]`, nil)
+	env := batchEnv(nil, "/home/alex/go/bin", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("not installed") }, noRunManaged)
+	calls := 0
+	opts := Options{
+		HostID: "datatug", Env: env,
+		ConfigureRelease: func(_ Entry, cfg selfupdate.Config) selfupdate.Config {
+			calls++
+			cfg.ReleasesAPIURL = srv.URL + "/releases"
+			return cfg
+		},
+	}
+
+	result, err := Plan(context.Background(), []string{"ovdb"}, opts)
+	if err != nil {
+		t.Fatalf("Plan error = %v", err)
+	}
+	r := result.Results[0]
+	if r.Outcome != OutcomeDryRun || r.Version != "1.2.3" || r.Tag != "v1.2.3" {
+		t.Fatalf("Results[0] = %+v", r)
+	}
+	if r.AssetURL == "" {
+		t.Error("AssetURL is empty, want the resolved asset URL")
+	}
+	if calls != 1 {
+		t.Errorf("ConfigureRelease called %d times, want exactly 1 (resolve once)", calls)
+	}
+}
+
+func TestPlan_DirectUnsupportedPlatform(t *testing.T) {
+	env := batchEnv(nil, "/home/alex/go/bin", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("not installed") }, noRunManaged)
+	opts := Options{
+		HostID: "datatug", Env: env,
+		ConfigureRelease: func(_ Entry, cfg selfupdate.Config) selfupdate.Config {
+			cfg.SupportedPlatforms = []selfupdate.Platform{{GOOS: "plan9", GOARCH: "amd64"}}
+			cfg.ReleasesAPIURL = "http://127.0.0.1:1/releases" // never dialed
+			return cfg
+		},
+	}
+
+	result, err := Plan(context.Background(), []string{"ovdb"}, opts)
+	if err != nil {
+		t.Fatalf("Plan error = %v", err)
+	}
+	r := result.Results[0]
+	if r.Outcome != OutcomeFailed || r.Failure == nil || r.Failure.Kind != selfupdate.KindUnsupportedPlatform {
+		t.Fatalf("Results[0] = %+v, want KindUnsupportedPlatform", r)
+	}
+}
+
+// --- Execute -----------------------------------------------------------
+
+func TestExecute_ConfirmationGate_NoCallbackConfiguredRefuses(t *testing.T) {
+	env := batchEnv(nil, "/home/alex/go/bin", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("no proc") }, noRunManaged)
+	srv := newReleaseServer(t, `[{"tag_name":"v1.0.0","prerelease":false,"draft":false}]`, nil)
+	opts := Options{HostID: "datatug", Env: env, ConfigureRelease: configureReleaseFromServer(srv)}
+
+	plan, err := Plan(context.Background(), []string{"ovdb"}, opts)
+	if err != nil {
+		t.Fatalf("Plan error = %v", err)
+	}
+
+	result, err := Execute(context.Background(), plan, opts) // Yes false, Confirm nil
+	if err == nil {
+		t.Fatal("Execute error = nil, want a non-interactive refusal")
+	}
+	if selfupdate.KindOf(err) != selfupdate.KindNonInteractive {
+		t.Errorf("KindOf(err) = %v, want KindNonInteractive", selfupdate.KindOf(err))
+	}
+	// S2: the refusal must NOT be an empty BatchResult — every target from
+	// the plan is still reported, now as a failure.
+	if len(result.Results) != 1 {
+		t.Fatalf("len(Results) = %d, want 1 (populated even on refusal)", len(result.Results))
+	}
+	r := result.Results[0]
+	if r.Target != "ovdb" || r.Outcome != OutcomeFailed || r.Failure == nil || r.Failure.Kind != selfupdate.KindNonInteractive {
+		t.Errorf("Results[0] = %+v", r)
+	}
+	if !result.Failed() {
+		t.Error("BatchResult.Failed() = false, want true")
+	}
+}
+
+func TestExecute_ConfirmationGate_CallbackErrorPropagates(t *testing.T) {
+	sentinel := &selfupdate.Failure{Kind: selfupdate.KindNonInteractive, Err: errors.New("no tty")}
+	env := batchEnv(nil, "/home/alex/go/bin", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("no proc") }, noRunManaged)
+	srv := newReleaseServer(t, `[{"tag_name":"v1.0.0","prerelease":false,"draft":false}]`, nil)
+	opts := Options{HostID: "datatug", Env: env, ConfigureRelease: configureReleaseFromServer(srv)}
+	plan, err := Plan(context.Background(), []string{"ovdb"}, opts)
+	if err != nil {
+		t.Fatalf("Plan error = %v", err)
+	}
+
+	opts.Confirm = func([]Result) (bool, error) { return false, sentinel }
+	result, err := Execute(context.Background(), plan, opts)
+	if selfupdate.KindOf(err) != selfupdate.KindNonInteractive {
+		t.Errorf("Execute error = %v, want the Confirm callback's own error propagated", err)
+	}
+	if len(result.Results) != 1 || result.Results[0].Failure != sentinel {
+		t.Errorf("Results = %+v, want the sentinel failure carried through", result.Results)
+	}
+}
+
+// A Confirm callback may return an error that is NOT already a
+// *selfupdate.Failure (a plain error). Execute must still wrap it as a
+// KindNonInteractive failure per target, rather than losing its type.
+func TestExecute_ConfirmationGate_PlainCallbackErrorIsWrapped(t *testing.T) {
+	plain := errors.New("stdin closed")
+	env := batchEnv(nil, "/home/alex/go/bin", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("no proc") }, noRunManaged)
+	srv := newReleaseServer(t, `[{"tag_name":"v1.0.0","prerelease":false,"draft":false}]`, nil)
+	opts := Options{HostID: "datatug", Env: env, ConfigureRelease: configureReleaseFromServer(srv)}
+	plan, err := Plan(context.Background(), []string{"ovdb"}, opts)
+	if err != nil {
+		t.Fatalf("Plan error = %v", err)
+	}
+
+	opts.Confirm = func([]Result) (bool, error) { return false, plain }
+	result, err := Execute(context.Background(), plan, opts)
+	if !errors.Is(err, plain) {
+		t.Errorf("Execute error = %v, want it to wrap the plain callback error", err)
+	}
+	if len(result.Results) != 1 || result.Results[0].Failure == nil || result.Results[0].Failure.Kind != selfupdate.KindNonInteractive {
+		t.Errorf("Results = %+v, want a wrapped KindNonInteractive failure", result.Results)
+	}
+}
+
+func TestExecute_ConfirmationGate_NamesOnlyPendingTargets(t *testing.T) {
+	// "ovdb" is already installed (excluded from confirmation); "datatug"
+	// is not (included) — REQ: confirmation-gate: "Targets that are
+	// already installed... are excluded from the question."
+	executables := map[string]bool{"/bin1/ovdb": true}
+	run := multiJSONRun(map[string]string{"ovdb": "1.0.0"})
+	env := batchEnv([]string{"/bin1"}, "/home/alex/go/bin", executables, run, noRunManaged)
+	srv := newReleaseServer(t, `[{"tag_name":"v1.0.0","prerelease":false,"draft":false}]`, nil)
+	opts := Options{HostID: "wb", Env: env, ConfigureRelease: configureReleaseFromServer(srv)}
+	plan, err := Plan(context.Background(), []string{"ovdb", "datatug"}, opts)
+	if err != nil {
+		t.Fatalf("Plan error = %v", err)
+	}
+
+	var confirmedNames []string
+	opts.Confirm = func(planned []Result) (bool, error) {
+		for _, p := range planned {
+			confirmedNames = append(confirmedNames, p.Target)
+		}
+		return false, nil
+	}
+	_, err = Execute(context.Background(), plan, opts)
+	if err != nil {
+		t.Fatalf("Execute error = %v", err)
+	}
+	if len(confirmedNames) != 1 || confirmedNames[0] != "datatug" {
+		t.Errorf("Confirm was asked about %v, want only [datatug]", confirmedNames)
+	}
+}
+
+func TestExecute_DeclinedKeepsStatusAndDestination(t *testing.T) {
+	env := batchEnv(nil, "/home/alex/go/bin", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("not installed") }, noRunManaged)
+	opts := Options{
+		HostID: "datatug", Env: env,
+		ConfigureRelease: func(_ Entry, cfg selfupdate.Config) selfupdate.Config {
+			cfg.ReleasesAPIURL = newReleaseServer(t, `[{"tag_name":"v1.0.0","prerelease":false,"draft":false}]`, nil).URL + "/releases"
+			return cfg
+		},
+	}
+	plan, err := Plan(context.Background(), []string{"ovdb"}, opts)
+	if err != nil {
+		t.Fatalf("Plan error = %v", err)
+	}
+
+	opts.Confirm = func([]Result) (bool, error) { return false, nil }
+	result, err := Execute(context.Background(), plan, opts)
+	if err != nil {
+		t.Fatalf("Execute error = %v", err)
+	}
+	r := result.Results[0]
+	if r.Outcome != OutcomeDeclined {
+		t.Fatalf("Outcome = %v, want OutcomeDeclined", r.Outcome)
+	}
+	// M10: a declined result must still carry Status and Destination.
+	if r.Destination == "" {
+		t.Error("Destination is empty on a declined result")
+	}
+}
+
+func TestExecute_HomebrewPrintOnlyRedirectsWithoutRunning(t *testing.T) {
 	hostDir := "/opt/homebrew/Caskroom/wb/1.0.0"
 	env := batchEnv(nil, hostDir, nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("should not run") }, noRunManaged)
-	opts := Options{HostID: "wb", Env: env, HomebrewPrintOnly: true} // no Confirm set
-
-	result, err := Install(context.Background(), []string{"ovdb"}, opts)
+	opts := Options{HostID: "wb", Env: env}
+	plan, err := Plan(context.Background(), []string{"ovdb"}, opts)
 	if err != nil {
-		t.Fatalf("Install error = %v", err)
+		t.Fatalf("Plan error = %v", err)
+	}
+
+	opts.Yes = true
+	opts.HomebrewPrintOnly = true
+	result, err := Execute(context.Background(), plan, opts)
+	if err != nil {
+		t.Fatalf("Execute error = %v", err)
 	}
 	r := result.Results[0]
 	if r.Outcome != OutcomeRedirected {
@@ -247,62 +481,11 @@ func TestInstall_HomebrewPrintOnlyRedirectsWithoutConfirmOrRun(t *testing.T) {
 	}
 }
 
-func TestInstall_ConfirmationGate_NoCallbackConfiguredRefuses(t *testing.T) {
-	env := batchEnv(nil, "/home/alex/go/bin", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("no proc") }, noRunManaged)
-	opts := Options{HostID: "datatug", Env: env} // Yes false, Confirm nil
-
-	result, err := Install(context.Background(), []string{"ovdb"}, opts)
-	if err == nil {
-		t.Fatal("Install error = nil, want a non-interactive refusal before any target result")
-	}
-	if selfupdate.KindOf(err) != selfupdate.KindNonInteractive {
-		t.Errorf("KindOf(err) = %v, want KindNonInteractive", selfupdate.KindOf(err))
-	}
-	if len(result.Results) != 0 {
-		t.Errorf("result = %+v, want zero value on a batch-level refusal", result)
-	}
-}
-
-func TestInstall_ConfirmationGate_CallbackErrorPropagates(t *testing.T) {
-	sentinel := &selfupdate.Failure{Kind: selfupdate.KindNonInteractive, Err: errors.New("no tty")}
-	env := batchEnv(nil, "/home/alex/go/bin", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("no proc") }, noRunManaged)
-	opts := Options{HostID: "datatug", Env: env, Confirm: func([]string) (bool, error) { return false, sentinel }}
-
-	_, err := Install(context.Background(), []string{"ovdb"}, opts)
-	if !errors.Is(err, sentinel) && err != error(sentinel) {
-		if selfupdate.KindOf(err) != selfupdate.KindNonInteractive {
-			t.Errorf("Install error = %v, want the Confirm callback's own error propagated", err)
-		}
-	}
-}
-
-func TestInstall_ConfirmationGate_NamesOnlyPendingTargets(t *testing.T) {
-	// "ovdb" is already installed (excluded from confirmation); "datatug"
-	// is not (included) — REQ: confirmation-gate: "Targets that are
-	// already installed... are excluded from the question."
-	executables := map[string]bool{"/bin1/ovdb": true}
-	run := multiJSONRun(map[string]string{"ovdb": "1.0.0"})
-	env := batchEnv([]string{"/bin1"}, "/home/alex/go/bin", executables, run, noRunManaged)
-	var confirmedNames []string
-	opts := Options{HostID: "wb", Env: env, Confirm: func(names []string) (bool, error) {
-		confirmedNames = names
-		return false, nil
-	}}
-
-	_, err := Install(context.Background(), []string{"ovdb", "datatug"}, opts)
-	if err != nil {
-		t.Fatalf("Install error = %v", err)
-	}
-	if len(confirmedNames) != 1 || confirmedNames[0] != "datatug" {
-		t.Errorf("Confirm was asked about %v, want only [datatug]", confirmedNames)
-	}
-}
-
-// TestInstall_AcceptedBatchInstallsIndependently mirrors cli-install#ac:
+// TestExecute_AcceptedBatchInstallsIndependently mirrors cli-install#ac:
 // batch-reports-every-target: two Homebrew-classified targets, one whose
 // managed command succeeds and one whose fails — both get a result, in
 // order, and the earlier failure never stops the later target.
-func TestInstall_AcceptedBatchInstallsIndependently(t *testing.T) {
+func TestExecute_AcceptedBatchInstallsIndependently(t *testing.T) {
 	executables := map[string]bool{}
 	run := multiJSONRun(map[string]string{"ovdb": "2.0.0"})
 	runManaged := func(_ context.Context, exe string, args []string) error {
@@ -314,11 +497,16 @@ func TestInstall_AcceptedBatchInstallsIndependently(t *testing.T) {
 		return errors.New("brew: cask not found")
 	}
 	env := batchEnv([]string{"/opt/homebrew/bin"}, "/opt/homebrew/Caskroom/wb/1.0.0", executables, run, runManaged)
-	opts := Options{HostID: "wb", Env: env, Yes: true}
-
-	result, err := Install(context.Background(), []string{"ovdb", "datatug"}, opts)
+	opts := Options{HostID: "wb", Env: env}
+	plan, err := Plan(context.Background(), []string{"ovdb", "datatug"}, opts)
 	if err != nil {
-		t.Fatalf("Install error = %v", err)
+		t.Fatalf("Plan error = %v", err)
+	}
+
+	opts.Yes = true
+	result, err := Execute(context.Background(), plan, opts)
+	if err != nil {
+		t.Fatalf("Execute error = %v", err)
 	}
 	if len(result.Results) != 2 {
 		t.Fatalf("len(Results) = %d, want 2", len(result.Results))
@@ -336,17 +524,17 @@ func TestInstall_AcceptedBatchInstallsIndependently(t *testing.T) {
 	}
 }
 
-// TestInstall_DirectBatchOneFailsOthersSucceed follows the plan's own
+// TestExecute_DirectBatchOneFailsOthersSucceed follows the plan's own
 // worked example: `install a b c` where b fails to download, run with
 // --yes — a and c install, b's typed failure is reported, and the overall
 // command fails.
-func TestInstall_DirectBatchOneFailsOthersSucceed(t *testing.T) {
+func TestExecute_DirectBatchOneFailsOthersSucceed(t *testing.T) {
 	version := "1.2.3"
 	tag := "v1.2.3"
 	binContent := []byte("payload")
 	// ovdb's real catalog entry overrides ChecksumsName to a flat
 	// "checksums.txt" (see catalog_ovdb.go) and leaves AssetName at the
-	// shared GoReleaser-shaped default — Install() looks the target up in
+	// shared GoReleaser-shaped default — Plan() looks the target up in
 	// the real compiled catalog, so this fixture must match that entry
 	// exactly, not a hand-picked naming.
 	okAsset := fmt.Sprintf("ovdb_%s_%s_%s.tar.gz", version, runtime.GOOS, runtime.GOARCH)
@@ -371,7 +559,7 @@ func TestInstall_DirectBatchOneFailsOthersSucceed(t *testing.T) {
 	}
 
 	opts := Options{
-		HostID: "datatug", Env: env, Yes: true, Dir: destDir,
+		HostID: "datatug", Env: env, Dir: destDir,
 		ConfigureRelease: func(target Entry, cfg selfupdate.Config) selfupdate.Config {
 			srv := okServer
 			if target.ID == "ingitdb" {
@@ -384,9 +572,14 @@ func TestInstall_DirectBatchOneFailsOthersSucceed(t *testing.T) {
 		},
 	}
 
-	result, err := Install(context.Background(), []string{"ovdb", "ingitdb"}, opts)
+	plan, err := Plan(context.Background(), []string{"ovdb", "ingitdb"}, opts)
 	if err != nil {
-		t.Fatalf("Install error = %v", err)
+		t.Fatalf("Plan error = %v", err)
+	}
+	opts.Yes = true
+	result, err := Execute(context.Background(), plan, opts)
+	if err != nil {
+		t.Fatalf("Execute error = %v", err)
 	}
 	if len(result.Results) != 2 {
 		t.Fatalf("len(Results) = %d, want 2", len(result.Results))
@@ -400,17 +593,68 @@ func TestInstall_DirectBatchOneFailsOthersSucceed(t *testing.T) {
 	if !result.Failed() {
 		t.Error("BatchResult.Failed() = false, want true")
 	}
+
+	// S3: BatchFailure exposes every failed target, not just the first.
+	batchErr := result.Failure()
+	var bf *BatchFailure
+	if !errors.As(batchErr, &bf) {
+		t.Fatalf("result.Failure() = %v, want a *BatchFailure", batchErr)
+	}
+	if len(bf.Failures) != 1 || bf.Failures[0] != result.Results[1].Failure {
+		t.Errorf("BatchFailure.Failures = %v, want exactly ingitdb's own Failure", bf.Failures)
+	}
 }
 
-// --- declinedDestination -----------------------------------------------
+// --- Install (Plan + confirm + Execute convenience) ------------------------
 
-func TestDeclinedDestination(t *testing.T) {
-	direct := pendingTarget{method: MethodDirect, destDir: "/home/alex/.local/bin", entry: Entry{ID: "ovdb"}}
-	if got := declinedDestination(direct); got != "/home/alex/.local/bin/ovdb" {
-		t.Errorf("declinedDestination(direct) = %q", got)
+func TestInstall_PanicsOnUnknownHost(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("Install did not panic for a host id absent from the catalog")
+		}
+	}()
+	_, _ = Install(context.Background(), nil, Options{HostID: "nosuchhost"})
+}
+
+func TestInstall_DryRunNeverCallsExecute(t *testing.T) {
+	hostDir := "/opt/homebrew/Caskroom/wb/1.0.0"
+	env := batchEnv(nil, hostDir, nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("should not run") }, noRunManaged)
+	opts := Options{HostID: "wb", Env: env, DryRun: true} // no Confirm set: panics if Execute is ever reached
+
+	result, err := Install(context.Background(), []string{"ovdb"}, opts)
+	if err != nil {
+		t.Fatalf("Install error = %v", err)
 	}
-	homebrew := pendingTarget{method: MethodHomebrew, entry: Entry{ID: "ovdb"}}
-	if got := declinedDestination(homebrew); got != "" {
-		t.Errorf("declinedDestination(homebrew) = %q, want empty", got)
+	r := result.Results[0]
+	if r.Outcome != OutcomeDryRun || r.Method != MethodHomebrew {
+		t.Fatalf("Results[0] = %+v", r)
+	}
+}
+
+func TestInstall_UnknownNameNeverReachesExecute(t *testing.T) {
+	env := batchEnv(nil, "/usr/bin", nil, func(context.Context, string, []string) ([]byte, error) { return nil, nil }, noRunManaged)
+	opts := Options{HostID: "datatug", Env: env} // no Confirm/Yes: Execute would refuse if ever reached
+
+	result, err := Install(context.Background(), []string{"nosuchcli"}, opts)
+	if selfupdate.KindOf(err) != selfupdate.KindUnknownTarget {
+		t.Errorf("KindOf(err) = %v, want KindUnknownTarget", selfupdate.KindOf(err))
+	}
+	if len(result.Results) != 0 {
+		t.Errorf("result.Results = %v, want empty", result.Results)
+	}
+}
+
+func TestInstall_RealRunExecutesAfterPlan(t *testing.T) {
+	executables := map[string]bool{"/bin1/ovdb": true}
+	run := multiJSONRun(map[string]string{"ovdb": "1.0.0"})
+	env := batchEnv([]string{"/bin1"}, "/usr/bin", executables, run, noRunManaged)
+	opts := Options{HostID: "datatug", Env: env, Yes: true}
+
+	result, err := Install(context.Background(), []string{"ovdb"}, opts)
+	if err != nil {
+		t.Fatalf("Install error = %v", err)
+	}
+	if result.Results[0].Outcome != OutcomeAlreadyInstalled {
+		t.Errorf("Results[0] = %+v", result.Results[0])
 	}
 }

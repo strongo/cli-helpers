@@ -33,11 +33,23 @@ func TestDefaultPathDirs_FiltersRelativeAndEmpty(t *testing.T) {
 		}
 	})
 
+	// defaultPathDirs filters on the REAL path/filepath.IsAbs, which follows
+	// the build platform, not an injected goos (unlike this package's own
+	// goos-parameterized isAbsPath in destination.go) — so this fixture
+	// must supply absolute paths shaped for whatever platform actually
+	// runs the test, or the POSIX-only fixture this test used to hardcode
+	// filters out every entry and fails on a real Windows CI job (task-5
+	// review M12).
+	absA, absB := "/usr/bin", "/opt/bin"
+	if runtime.GOOS == "windows" {
+		absA, absB = `C:\usr\bin`, `C:\opt\bin`
+	}
+
 	sep := string(os.PathListSeparator)
-	_ = os.Setenv("PATH", strings.Join([]string{"/usr/bin", "relative/dir", "", "/opt/bin"}, sep))
+	_ = os.Setenv("PATH", strings.Join([]string{absA, "relative/dir", "", absB}, sep))
 
 	got := defaultPathDirs()
-	want := []string{"/usr/bin", "/opt/bin"}
+	want := []string{absA, absB}
 	if len(got) != len(want) {
 		t.Fatalf("defaultPathDirs() = %v, want %v", got, want)
 	}
@@ -180,6 +192,63 @@ func TestDefaultRun_CombinesOutputAndSetsNoColor(t *testing.T) {
 	}
 	if !strings.Contains(text, "err-line") {
 		t.Errorf("output = %q, want stderr combined into the result", text)
+	}
+}
+
+// M13: probing a target executes any binary named like a catalog id, so a
+// caller's own GH_TOKEN/GITHUB_TOKEN must never reach it.
+func TestProbeEnv_StripsTokenVars(t *testing.T) {
+	in := []string{"PATH=/bin", "GH_TOKEN=secret1", "GITHUB_TOKEN=secret2", "HOME=/home/alex", "GH_TOKEN_NOT_QUITE=keepme"}
+	got := probeEnv(in)
+	want := []string{"PATH=/bin", "HOME=/home/alex", "GH_TOKEN_NOT_QUITE=keepme"}
+	if len(got) != len(want) {
+		t.Fatalf("probeEnv() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("probeEnv()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestDefaultRun_StripsTokenVarsFromChildEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are POSIX-only")
+	}
+	origGH, hadGH := os.LookupEnv("GH_TOKEN")
+	origGithub, hadGithub := os.LookupEnv("GITHUB_TOKEN")
+	t.Cleanup(func() {
+		if hadGH {
+			_ = os.Setenv("GH_TOKEN", origGH)
+		} else {
+			_ = os.Unsetenv("GH_TOKEN")
+		}
+		if hadGithub {
+			_ = os.Setenv("GITHUB_TOKEN", origGithub)
+		} else {
+			_ = os.Unsetenv("GITHUB_TOKEN")
+		}
+	})
+	_ = os.Setenv("GH_TOKEN", "leaked-gh-token")
+	_ = os.Setenv("GITHUB_TOKEN", "leaked-github-token")
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "probe")
+	body := "#!/bin/sh\necho \"gh:[$GH_TOKEN] github:[$GITHUB_TOKEN]\"\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := defaultRun(context.Background(), script, nil)
+	if err != nil {
+		t.Fatalf("defaultRun() error = %v", err)
+	}
+	text := string(out)
+	if strings.Contains(text, "leaked") {
+		t.Errorf("child process saw a token var: %q", text)
+	}
+	if !strings.Contains(text, "gh:[] github:[]") {
+		t.Errorf("output = %q, want both token vars empty in the child", text)
 	}
 }
 

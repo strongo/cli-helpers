@@ -7,7 +7,22 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 )
+
+// planInstallTimeout bounds PlanInstall's release lookup so a stalled
+// GitHub response can never hang an `install` batch forever (task-5 review
+// M1), mirroring the 15 second budget
+// cli-install#req:upgrade-release-lookups-bounded gives its own per-target
+// lookup. context.WithTimeout takes the EARLIER of this and any deadline
+// the caller's own ctx already carries, so a caller with a tighter budget
+// is never loosened by this.
+const planInstallTimeout = 15 * time.Second
+
+// installNewTimeout bounds InstallNew's download+verify, larger than the
+// lookup budget above because a release archive is orders of magnitude
+// bigger than a releases-listing response.
+const installNewTimeout = 60 * time.Second
 
 // InstallResult is what InstallNew placed.
 type InstallResult struct {
@@ -23,18 +38,68 @@ type InstallResult struct {
 	Tag string
 }
 
-// InstallNew resolves this Config's latest stable release exactly as
-// Update's own manual self-replace path does
-// (REQ: latest-release-source, REQ: multi-product-repository), downloads and
-// verifies its asset for the host platform using the identical download,
-// checksum, and extraction code self-replace uses
-// (REQ: direct-release-install, REQ: download-matching-asset,
-// REQ: checksum-before-extract, REQ: unsupported-platform), and places the
-// verified binary at destPath with a no-replace operation
-// (REQ: install-never-overwrites): a file already at destPath — including
-// one that appears after a caller decided on destPath and before this call
-// finishes placing it — is never overwritten, and a failed install leaves
-// neither a partial destPath nor a staging file behind.
+// InstallPlan is the exact release a direct install will place, resolved
+// once by PlanInstall so a caller can show the version, tag and asset URL
+// details-before-install requires and get it confirmed, then pass that
+// SAME plan to InstallNew — never resolving "latest" a second time.
+//
+// This mirrors, for a fresh install, the "resolve once, pass the tag on"
+// contract self-update#req:update-at-classified-copy gives an existing
+// install's own upgrade path (Config's exposed latest-release lookup plus
+// Options' resolved-tag field): a caller that already asked the user to
+// confirm one version must never let a second, independent lookup install a
+// different one.
+type InstallPlan struct {
+	// Tag is the exact published release tag InstallNew will install.
+	Tag string
+	// Version is Tag's normalized (no leading "v", no TagPrefix) version.
+	Version string
+	// AssetURL is the exact release-asset URL InstallNew will download —
+	// the value details-before-install shows before any confirmation.
+	AssetURL string
+}
+
+// PlanInstall resolves this Config's latest stable release exactly as
+// InstallNew's own lookup used to (REQ: latest-release-source,
+// REQ: multi-product-repository, REQ: unsupported-platform), without
+// downloading, verifying or writing anything. The returned InstallPlan is
+// the exact release InstallNew(ctx, destPath, plan) will place when given
+// this same plan back — resolving nothing itself.
+func (c Config) PlanInstall(ctx context.Context) (InstallPlan, error) {
+	cfg := c.withDefaults()
+
+	if !cfg.platformSupported() {
+		return InstallPlan{}, &Failure{Kind: KindUnsupportedPlatform, Err: fmt.Errorf("no published asset for %s/%s", goosName, goarchName)}
+	}
+
+	lookupCtx, cancel := context.WithTimeout(ctx, planInstallTimeout)
+	defer cancel()
+	tag, err := cfg.latestStableTag(lookupCtx)
+	if err != nil {
+		return InstallPlan{}, &Failure{Kind: KindReleaseLookup, Err: err}
+	}
+	version := cfg.versionFromTag(tag)
+	asset := cfg.AssetName(cfg.BinaryName, version, goosName, goarchName)
+
+	return InstallPlan{Tag: tag, Version: version, AssetURL: cfg.DownloadURL(cfg.Repository, tag, asset)}, nil
+}
+
+// InstallNew downloads, verifies and places plan's release at destPath,
+// using the identical download, checksum, and extraction code self-replace
+// uses (REQ: direct-release-install, REQ: download-matching-asset,
+// REQ: checksum-before-extract), and places the verified binary at destPath
+// with a no-replace operation (REQ: install-never-overwrites): a file
+// already at destPath — including one that appears after a caller decided
+// on destPath and before this call finishes placing it — is never
+// overwritten, and a failed install leaves neither a partial destPath nor a
+// staging file behind.
+//
+// plan MUST come from a prior call to c.PlanInstall — InstallNew performs
+// no release lookup of its own and installs exactly plan.Tag, never
+// "whatever is latest now" (REQ: install-destination-follows-policy's
+// planning is a separate, one-time step from execution). A zero plan (an
+// empty Tag) is a caller error, reported as KindUnexpected rather than
+// silently resolving a tag InstallNew was never asked to resolve.
 //
 // Unlike Update, InstallNew never accepts a version pin
 // (REQ: direct-release-install: "pinning a target version is not offered")
@@ -50,20 +115,16 @@ type InstallResult struct {
 // A permission failure is reported as KindPermission and, like the rest of
 // this package, carries Path (REQ: permission-failure-identifiable); a file
 // already at destPath is reported as KindDestinationExists.
-func (c Config) InstallNew(ctx context.Context, destPath string) (InstallResult, error) {
+func (c Config) InstallNew(ctx context.Context, destPath string, plan InstallPlan) (InstallResult, error) {
 	cfg := c.withDefaults()
 
-	if !cfg.platformSupported() {
-		return InstallResult{}, &Failure{Kind: KindUnsupportedPlatform, Err: fmt.Errorf("no published asset for %s/%s", goosName, goarchName)}
+	if plan.Tag == "" {
+		return InstallResult{}, &Failure{Kind: KindUnexpected, Err: fmt.Errorf("InstallNew: plan.Tag is empty; resolve one with PlanInstall first")}
 	}
 
-	tag, err := cfg.latestStableTag(ctx)
-	if err != nil {
-		return InstallResult{}, &Failure{Kind: KindReleaseLookup, Err: err}
-	}
-	version := cfg.versionFromTag(tag)
-
-	tmpPath, err := cfg.downloadAndVerify(ctx, tag, version)
+	downloadCtx, cancel := context.WithTimeout(ctx, installNewTimeout)
+	defer cancel()
+	tmpPath, err := cfg.downloadAndVerify(downloadCtx, plan.Tag, plan.Version)
 	if err != nil {
 		return InstallResult{}, err
 	}
@@ -73,7 +134,7 @@ func (c Config) InstallNew(ctx context.Context, destPath string) (InstallResult,
 		return InstallResult{}, err
 	}
 
-	return InstallResult{Path: destPath, Version: version, Tag: tag}, nil
+	return InstallResult{Path: destPath, Version: plan.Version, Tag: plan.Tag}, nil
 }
 
 // placeNoReplace stages srcPath into destPath's own directory — reusing

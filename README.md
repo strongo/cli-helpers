@@ -24,6 +24,16 @@ caller (`ConfigureDetached`, `StartDetached`), and a clock-step-proof pid identi
 without cgo. Readiness, timeouts, lifecycle state, and recovery policy remain
 consumer-owned.
 
+`github.com/strongo/cli-helpers/cliinstall` gives every fleet CLI an
+`install` command: `<cli> install` lists the other fleet CLIs relevant to
+this one, each with its installed status; `<cli> install <name>...` shows
+details and installs them the same way the host itself was installed —
+`brew install --cask` on a Homebrew host, or a verified direct release
+download otherwise — reusing `selfupdate`'s own download, checksum and
+placement machinery rather than re-implementing it. See
+`spec/features/cli-install/README.md` for the full behavioral contract and
+[Install command](#install-command) below for wiring.
+
 ## Safety guarantees
 
 - **A managed install is never overwritten directly.** `Classify`
@@ -285,3 +295,76 @@ operation, and TTY check it makes is overridable — see `Config.ReleasesAPIURL`
 without a real terminal. The package's own test suite (this repo) exercises
 every `FailureKind`, every `Manager`, and both exit-code-contract shapes this
 way — see `*_test.go` for the pattern.
+
+## Install command
+
+`github.com/strongo/cli-helpers/cliinstall` gives every fleet CLI a shared
+`install` command: `<cli> install` lists the fleet CLIs relevant to that
+host, each with its live status (installed or not; version, labelled build
+date and short commit when installed), a one-line description and a
+one-line relevance note; `<cli> install <name>...` shows fuller details,
+confirms once, and installs consistently with how the host itself was
+installed — `brew install --cask` on a Homebrew host whose target publishes
+a cask for the host OS, otherwise a verified direct release download placed
+beside a manual host or in the per-user bin directory. Both are entirely
+offline and read-only until an install is actually confirmed
+(cli-install#req:list-offline-read-only).
+
+The catalog of installable CLIs and the host → target relevance texts are
+compiled into `cliinstall` itself, so a host sees exactly the catalog its own
+`cli-helpers` version was built with; see
+`spec/features/cli-install/README.md` for the full behavioral contract.
+
+A minimal CLI wires one `cliinstall/cobracmd.CommandOptions` and builds a
+Cobra command from it, the same shape as the self-update wiring above:
+
+```go
+package cli
+
+import (
+	"errors"
+
+	"github.com/spf13/cobra"
+
+	"github.com/strongo/cli-helpers/cliinstall/cobracmd"
+	"github.com/strongo/cli-helpers/selfupdate"
+)
+
+func newInstallCommand() *cobra.Command {
+	return cobracmd.New(cobracmd.CommandOptions{
+		HostID: "datatug", // this CLI's own catalog id
+		Errors: datatugInstallErrors{}, // maps *selfupdate.Failure/*cobracmd.UsageError onto datatug's own exit codes
+	})
+}
+
+// datatugInstallErrors implements cobracmd.ErrorMapper. Every host MUST map
+// the three new failure kinds explicitly — selfupdate.KindUnknownTarget,
+// KindNoInstallDir, KindDestinationExists — never through a self-update
+// default branch (cli-install#req:host-owned-exit-codes).
+type datatugInstallErrors struct{}
+
+func (datatugInstallErrors) Failure(err error) error {
+	var usage *cobracmd.UsageError
+	if errors.As(err, &usage) {
+		return exitError{code: 2, err: err} // invalid arguments
+	}
+	switch selfupdate.KindOf(err) {
+	case selfupdate.KindUnknownTarget:
+		return exitError{code: 2, err: err} // invalid arguments
+	case selfupdate.KindNoInstallDir, selfupdate.KindDestinationExists:
+		return exitError{code: 1, err: err} // general failure
+	default:
+		return exitError{code: 1, err: err}
+	}
+}
+```
+
+`cliinstall.InstallEnv.RunManaged` — the Homebrew cask command runner — is
+wired automatically by `cobracmd.New`'s command from the same
+`selfupdate/cliui.ManagedCommandRunner` self-update's own adapter uses, from
+the command's own `stdin`/`stdout`/`stderr`; a host never wires this itself.
+`--dry-run`, `--format text|json`, `--all`, `--yes/-y` and `--dir` are all
+registered automatically. A host with no Cobra dependency at all builds the
+same listing, details and install flow directly from `cliinstall.Probe`/
+`cliinstall.Install` plus the framework-neutral `cliinstall/cliui` writers,
+exactly as a hand-rolled self-update CLI does from `selfupdate/cliui`.
