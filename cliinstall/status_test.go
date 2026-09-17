@@ -664,6 +664,28 @@ fi
 	}
 }
 
+// --- resolvePath --------------------------------------------------------
+
+func TestResolvePath_NilEvalSymlinks(t *testing.T) {
+	if got := resolvePath("/a/b", Env{}); got != "/a/b" {
+		t.Errorf("resolvePath = %q, want the path unchanged", got)
+	}
+}
+
+func TestResolvePath_ErrorFallsBackToPath(t *testing.T) {
+	env := Env{EvalSymlinks: func(string) (string, error) { return "", errors.New("no such file") }}
+	if got := resolvePath("/a/b", env); got != "/a/b" {
+		t.Errorf("resolvePath = %q, want the path unchanged on error", got)
+	}
+}
+
+func TestResolvePath_ResolvesSymlink(t *testing.T) {
+	env := Env{EvalSymlinks: func(string) (string, error) { return "/a/resolved", nil }}
+	if got := resolvePath("/a/b", env); got != "/a/resolved" {
+		t.Errorf("resolvePath = %q, want /a/resolved", got)
+	}
+}
+
 // --- helpers ----------------------------------------------------------------
 
 func equalStrings(a, b []string) bool {

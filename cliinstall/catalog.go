@@ -72,6 +72,18 @@ type Entry struct {
 	// (cli-install#req:status-probe-order). Empty when no such pattern is
 	// declared for this CLI.
 	LegacyVersionSignatures []string
+
+	// SelfUpdateHooks reports whether this CLI's own `self-update` performs
+	// after-update work beyond the swap itself — a daemon restart, a skills
+	// re-sync — via selfupdate.Options.AfterUpdate
+	// (cli-install#req:self-update-hook-hint). Upgrade does not run another
+	// CLI's hooks itself; when a target other than the host has this set and
+	// is upgraded or has its manager command executed, the result carries a
+	// `<target> self-update` finish hint instead. True today for wb (daemon
+	// restart, skills sync) and codegrapher (skills sync) — verified against
+	// each repository's own self-update command wiring; every other catalog
+	// entry leaves this at its false zero value.
+	SelfUpdateHooks bool
 }
 
 // Config returns e's release identity as a selfupdate.Config for a build

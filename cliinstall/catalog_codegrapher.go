@@ -36,5 +36,10 @@ func init() {
 
 		CaskToken: "code-grapher/tap/codegrapher",
 		CaskOS:    []string{"darwin", "linux"},
+
+		// codegrapher's self-update AfterUpdate hook re-syncs skills
+		// (internal/cli/self_update.go) — cli-install#req:self-update-hook-
+		// hint.
+		SelfUpdateHooks: true,
 	})
 }

@@ -38,5 +38,10 @@ func init() {
 
 		CaskToken: "sneat-dev/tap/wb",
 		CaskOS:    []string{"darwin", "linux"},
+
+		// wb's self-update AfterUpdate hook restarts its daemon and syncs
+		// skills (cmd/wb/selfupdate.go) — cli-install#req:self-update-hook-
+		// hint.
+		SelfUpdateHooks: true,
 	})
 }

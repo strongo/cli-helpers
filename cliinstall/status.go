@@ -110,6 +110,17 @@ type Status struct {
 	// order they were found (cli-install#req:status-locate: "additional
 	// copies... count in text, full paths in JSON").
 	OtherPaths []string
+	// ResolvedPath is Path with its symlinks followed (cli-install#req:
+	// upgrade-per-target-policy: "The path passed for replacement MUST be
+	// the symlink-resolved path"), or exactly Path when Env.EvalSymlinks is
+	// nil, resolution fails, or Path is not itself a symlink. Empty when
+	// State is NotInstalled. Task-21's own upgrade planning is the reason
+	// this is carried on Status rather than re-resolved later: a symlink
+	// target can change between probing and upgrading, and re-resolving at
+	// upgrade time would silently reopen the same TOCTOU window
+	// cli-install#req:install-never-overwrites' no-replace placement exists
+	// to close on the install side.
+	ResolvedPath string
 
 	// Method classifies Path's install method, checking both Path itself
 	// and its symlink-resolved form against every manager declared
@@ -282,6 +293,7 @@ func probeOne(ctx context.Context, target Entry, dirs resolvedDirs, env Env, man
 	status.Path = primary
 	status.OnPath = primaryOnPath
 	status.OtherPaths = other
+	status.ResolvedPath = resolvePath(primary, env)
 	if !primaryOnPath {
 		status.Warnings = append(status.Warnings, fmt.Sprintf("%s is not on PATH", primary))
 	}
@@ -370,6 +382,23 @@ func allCatalogManagers() []selfupdate.Manager {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// resolvePath follows path's symlinks for Status.ResolvedPath, falling back
+// to path itself when env.EvalSymlinks is nil or resolution fails — the
+// same fallback selfupdate.Config.DetectSelf and this file's own
+// classifyLocated already use, so a path that can't be resolved is still
+// worth reporting as-is rather than leaving ResolvedPath empty for a
+// located copy.
+func resolvePath(path string, env Env) string {
+	if env.EvalSymlinks == nil {
+		return path
+	}
+	resolved, err := env.EvalSymlinks(path)
+	if err != nil {
+		return path
+	}
+	return resolved
 }
 
 // classifyLocated classifies path (as found, never resolved) and its
