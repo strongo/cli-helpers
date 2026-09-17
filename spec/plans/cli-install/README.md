@@ -550,9 +550,12 @@ the same library call, action and failure kind for manual,
 executable-managed, redirect-only, ambiguous and ahead hosts, including a host
 run from a path that is not first on `PATH`. Files:
 `cliinstall/cliui/upgrade*.go`, `cliinstall/cobracmd/upgrade*.go`, tests,
-`README.md`. Verification: full-repository coverage at 100%,
-`go mod tidy -diff`, `specscore spec lint`; this merge's minor tag is what
-consumers pin.
+`README.md`; a coordinator-ruled follow-up round (2026-09-17, see Review
+Disposition) additionally touched `cliinstall/upgrade.go` to delegate every
+per-target decision to `selfupdate.Config.UpdateAt`/`Config.Check` instead of
+re-implementing it, and `spec/features/cli-install/README.md`. Verification:
+full-repository coverage at 100%, `go mod tidy -diff`, `specscore spec lint`;
+this merge's minor tag is what consumers pin.
 
 ## Review Disposition
 
@@ -600,6 +603,8 @@ Adversarial review of the `upgrade` amendment (2 blocking, 5 serious, 6 minor):
 - M4 task-12 Verifies — fixed.
 - M5 ingitdb version line owner — fixed: task-14 owns bringing the founder's decision before task-19 (Open Questions).
 - M6 Windows rationale — fixed: host-last justified by the host's after-update hook; Windows needs nothing extra.
+
+Adversarial review of the landed task-21/task-22 branch (3 blocking, 6 serious, 8 minor; coordinator ruling 2026-09-17): root cause was `PlanUpgrade` re-implementing `UpdateAt`'s own ambiguous/managed/current/ahead decisions instead of calling it, so `self-update` and `upgrade <self>` diverged on an ambiguous host (B1), an already-current host's after-update hook (B2), and a managed host's failed lookup or already-current version (B3) — fixed by making every non-skipped target's outcome come from one real `Config.UpdateAt`/`Config.Check` call, mapped for display only, and adding `UpgradeOptions.DetectHost`/`VerifyManaged` seams (S1, S2); confirmation now names non-release builds and shows the asset URL (S3); the self-update-equals-upgrade-self equivalence test became a real matrix (manual, executable-managed, redirect-only, ahead, ambiguous, a real `--yes` replacement, and hook-invocation-count parity) built hermetically, network-isolated and PATH-isolated (S4, S5); `spec/features/cli-install/README.md` amended for REQ upgrade-per-target-policy, upgrade-release-lookups-bounded, upgrade-check, upgrade-batch-semantics and upgrade-skips-non-release-builds (S6, M1-M8, task-22 own file scope).
 
 ## Decisions
 

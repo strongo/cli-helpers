@@ -96,6 +96,20 @@ func noProc(context.Context, string, []string) ([]byte, error) {
 	return nil, errors.New("no such process")
 }
 
+// panicOnNilErrors is the regression fixture for the nil-mapFailure bug two
+// consumers hit building their own ErrorMapper: Failure documents that it
+// receives a non-nil error, so a mapper is entitled to assume that and,
+// like this one, panic otherwise. mapFailure itself is what must never call
+// it with nil.
+type panicOnNilErrors struct{}
+
+func (panicOnNilErrors) Failure(err error) error {
+	if err == nil {
+		panic("ErrorMapper.Failure called with a nil error")
+	}
+	return err
+}
+
 func newInstallCmd(t *testing.T, opts CommandOptions) *cobra.Command {
 	t.Helper()
 	if opts.Interactive == nil {
@@ -192,7 +206,7 @@ func TestRunE_NilErrorsReturnsUnwrapped(t *testing.T) {
 // --- resolveEnv ---------------------------------------------------------
 
 func TestResolveEnv_DefaultsWhenUnset(t *testing.T) {
-	env := resolveEnv(CommandOptions{})
+	env := resolveEnv(cliinstall.InstallEnv{})
 	if env.PathDirs == nil || env.HostDir == nil || env.IsExecutable == nil || env.Run == nil {
 		t.Errorf("resolveEnv with zero Env did not default to DefaultInstallEnv: %+v", env)
 	}
@@ -202,7 +216,7 @@ func TestResolveEnv_KeepsCallerEnv(t *testing.T) {
 	called := false
 	custom := fakeInstallEnv(nil, "", nil, noProc)
 	custom.PathDirs = func() []string { called = true; return nil }
-	env := resolveEnv(CommandOptions{Env: custom})
+	env := resolveEnv(custom)
 	env.PathDirs()
 	if !called {
 		t.Error("resolveEnv did not keep the caller-supplied Env")
@@ -407,6 +421,64 @@ func TestInstall_DryRun_JSON_SingleDocument(t *testing.T) {
 	}
 }
 
+// --- mapFailure never calls a configured ErrorMapper with a nil error ------
+
+// TestInstall_DryRun_NeverCallsMapperWithNil is the regression test for the
+// bug two consumers hit: a successful --dry-run reaches
+// `mapFailure(opts.Errors, plan.Failure())`, and plan.Failure() is nil for a
+// dry run with nothing failed — mapFailure must short-circuit before ever
+// calling panicOnNilErrors.Failure(nil).
+func TestInstall_DryRun_NeverCallsMapperWithNil(t *testing.T) {
+	srv := releaseServer(t, "ovdb", "0.5.0")
+	env := fakeInstallEnv(nil, "/host", nil, noProc)
+	cmd := newInstallCmd(t, CommandOptions{HostID: "datatug", Env: env, Errors: panicOnNilErrors{}, ConfigureRelease: configureReleaseFromServer(srv)})
+
+	_, _, err := runCmd(t, cmd, "ovdb", "--dry-run", "--dir", t.TempDir())
+	if err != nil {
+		t.Fatalf("err = %v, want nil (a successful dry run must never panic the ErrorMapper)", err)
+	}
+}
+
+// TestInstall_RealSuccess_NeverCallsMapperWithNil is the same regression for
+// `mapFailure(opts.Errors, result.Failure())` after a real, successful
+// Execute.
+func TestInstall_RealSuccess_NeverCallsMapperWithNil(t *testing.T) {
+	srv := releaseServer(t, "ovdb", "0.5.0")
+	destDir := t.TempDir()
+	destPath := filepath.Join(destDir, "ovdb")
+	if runtime.GOOS == "windows" {
+		destPath += ".exe"
+	}
+	run := func(_ context.Context, path string, args []string) ([]byte, error) {
+		if path != destPath || len(args) != 2 || args[0] != "version" || args[1] != "--json" {
+			return nil, errors.New("unexpected probe")
+		}
+		b, _ := json.Marshal(struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		}{Name: "ovdb", Version: "0.5.0"})
+		return b, nil
+	}
+	env := cliinstall.InstallEnv{
+		Env: cliinstall.Env{
+			PathDirs:     func() []string { return []string{destDir} },
+			HostDir:      func() (string, error) { return "", errors.New("no host dir") },
+			IsExecutable: func(p string) bool { info, err := os.Stat(p); return err == nil && !info.IsDir() },
+			EvalSymlinks: func(p string) (string, error) { return p, nil },
+			Run:          run,
+		},
+		UserHomeDir: func() (string, error) { return "/home/alex", nil },
+		Getenv:      func(string) string { return "" },
+		MkdirAll:    os.MkdirAll,
+	}
+	cmd := newInstallCmd(t, CommandOptions{HostID: "datatug", Env: env, Errors: panicOnNilErrors{}, ConfigureRelease: configureReleaseFromServer(srv)})
+
+	_, _, err := runCmd(t, cmd, "ovdb", "--yes", "--dir", destDir)
+	if err != nil {
+		t.Fatalf("err = %v, want nil (a successful install must never panic the ErrorMapper)", err)
+	}
+}
+
 // --- write-error propagation ------------------------------------------------
 
 // failingWriter always fails, exercising the JSON-encode-error branch of
@@ -459,10 +531,17 @@ func releaseServer(t *testing.T, id, version string) *httptest.Server {
 		t.Fatalf("catalog missing %s", id)
 	}
 	tag := "v" + version
-	ext := "tar.gz"
-	if runtime.GOOS == "windows" {
-		ext = "zip"
-	}
+	content := []byte("the installed binary")
+	// equivArchiveFixture (selfupdate_equivalence_test.go, same package)
+	// builds the archive FORMAT selfupdate.extractBinary actually reads
+	// per GOOS — a real .zip on windows, a real .tar.gz elsewhere — not
+	// just an asset NAME with the right extension on unreadable content.
+	// Naming the asset "*.zip" while always packing a .tar.gz (this
+	// fixture's own bug before it was ever run on Windows CI) made every
+	// TestInstall_RealSuccess_* test fail there with "open zip archive:
+	// zip: not a valid zip file".
+	archive, archiveExt := equivArchiveFixture(t, id, content)
+	ext := strings.TrimPrefix(archiveExt, ".")
 	assetName := entry.AssetName
 	if assetName == nil {
 		assetName = func(binary, version, goos, goarch string) string {
@@ -474,8 +553,6 @@ func releaseServer(t *testing.T, id, version string) *httptest.Server {
 		checksumsName = func(binary, version string) string { return fmt.Sprintf("%s_%s_checksums.txt", binary, version) }
 	}
 	asset := assetName(id, version, runtime.GOOS, runtime.GOARCH)
-	content := []byte("the installed binary")
-	archive := makeTarGzFixture(t, id, content)
 	checksum := sha256HexFixture(archive)
 	checksumsFile := checksumsName(id, version)
 	checksumsBody := fmt.Sprintf("%s  %s\n", checksum, asset)

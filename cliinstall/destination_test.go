@@ -93,7 +93,14 @@ func TestResolveDir_EvalSymlinksErrorFallsBackToUnresolved(t *testing.T) {
 func TestResolveDir_RelativeJoinsWorkingDirectory(t *testing.T) {
 	tmp := t.TempDir()
 	t.Chdir(tmp)
-	got := resolveDir("sub/dir", "linux", nil)
+	// getwdFunc (unlike goos) is never injected here — it always returns
+	// the REAL process cwd, shaped for the REAL host OS. Forcing goos to
+	// "linux" while running for real on Windows CI made resolveDir's own
+	// joinPath(goos, cwd, "sub/dir") join with "/" while `want` (built via
+	// the real, host-native filepath.Join) used "\", so they never
+	// matched — this test is about cwd-relative resolution on WHATEVER
+	// host actually runs it, so goos must track runtime.GOOS.
+	got := resolveDir("sub/dir", runtime.GOOS, nil)
 	want := filepath.Join(tmp, "sub", "dir")
 	if got != want {
 		t.Errorf("resolveDir = %q, want %q", got, want)
@@ -410,6 +417,18 @@ func installTestOpts(pathDirs []string, homeDir string, homeErr error, getenv fu
 }
 
 func TestPlanMethod_DirGivenAllowed(t *testing.T) {
+	// planMethod reads the package's own goosName seam directly (it takes
+	// no goos parameter), and this test's "/home/alex/bin" literal is a
+	// POSIX policy fixture: pin goosName to a POSIX value so isAbsPath and
+	// the denylist check exercise that policy regardless of the REAL host
+	// OS actually running the test (see TestProbe_WindowsExecutableSuffix
+	// for the same pattern) — "/home/alex/bin" is not windows-absolute at
+	// all, so left at its default on a real Windows CI run this test's own
+	// premise (an allowed, absolute --dir) would never hold.
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "linux"
+
 	host := Entry{ID: "host"}
 	opts := installTestOpts(nil, "", nil, func(string) string { return "" })
 	opts.Dir = "/home/alex/bin"
@@ -424,6 +443,13 @@ func TestPlanMethod_DirGivenAllowed(t *testing.T) {
 }
 
 func TestPlanMethod_DirGivenDenylistedNoFallback(t *testing.T) {
+	// Same reasoning as TestPlanMethod_DirGivenAllowed: "/usr/local/bin" is
+	// a POSIX denylist fixture, so goosName is pinned to POSIX regardless
+	// of the real host OS.
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "linux"
+
 	host := Entry{ID: "host"}
 	opts := installTestOpts(nil, "", nil, func(string) string { return "" })
 	opts.Dir = "/usr/local/bin"

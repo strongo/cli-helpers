@@ -17,6 +17,48 @@ import (
 
 // --- shared batch test fixtures ------------------------------------------
 
+// fakeAbsDir returns an absolute directory on the REAL host OS this test
+// process is actually running on, built from elems — never touching real
+// disk, since it only ever backs a fake Env.PathDirs/HostDir func (a test
+// that touches real disk uses t.TempDir() directly instead, which is
+// already host-OS-native).
+//
+// searchDirs' own filepath.IsAbs filter runs under the actual runtime.GOOS
+// the test process executes on, NEVER under a test's own goosName override
+// (the package-level var some tests force to a different value specifically
+// to exercise that OS's naming policy in isolation — see e.g.
+// TestProbe_WindowsExecutableSuffix). A hardcoded POSIX literal like
+// "/usr/bin" is not absolute on Windows (filepath.IsAbs requires a drive
+// letter or UNC root there), so on a REAL Windows test run searchDirs
+// silently dropped every such fake PATH/HostDir entry, and every target
+// behind it went unseen — this is what made most of this package's own
+// test suite report "not installed" (or panic on the resulting nil result)
+// the first time task-22's S5 ran it on real Windows CI.
+func fakeAbsDir(elems ...string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(`C:\fakeroot`, filepath.Join(elems...))
+	}
+	return "/" + filepath.Join(elems...)
+}
+
+// fakeAbsExe joins dir and name the same way probeOne itself locates an
+// executable: the ".exe" suffix decision follows goosName (the package's
+// own test seam over runtime.GOOS — see status.go's own doc comment on
+// it), exactly like probeOne's own filename construction, while the join
+// itself uses the REAL stdlib filepath.Join, exactly like probeOne's own
+// candidate construction (which is never goosName-parameterized — see
+// fakeAbsDir's own doc comment for why that must track the real host
+// GOOS). Most callers never override goosName, so the two coincide; a
+// caller that does (to exercise a specific OS's naming policy in
+// isolation, e.g. an ".exe" suffix test running for real on Linux CI)
+// still gets exactly what probeOne would search for.
+func fakeAbsExe(dir, name string) string {
+	if goosName == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join(dir, name)
+}
+
 // batchEnv builds an InstallEnv from plain maps/funcs, mirroring status_
 // test.go's fakeEnv but for the extra install-only dependencies
 // (cli-install#req:no-network-in-tests).
@@ -37,13 +79,15 @@ func batchEnv(pathDirs []string, hostDir string, executables map[string]bool, ru
 }
 
 // multiJSONRun answers "version --json" for any probed path by looking up
-// that path's base filename in versions, naming itself after that base —
-// so one Run func can back several distinct targets probed at different
-// paths in the same test.
+// that path's base filename (with any platform executable suffix trimmed
+// — probeOne appends ".exe" on windows, but versions' own keys are the
+// bare catalog id, e.g. "ovdb" not "ovdb.exe") in versions, naming itself
+// after that base — so one Run func can back several distinct targets
+// probed at different paths in the same test.
 func multiJSONRun(versions map[string]string) func(context.Context, string, []string) ([]byte, error) {
 	return func(_ context.Context, path string, args []string) ([]byte, error) {
 		if len(args) == 2 && args[0] == "version" && args[1] == "--json" {
-			base := filepath.Base(path)
+			base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 			if v, ok := versions[base]; ok {
 				b, _ := json.Marshal(buildinfo.VersionJSON{Name: base, Version: v})
 				return b, nil
@@ -138,9 +182,10 @@ func TestPlan_HostDirErrorTreatedAsEmpty(t *testing.T) {
 }
 
 func TestPlan_AlreadyInstalledIsNotReinstalled(t *testing.T) {
-	executables := map[string]bool{"/bin1/ovdb": true}
+	bin1 := fakeAbsDir("bin1")
+	executables := map[string]bool{fakeAbsExe(bin1, "ovdb"): true}
 	run := multiJSONRun(map[string]string{"ovdb": "1.2.3"})
-	env := batchEnv([]string{"/bin1"}, "/usr/bin", executables, run, noRunManaged)
+	env := batchEnv([]string{bin1}, fakeAbsDir("usr", "bin"), executables, run, noRunManaged)
 	opts := Options{HostID: "datatug", Env: env}
 
 	result, err := Plan(context.Background(), []string{"ovdb"}, opts)
@@ -169,9 +214,19 @@ func TestPlan_DedupesNames(t *testing.T) {
 }
 
 func TestPlan_UnrecognizedAtDestinationFails(t *testing.T) {
-	hostDir := "/home/alex/go/bin" // Manual, not denylisted
-	destPath := "/home/alex/go/bin/ovdb"
-	executables := map[string]bool{destPath: true}
+	hostDir := fakeAbsDir("home", "alex", "go", "bin") // Manual, not denylisted
+	// installFilePath is the SAME function Plan itself uses to build the
+	// planned destination path — computing the expected value through it
+	// (rather than a hand-typed parallel literal) keeps this assertion
+	// correct under any goosName/host-OS combination, including the
+	// ".exe" suffix windows adds. fakeAbsExe instead matches what
+	// probeOne's own real filepath.Join search looks for (see its own
+	// doc comment for why the two joiners can differ) — here, with
+	// goosName left at its default, both happen to agree, but the
+	// executables map key is built the way probeOne actually searches.
+	destPath := installFilePath(goosName, hostDir, "ovdb")
+	locatedPath := fakeAbsExe(hostDir, "ovdb")
+	executables := map[string]bool{locatedPath: true}
 	run := func(context.Context, string, []string) ([]byte, error) {
 		return []byte("somethingelse 9.9.9 (abc) 2026-01-01"), nil
 	}
@@ -202,9 +257,15 @@ func TestPlan_UnrecognizedAtDestinationFails_CaseVariant(t *testing.T) {
 	t.Cleanup(func() { goosName = origGOOS })
 	goosName = "darwin"
 
-	hostDir := "/Users/alex/go/bin"          // Manual, not denylisted; planning builds destPath from this
-	pathEntry := "/Users/Alex/go/bin"        // same directory, different case, found on PATH
-	locatedPath := "/Users/Alex/go/bin/ovdb" // located copy: pathEntry + id
+	hostDir := fakeAbsDir("Users", "alex", "go", "bin")   // Manual, not denylisted; planning builds destPath from this
+	pathEntry := fakeAbsDir("Users", "Alex", "go", "bin") // same directory, different case, found on PATH
+	// fakeAbsExe (not installFilePath): this must match what probeOne's
+	// own real filepath.Join search actually looks for, not Plan's
+	// separately-implemented destination-path joiner (see fakeAbsExe's
+	// own doc comment) — the test only asserts Outcome/Kind below, not an
+	// exact Failure.Path string, so the two joiners' possibly-differing
+	// separator styles never need to agree here.
+	locatedPath := fakeAbsExe(pathEntry, "ovdb")
 	executables := map[string]bool{locatedPath: true}
 	run := func(context.Context, string, []string) ([]byte, error) {
 		return []byte("somethingelse 9.9.9 (abc) 2026-01-01"), nil
@@ -226,13 +287,14 @@ func TestPlan_UnrecognizedElsewhereWarns(t *testing.T) {
 	// The unrecognized copy is on PATH at /bin1, earlier than the planned
 	// destination /home/alex/go/bin (not on PATH at all) — REQ:
 	// unrecognized-copy-not-trusted's shadowing case.
-	hostDir := "/home/alex/go/bin"
-	unrecognizedPath := "/bin1/ovdb"
+	hostDir := fakeAbsDir("home", "alex", "go", "bin")
+	bin1 := fakeAbsDir("bin1")
+	unrecognizedPath := fakeAbsExe(bin1, "ovdb")
 	executables := map[string]bool{unrecognizedPath: true}
 	run := func(context.Context, string, []string) ([]byte, error) {
 		return []byte("somethingelse 9.9.9 (abc) 2026-01-01"), nil
 	}
-	env := batchEnv([]string{"/bin1"}, hostDir, executables, run, noRunManaged)
+	env := batchEnv([]string{bin1}, hostDir, executables, run, noRunManaged)
 	srv := newReleaseServer(t, `[{"tag_name":"v1.0.0","prerelease":false,"draft":false}]`, nil)
 	opts := Options{HostID: "datatug", Env: env, ConfigureRelease: configureReleaseFromServer(srv)}
 
@@ -256,7 +318,16 @@ func TestPlan_UnrecognizedElsewhereWarns(t *testing.T) {
 }
 
 func TestPlan_HomebrewNeedsNoNetwork(t *testing.T) {
-	hostDir := "/opt/homebrew/Caskroom/wb/1.0.0"
+	// Homebrew casks are POSIX-only (wb/ovdb's own catalog entries declare
+	// CaskOS: darwin/linux, never windows), so caskSupportsOS only chooses
+	// MethodHomebrew there — pin goosName so this Homebrew-policy fixture
+	// exercises that regardless of the REAL host OS running the test (same
+	// pattern as TestPlanMethod_DirGivenAllowed).
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "darwin"
+
+	hostDir := fakeAbsDir("opt", "homebrew", "Caskroom", "wb", "1.0.0")
 	env := batchEnv(nil, hostDir, nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("should not run") }, noRunManaged)
 	opts := Options{HostID: "wb", Env: env}
 
@@ -405,9 +476,10 @@ func TestExecute_ConfirmationGate_NamesOnlyPendingTargets(t *testing.T) {
 	// "ovdb" is already installed (excluded from confirmation); "datatug"
 	// is not (included) — REQ: confirmation-gate: "Targets that are
 	// already installed... are excluded from the question."
-	executables := map[string]bool{"/bin1/ovdb": true}
+	bin1 := fakeAbsDir("bin1")
+	executables := map[string]bool{fakeAbsExe(bin1, "ovdb"): true}
 	run := multiJSONRun(map[string]string{"ovdb": "1.0.0"})
-	env := batchEnv([]string{"/bin1"}, "/home/alex/go/bin", executables, run, noRunManaged)
+	env := batchEnv([]string{bin1}, fakeAbsDir("home", "alex", "go", "bin"), executables, run, noRunManaged)
 	srv := newReleaseServer(t, `[{"tag_name":"v1.0.0","prerelease":false,"draft":false}]`, nil)
 	opts := Options{HostID: "wb", Env: env, ConfigureRelease: configureReleaseFromServer(srv)}
 	plan, err := Plan(context.Background(), []string{"ovdb", "datatug"}, opts)
@@ -461,7 +533,13 @@ func TestExecute_DeclinedKeepsStatusAndDestination(t *testing.T) {
 }
 
 func TestExecute_HomebrewPrintOnlyRedirectsWithoutRunning(t *testing.T) {
-	hostDir := "/opt/homebrew/Caskroom/wb/1.0.0"
+	// Same reasoning as TestPlan_HomebrewNeedsNoNetwork: pin goosName so
+	// this Homebrew-policy fixture works regardless of the real host OS.
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "darwin"
+
+	hostDir := fakeAbsDir("opt", "homebrew", "Caskroom", "wb", "1.0.0")
 	env := batchEnv(nil, hostDir, nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("should not run") }, noRunManaged)
 	opts := Options{HostID: "wb", Env: env}
 	plan, err := Plan(context.Background(), []string{"ovdb"}, opts)
@@ -486,17 +564,24 @@ func TestExecute_HomebrewPrintOnlyRedirectsWithoutRunning(t *testing.T) {
 // managed command succeeds and one whose fails — both get a result, in
 // order, and the earlier failure never stops the later target.
 func TestExecute_AcceptedBatchInstallsIndependently(t *testing.T) {
+	// Same reasoning as TestPlan_HomebrewNeedsNoNetwork: pin goosName so
+	// this Homebrew-policy fixture works regardless of the real host OS.
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "darwin"
+
 	executables := map[string]bool{}
+	homebrewBin := fakeAbsDir("opt", "homebrew", "bin")
 	run := multiJSONRun(map[string]string{"ovdb": "2.0.0"})
 	runManaged := func(_ context.Context, exe string, args []string) error {
 		token := args[len(args)-1]
 		if token == "openvaultdb/tap/ovdb" {
-			executables["/opt/homebrew/bin/ovdb"] = true
+			executables[fakeAbsExe(homebrewBin, "ovdb")] = true
 			return nil
 		}
 		return errors.New("brew: cask not found")
 	}
-	env := batchEnv([]string{"/opt/homebrew/bin"}, "/opt/homebrew/Caskroom/wb/1.0.0", executables, run, runManaged)
+	env := batchEnv([]string{homebrewBin}, fakeAbsDir("opt", "homebrew", "Caskroom", "wb", "1.0.0"), executables, run, runManaged)
 	opts := Options{HostID: "wb", Env: env}
 	plan, err := Plan(context.Background(), []string{"ovdb", "datatug"}, opts)
 	if err != nil {
@@ -537,8 +622,8 @@ func TestExecute_DirectBatchOneFailsOthersSucceed(t *testing.T) {
 	// shared GoReleaser-shaped default — Plan() looks the target up in
 	// the real compiled catalog, so this fixture must match that entry
 	// exactly, not a hand-picked naming.
-	okAsset := fmt.Sprintf("ovdb_%s_%s_%s.tar.gz", version, runtime.GOOS, runtime.GOARCH)
-	archive := makeTarGz(t, "ovdb", binContent)
+	archive, ext := makeArchive(t, "ovdb", binContent)
+	okAsset := fmt.Sprintf("ovdb_%s_%s_%s.%s", version, runtime.GOOS, runtime.GOARCH, ext)
 	checksums := fmt.Sprintf("%s  %s\n", sha256Hex(archive), okAsset)
 
 	okServer := newReleaseServer(t, `[{"tag_name":"`+tag+`","prerelease":false,"draft":false}]`, map[string][]byte{
@@ -549,7 +634,7 @@ func TestExecute_DirectBatchOneFailsOthersSucceed(t *testing.T) {
 
 	destDir := t.TempDir()
 	run := multiJSONRun(map[string]string{"ovdb": version})
-	env := batchEnv([]string{destDir}, "/nonexistent-host-dir", nil, run, noRunManaged)
+	env := batchEnv([]string{destDir}, fakeAbsDir("nonexistent-host-dir"), nil, run, noRunManaged)
 	// IsExecutable must reflect a real install landing in destDir so the
 	// post-install verification probe (and the batch's own PATH-based
 	// executable check) sees it.
@@ -617,7 +702,13 @@ func TestInstall_PanicsOnUnknownHost(t *testing.T) {
 }
 
 func TestInstall_DryRunNeverCallsExecute(t *testing.T) {
-	hostDir := "/opt/homebrew/Caskroom/wb/1.0.0"
+	// Same reasoning as TestPlan_HomebrewNeedsNoNetwork: pin goosName so
+	// this Homebrew-policy fixture works regardless of the real host OS.
+	origGOOS := goosName
+	t.Cleanup(func() { goosName = origGOOS })
+	goosName = "darwin"
+
+	hostDir := fakeAbsDir("opt", "homebrew", "Caskroom", "wb", "1.0.0")
 	env := batchEnv(nil, hostDir, nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("should not run") }, noRunManaged)
 	opts := Options{HostID: "wb", Env: env, DryRun: true} // no Confirm set: panics if Execute is ever reached
 
@@ -645,9 +736,10 @@ func TestInstall_UnknownNameNeverReachesExecute(t *testing.T) {
 }
 
 func TestInstall_RealRunExecutesAfterPlan(t *testing.T) {
-	executables := map[string]bool{"/bin1/ovdb": true}
+	bin1 := fakeAbsDir("bin1")
+	executables := map[string]bool{fakeAbsExe(bin1, "ovdb"): true}
 	run := multiJSONRun(map[string]string{"ovdb": "1.0.0"})
-	env := batchEnv([]string{"/bin1"}, "/usr/bin", executables, run, noRunManaged)
+	env := batchEnv([]string{bin1}, fakeAbsDir("usr", "bin"), executables, run, noRunManaged)
 	opts := Options{HostID: "datatug", Env: env, Yes: true}
 
 	result, err := Install(context.Background(), []string{"ovdb"}, opts)

@@ -469,9 +469,15 @@ A version is a non-release build when it is in the target's
 `+` build metadata (for example `0.20.3+dirty`), or is a Go pseudo-version.
 Under `--all` and in the no-args report such a copy MUST be reported as
 `skipped: non-release build` and MUST NOT be looked up, replaced, or counted as
-upgradeable. Named explicitly, it MUST be offered like any other target and
-included in the confirmation, whose text names it as a non-release build; with
-`--yes` it proceeds.
+upgradeable. Named explicitly, it MUST be looked up and offered unless its
+core version (ignoring the non-release marker — a `+dirty` suffix, a
+pseudo-version's own timestamp/commit suffix) already compares equal to the
+latest stable release, exactly as an ordinary manual target with that same
+core version would be a no-op (`0.20.3+dirty` named explicitly, with
+`0.20.3` itself latest, reports `already_current`, not a pending
+confirmation) — task-22 review M8. Otherwise it is included in the
+confirmation, whose text names it as a non-release build; with `--yes` it
+proceeds.
 
 #### REQ: upgrade-no-args-reports
 
@@ -479,34 +485,71 @@ included in the confirmation, whose text names it as a non-release build; with
 read-only report of [REQ: upgrade-check](#req-upgrade-check) over the `--all`
 target set and end with the next step, `<cli> upgrade --all` or
 `<cli> upgrade <name>`. It MUST exit successfully when every lookup succeeded,
-whether or not upgrades are available; when some lookups failed it MUST still
-report every target and then fail through the host's error mapper with the
-release-lookup failure. A bare verb that shows what would change, in one call,
-serves agents and people better than a usage error. Unlike `install` listing it
+whether or not upgrades are available and whether or not any target is
+refused as ambiguous — the bare report never calls the upgrades-available
+method at all, and, like `--check`, never fails merely because a target is
+refused; when some lookups failed it MUST still report every target and then
+fail through the host's error mapper with the release-lookup failure. A bare
+verb that shows what would change, in one call, serves agents and people
+better than a usage error. Unlike `install` listing it
 needs network access, so it is not offline.
 
 #### REQ: upgrade-per-target-policy
 
-Each target MUST be handled by the Self-Update Library's policy for its
-classified install, using that target's catalog managers. Classification of a
-non-host copy MUST match `DetectSelf`: managed when the found path or its
-symlink-resolved path matches a manager's markers, otherwise manual or
-ambiguous judged on the symlink-resolved path only. The path passed for
-replacement MUST be the symlink-resolved path, so a symlink is kept and a
-symlink into a non-install location (for example a source checkout) is
-ambiguous and refused.
+For every selected target that is installed and not skipped as a non-release
+build, the outcome MUST come from exactly one call to the Self-Update
+Library's own `Config.UpdateAt(ctx, detection, opts)` for that copy — plan,
+`--check` (via the library's own read-only `Config.Check`, since `UpdateAt`
+has no check-only mode) and `--dry-run` pass `opts.DryRun`; execute passes
+the resolved tag from that same lookup and a nil per-target confirm callback
+(task-22 review, coordinator ruling: "make equivalence STRUCTURAL"). `upgrade`
+MUST NOT re-implement `UpdateAt`'s own ambiguous, managed, already-current or
+ahead decisions; a writer maps `UpdateAt`'s returned `Outcome.Action` or
+`Failure` onto this feature's own per-target outcome token for display only.
+
+Classification of a non-host copy MUST match `DetectSelf`: managed when the
+found path or its symlink-resolved path matches a manager's markers,
+otherwise manual or ambiguous judged on the symlink-resolved path only. The
+host's own classification MUST be `DetectSelf` itself, not a rebuilt path
+(see [REQ: host-target-is-running-binary](#req-host-target-is-running-binary)).
+The path passed for replacement MUST be the symlink-resolved path, so a
+symlink is kept and a symlink into a non-install location (for example a
+source checkout) is ambiguous and refused.
+
+Because `UpdateAt` decides ambiguity before it ever compares versions, an
+ambiguous classification MUST be refused regardless of verdict — current,
+ahead, or available — never folded into `already_current` or `ahead`; a
+refused target's `Failure` MUST always carry
+[`KindAmbiguous`](../self-update/README.md#req-ambiguous-safe-default), and a
+refused target counts as a batch failure exactly like a failed one (same
+kind, same exit consequence a plain `self-update` on that install would
+reach) — see [REQ: upgrade-batch-semantics](#req-upgrade-batch-semantics).
+`--check` is the one exception: it never fails merely because a target is
+refused, matching `self-update --check`'s own `Config.Check`, which never
+consults classification at all — see
+[REQ: upgrade-check](#req-upgrade-check).
 
 | Status / classification | Behavior |
 |---|---|
-| `installed`, managed, redirect-only manager | report the manager's upgrade command per [REQ: managed-redirect-command](../self-update/README.md#req-managed-redirect-command) |
-| `installed`, managed, executable manager | run its structured argv after the batch confirmation per [REQ: managed-executable-command](../self-update/README.md#req-managed-executable-command) (for example `brew upgrade --cask ovdb`) |
-| `installed`, manual | verified atomic replacement of the resolved file per [REQ: download-matching-asset](../self-update/README.md#req-download-matching-asset), [REQ: checksum-before-extract](../self-update/README.md#req-checksum-before-extract), [REQ: atomic-replace](../self-update/README.md#req-atomic-replace), [REQ: post-swap-version-check](../self-update/README.md#req-post-swap-version-check) and [REQ: failure-leaves-working-binary](../self-update/README.md#req-failure-leaves-working-binary) |
-| `installed`, ambiguous | refused per [REQ: ambiguous-safe-default](../self-update/README.md#req-ambiguous-safe-default) with manual-update guidance naming the path |
-| `installed`, ahead of latest | reported with both versions, no action, per [REQ: ahead-of-latest](../self-update/README.md#req-ahead-of-latest) |
-| `installed`, already latest | no-op per [REQ: no-op-when-current](../self-update/README.md#req-no-op-when-current) |
+| `installed`, ambiguous | refused per [REQ: ambiguous-safe-default](../self-update/README.md#req-ambiguous-safe-default) with manual-update guidance naming the path, regardless of verdict |
+| `installed`, managed, redirect-only manager | report the manager's upgrade command per [REQ: managed-redirect-command](../self-update/README.md#req-managed-redirect-command), regardless of verdict (never a no-op even when already latest) |
+| `installed`, managed, executable manager, not ahead | run its structured argv after the batch confirmation per [REQ: managed-executable-command](../self-update/README.md#req-managed-executable-command) (for example `brew upgrade --cask ovdb`), regardless of whether the version already matches latest — [REQ: managed-availability-report](../self-update/README.md#req-managed-availability-report) forbids skipping a manager upgrade merely because the GitHub version equals the running one |
+| `installed`, managed, ahead of latest | reported with both versions, no action, per [REQ: ahead-of-latest](../self-update/README.md#req-ahead-of-latest) |
+| `installed`, manual, update available or undetermined-and-explicit | verified atomic replacement of the resolved file per [REQ: download-matching-asset](../self-update/README.md#req-download-matching-asset), [REQ: checksum-before-extract](../self-update/README.md#req-checksum-before-extract), [REQ: atomic-replace](../self-update/README.md#req-atomic-replace), [REQ: post-swap-version-check](../self-update/README.md#req-post-swap-version-check) and [REQ: failure-leaves-working-binary](../self-update/README.md#req-failure-leaves-working-binary) |
+| `installed`, manual, ahead of latest | reported with both versions, no action, per [REQ: ahead-of-latest](../self-update/README.md#req-ahead-of-latest) |
+| `installed`, manual, already latest | no-op per [REQ: no-op-when-current](../self-update/README.md#req-no-op-when-current); for the host, still runs its after-update hook for real (a real, non-dry-run `UpdateAt` call — `runAfterUpdate` skips the hook under `DryRun`, so this is a SEPARATE call from the one that reported the no-op under `--dry-run`/`--check`), never re-invoked a second time |
 | `installed`, non-release build under `--all` | skipped per [REQ: upgrade-skips-non-release-builds](#req-upgrade-skips-non-release-builds) |
 | `unrecognized` | never touched, reported per [REQ: unrecognized-copy-not-trusted](#req-unrecognized-copy-not-trusted) |
 | `not installed` | reported with the hint `<cli> install <name>`; not a failure |
+
+A failed release lookup follows `UpdateAt`'s own per-classification rule, not
+a rule `upgrade` invents: a manual target fails with the release-lookup kind
+([REQ: upgrade-release-lookups-bounded](#req-upgrade-release-lookups-bounded));
+a managed target's failed lookup is instead an advisory warning and the
+target still redirects or runs, per
+[REQ: managed-availability-report](../self-update/README.md#req-managed-availability-report)
+— `upgrade` MUST NOT apply manual's stricter rule to a managed target, or vice
+versa.
 
 `upgrade` offers no version pin or downgrade flag; `self-update --version` and
 `--allow-downgrade` remain the way to move one CLI to a specific release.
@@ -574,14 +617,43 @@ ingitdb MUST NOT gain one, because its `update` command edits records.
 
 `upgrade` MUST make at most one latest-release lookup per looked-up target, at
 most four concurrently, each bounded by a 15 second timeout, and MUST NOT look
-up releases for targets that are not installed, unrecognized, or skipped. When
+up releases for targets that are not installed, unrecognized, or skipped. This
+bounds the ONE search `upgrade` itself performs per target (a single retry on
+its own first attempt failing counts as the same one search, not a second —
+task-22 third review N1: without it, a transient failure could leave the tag
+`UpdateAt` resolves during planning uncarried, and Execute would search again
+independently). It does not bound `UpdateAt`'s own, separate re-verification
+that a resolved tag is still latest ([REQ: upgrade-resolves-release-once](#req-upgrade-resolves-release-once)),
+which runs once more during planning and once more during execution for a
+target that reaches both — so a single fully-executed target can cost on the
+order of three GitHub requests, not one; `--check` and `--dry-run` alone never
+reach the execution-time one. When
 `GH_TOKEN` or `GITHUB_TOKEN` is set, lookups to `api.github.com` MUST send it as
-a bearer token through the library's `HTTPClient` seam, and the token MUST NOT
-be sent to any other host or printed. A failed lookup MUST fail only that target
-with the release-lookup failure kind; when GitHub answers 403 or 429 with
-`X-RateLimit-Remaining: 0`, the message MUST say the API rate limit was reached
-and name `GH_TOKEN` as the remedy. The rest of the batch continues, and the
-command fails when any target failed.
+a bearer token — attached only over `https`, never to a plain-`http` request —
+through the library's `HTTPClient` seam, and this applies even when a host or
+`ConfigureRelease` supplies its own `HTTPClient`: its existing `Transport` MUST
+be wrapped, not bypassed, so the token and rate-limit message are never
+silently lost. The token MUST NOT be sent to any other host or printed. A
+failed lookup's severity follows `UpdateAt`'s own per-classification rule (see
+[REQ: upgrade-per-target-policy](#req-upgrade-per-target-policy)): it fails
+only a manual target, with the release-lookup failure kind; for a managed
+target it is instead an advisory warning that does not stop the redirect or
+manager run. When GitHub answers 403 or 429 with `X-RateLimit-Remaining: 0`,
+the message MUST say the API rate limit was reached, naming `GH_TOKEN` as the
+remedy only when no token was actually sent (a request that already carried
+one and was still rate-limited needs a different remedy). The rest of the
+batch continues, and the command fails when any target failed (including a
+refused/ambiguous one — see [REQ: upgrade-per-target-policy](#req-upgrade-per-target-policy)).
+
+Self-update's own default `HTTPClient` sends no bearer token at all — only
+`upgrade`'s target/host `Config`s gain one, through this REQ's own
+`HTTPClient`-wrapping seam. A CLI's plain `self-update` and its `upgrade
+<self>` can therefore diverge under rate limiting: `upgrade <self>` may
+still succeed on a token the standalone `self-update` invocation never sends
+(task-22 review M7). This is a known, accepted asymmetry, not a defect to
+silently work around by giving `selfupdate`'s own default client a token
+(out of scope for a `cliinstall`-only file set) — a future task may close
+it in `selfupdate` itself if the asymmetry proves costly in practice.
 
 #### REQ: upgrade-check
 
@@ -589,13 +661,27 @@ command fails when any target failed.
 reports, per target, the path, install method, manager and its upgrade command
 when there is one, current version, latest version and verdict, carrying the
 facts of [REQ: check-states-the-next-step](../self-update/README.md#req-check-states-the-next-step).
-It MUST NOT download, write, confirm or invoke a manager. When at least one
-looked-up target has an update available or an undetermined verdict, the Cobra
-adapter MUST call the host's error mapper's upgrades-available method with
-every such result, mirroring self-update's `UpdateAvailable` mapping. Targets
-that are ahead of latest or skipped as non-release builds MUST NOT count, so a
-machine with a source build does not signal upgrades forever. Failed lookups
-fail the command as in
+It MUST NOT download, write, confirm or invoke a manager — it calls the
+Self-Update Library's own read-only `Config.Check`, never `Config.UpdateAt`,
+so it can never reach a write or a hook regardless of verdict or install
+method. Because `Config.Check` does not take a classification at all, an
+ambiguous target is reported exactly like any other under `--check` — the
+same current/latest/verdict facts, an `install_method` of `ambiguous`, and a
+refused status — and MUST NOT fail the command on that account alone; only a
+genuine lookup failure does (see the next paragraph). This is the one place
+`--check`'s own failure predicate is narrower than
+[REQ: upgrade-per-target-policy](#req-upgrade-per-target-policy)'s general
+"a refused target counts as a batch failure" rule, matching `self-update
+--check` itself, which never fails for an ambiguous install either.
+
+When at least one looked-up target has an update available or an
+undetermined verdict, the Cobra adapter MUST call the host's error mapper's
+upgrades-available method with every such result, mirroring self-update's
+`UpdateAvailable` mapping — this includes a refused/ambiguous target whose
+verdict is available, since `--check` never suppresses that fact, only the
+refusal's own would-be failure. Targets that are ahead of latest or skipped
+as non-release builds MUST NOT count, so a machine with a source build does
+not signal upgrades forever. Failed lookups fail the command as in
 [REQ: upgrade-release-lookups-bounded](#req-upgrade-release-lookups-bounded),
 taking precedence over the upgrades-available signal.
 
@@ -614,7 +700,14 @@ installed, unrecognized, refused, dry run, declined, or failed) and for order
 except [REQ: host-upgraded-last](#req-host-upgraded-last), and
 [REQ: machine-readable-output](#req-machine-readable-output) with added fields
 `current`, `latest`, `verdict`, `action`, `command` and `resolved_path`.
-Redirect-only targets need no confirmation.
+Redirect-only targets need no confirmation. `refused` is listed separately
+from `failed` only as a DISPLAY token: for the purpose of "the command fails
+when at least one target failed" (inherited from
+[REQ: multi-target-batch](#req-multi-target-batch)), a refused target counts
+exactly like a failed one — see
+[REQ: upgrade-per-target-policy](#req-upgrade-per-target-policy)'s own
+ambiguous-failure rule — except under `--check`/the bare report, whose own
+narrower rule is [REQ: upgrade-check](#req-upgrade-check)'s.
 
 ### Consumer integration
 
@@ -786,9 +879,9 @@ Homebrew, and deviations; the behavior above is inherited, not restated.
 
 **Requirements:** cli-install#req:upgrade-per-target-policy, cli-install#req:upgrade-resolves-release-once, cli-install#req:upgrade-check, cli-install#req:host-owned-exit-codes
 
-**Given** installed targets that are Homebrew-managed with executable argv, Homebrew-managed redirect-only, Snap-managed via a `/snap/bin` shim, manual behind a `~/.local/bin` symlink into `~/go/bin`, a `~/.local/bin` symlink into a source checkout, and already current; and a release server that publishes a newer release between confirmation and replacement for one target
+**Given** installed targets that are Homebrew-managed with executable argv, Homebrew-managed redirect-only, Snap-managed via a `/snap/bin` shim, manual behind a `~/.local/bin` symlink into `~/go/bin`, a `~/.local/bin` symlink into a source checkout, manual and already current, and Homebrew-managed with executable argv and already current; and a release server that publishes a newer release between confirmation and replacement for one target
 **When** `upgrade` runs over them with confirmation, then with `--dry-run`, then with `--check`
-**Then** the executable manager's argv runs once after the single batch confirmation without a shell, redirect-only and Snap targets print their manager commands without confirmation, the `~/go/bin` file is replaced atomically after checksum verification while the symlink is kept, the source-checkout symlink is refused as ambiguous with guidance naming the resolved path, the current target is a no-op, each target's release was looked up once, and the target whose release moved fails with the release-lookup kind and nothing changed; the dry run and check change nothing and invoke no manager; and the check maps through the host's upgrades-available method.
+**Then** the executable manager's argv runs once after the single batch confirmation without a shell, redirect-only and Snap targets print their manager commands without confirmation, the `~/go/bin` file is replaced atomically after checksum verification while the symlink is kept, the source-checkout symlink is refused as ambiguous with guidance naming the resolved path regardless of its verdict, the manual current target is a no-op, the MANAGED current target still runs its executable manager's argv exactly as the available one does (never skipped merely because the version already matches — REQ: upgrade-per-target-policy), each target's release was looked up once, and the target whose release moved fails with the release-lookup kind and nothing changed; the dry run and check change nothing and invoke no manager; and the check maps through the host's upgrades-available method and never fails for the refused (ambiguous) target on that account alone.
 
 ### AC: self-update-equals-upgrade-self
 

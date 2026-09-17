@@ -368,3 +368,70 @@ registered automatically. A host with no Cobra dependency at all builds the
 same listing, details and install flow directly from `cliinstall.Probe`/
 `cliinstall.Install` plus the framework-neutral `cliinstall/cliui` writers,
 exactly as a hand-rolled self-update CLI does from `selfupdate/cliui`.
+
+## Upgrade command
+
+`cliinstall/cobracmd` also builds `upgrade`, the fleet-wide counterpart to a
+host's own `self-update`: `<cli> upgrade` (no arguments) reports every
+*installed* catalog CLI plus the host itself — current version, latest
+stable release, verdict and the exact command or destination an upgrade
+would use — without changing anything, and ends with the next step;
+`<cli> upgrade --all` and `<cli> upgrade <name>...` upgrade what the report
+showed, after one confirmation covering every target that would actually be
+replaced or have a manager command executed. `--check` reports the same way
+without applying anything; `--dry-run` walks the same decision path for
+named/`--all` targets without asking for confirmation. `upgrade --all` means
+every *installed* catalog id, not the host's own relevance matrix — a target
+that is merely relevant but not installed has nothing to upgrade.
+
+The host itself is always upgraded last, classified and versioned from its
+OWN `self-update` `Config` (never from a `PATH` probe of its own binary) —
+`<cli> self-update` and `<cli> upgrade <cli>` reach the exact same library
+call and report the same outcome (cli-install#req:self-update-equals-upgrade-self).
+A separate PATH copy of the host, if one exists, is reported as a warning
+and left untouched.
+
+```go
+package cli
+
+import (
+	"github.com/spf13/cobra"
+
+	"github.com/strongo/cli-helpers/cliinstall"
+	"github.com/strongo/cli-helpers/cliinstall/cobracmd"
+	"github.com/strongo/cli-helpers/selfupdate"
+)
+
+func newUpgradeCommand() *cobra.Command {
+	return cobracmd.NewUpgrade(cobracmd.UpgradeCommandOptions{
+		HostID: "datatug", // this CLI's own catalog id
+		Errors: datatugUpgradeErrors{}, // implements both cobracmd.ErrorMapper and cobracmd.UpgradeErrorMapper
+		// HostConfig is the SAME selfupdate.Config datatug's own self-update
+		// command builds — same Managers, same CurrentVersion, same release
+		// endpoints — so `upgrade datatug` and `self-update` agree by
+		// construction, not by convention.
+		HostConfig:      datatugSelfUpdateConfig(),
+		HostAfterUpdate: datatugAfterUpdate, // the SAME hook, if any, self-update passes
+	})
+}
+
+// datatugUpgradeErrors extends datatugInstallErrors (see above) with the
+// upgrades-available method cli-install#req:upgrade-check requires; a host
+// that implements only cobracmd.ErrorMapper simply never receives that call.
+type datatugUpgradeErrors struct{ datatugInstallErrors }
+
+func (datatugUpgradeErrors) UpgradesAvailable(results []cliinstall.UpgradeResult) error {
+	return exitError{code: 5, err: errors.New("upgrades available")} // datatug's own dedicated code, if it wants one
+}
+```
+
+`cliinstall.UpgradeOptions.Env.RunManaged` is wired automatically the same
+way install's is — from `selfupdate/cliui.ManagedCommandRunner`, never by
+the host. `--all`, `--check`, `--yes/-y`, `--dry-run` and `--format
+text|json` are registered automatically; there is no `--dir` (upgrade always
+acts on the copy status-probing already located) and no `update` alias
+(REQ: update-alias-policy — `self-update`'s own `update` alias, where one
+already ships, is unaffected). A host with no Cobra dependency at all builds
+the same report, dry-run and upgrade flow directly from
+`cliinstall.PlanUpgrade`/`CheckUpgrades`/`Upgrade` plus the framework-neutral
+`cliinstall/cliui` upgrade writers.

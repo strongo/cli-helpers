@@ -46,6 +46,12 @@ jobs:
           if ($uncovered.Count -ne 0) {
             throw "Windows directory-sync coverage is incomplete: $uncovered"
           }
+      # cliinstall's self-update-equals-upgrade-self equivalence test
+      # (TestSelfUpdateEqualsUpgradeSelf) builds and execs a real fixture
+      # binary to prove `self-update` and `upgrade <self>` agree — it had
+      # only ever run on ubuntu before this step existed.
+      - name: Test cliinstall/selfupdate upgrade equivalence (Windows)
+        run: go test -count=1 ./cliinstall/... ./selfupdate/...
 
   # daemonlifecycle's detach, pipe-EOF and process-identity tests exercise
   # each OS's own process model, so they run natively on all three. cgo is off
@@ -68,6 +74,16 @@ jobs:
           go-version-file: go.mod
       - name: Test daemonlifecycle
         run: go test -count=1 -v ./daemonlifecycle
+      # macOS has no other job that runs cliinstall/selfupdate — ubuntu
+      # already gets full coverage via strongo_workflow below, and Windows
+      # already gets its own run in windows_skillsync, so this step is
+      # macOS-only to avoid running the same tests three times over.
+      # cliinstall's self-update-equals-upgrade-self equivalence test
+      # (TestSelfUpdateEqualsUpgradeSelf) builds and execs a real fixture
+      # binary to prove `self-update` and `upgrade <self>` agree.
+      - name: Test cliinstall/selfupdate upgrade equivalence (macOS)
+        if: matrix.os == 'macos-latest'
+        run: go test -count=1 ./cliinstall/... ./selfupdate/...
 
   strongo_workflow:
     uses: strongo/cicd/.github/workflows/workflow.yml@main

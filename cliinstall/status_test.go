@@ -84,11 +84,12 @@ func TestProbe_NotInstalled(t *testing.T) {
 }
 
 func TestProbe_InstalledOnPath_FirstMatchIsPrimary(t *testing.T) {
+	bin1, bin2 := fakeAbsDir("bin1"), fakeAbsDir("bin2")
 	f := &fakeEnv{
-		pathDirs: []string{"/bin1", "/bin2"},
+		pathDirs: []string{bin1, bin2},
 		executables: map[string]bool{
-			filepath.Join("/bin1", "testcli"): true,
-			filepath.Join("/bin2", "testcli"): true,
+			fakeAbsExe(bin1, "testcli"): true,
+			fakeAbsExe(bin2, "testcli"): true,
 		},
 		run: jsonRun("testcli", "1.2.3", "abc123", "2026-01-01T00:00:00Z", buildinfo.DateSourceBuild),
 	}
@@ -97,13 +98,13 @@ func TestProbe_InstalledOnPath_FirstMatchIsPrimary(t *testing.T) {
 	if s.State != Installed {
 		t.Fatalf("State = %v, want Installed", s.State)
 	}
-	if s.Path != filepath.Join("/bin1", "testcli") {
+	if s.Path != fakeAbsExe(bin1, "testcli") {
 		t.Errorf("Path = %q, want /bin1 copy (first PATH match)", s.Path)
 	}
 	if !s.OnPath {
 		t.Errorf("OnPath = false, want true")
 	}
-	if want := []string{filepath.Join("/bin2", "testcli")}; !equalStrings(s.OtherPaths, want) {
+	if want := []string{fakeAbsExe(bin2, "testcli")}; !equalStrings(s.OtherPaths, want) {
 		t.Errorf("OtherPaths = %v, want %v", s.OtherPaths, want)
 	}
 	if len(s.Warnings) != 0 {
@@ -118,10 +119,11 @@ func TestProbe_InstalledOnPath_FirstMatchIsPrimary(t *testing.T) {
 }
 
 func TestProbe_HostDirOnly_NotOnPathWarning(t *testing.T) {
+	hostDir := fakeAbsDir("host")
 	f := &fakeEnv{
-		hostDir: "/host",
+		hostDir: hostDir,
 		executables: map[string]bool{
-			filepath.Join("/host", "testcli"): true,
+			fakeAbsExe(hostDir, "testcli"): true,
 		},
 		run: jsonRun("testcli", "9.9.9", "", "", ""),
 	}
@@ -130,7 +132,7 @@ func TestProbe_HostDirOnly_NotOnPathWarning(t *testing.T) {
 	if s.OnPath {
 		t.Errorf("OnPath = true, want false (found only in host dir)")
 	}
-	if s.Path != filepath.Join("/host", "testcli") {
+	if s.Path != fakeAbsExe(hostDir, "testcli") {
 		t.Errorf("Path = %q", s.Path)
 	}
 	found := false
@@ -158,15 +160,16 @@ func TestProbe_RelativePathEntryIgnored(t *testing.T) {
 }
 
 func TestProbe_DirFlagSearched(t *testing.T) {
+	custom := fakeAbsDir("custom")
 	f := &fakeEnv{
 		executables: map[string]bool{
-			filepath.Join("/custom", "testcli"): true,
+			fakeAbsExe(custom, "testcli"): true,
 		},
 		run: jsonRun("testcli", "1.0.0", "", "", ""),
 	}
-	got := Probe(context.Background(), []Entry{testEntry}, "/custom", f.env(), ProbeOptions{})
+	got := Probe(context.Background(), []Entry{testEntry}, custom, f.env(), ProbeOptions{})
 	s := got[0]
-	if s.State != Installed || s.Path != filepath.Join("/custom", "testcli") {
+	if s.State != Installed || s.Path != fakeAbsExe(custom, "testcli") {
 		t.Errorf("got %+v, want installed at /custom/testcli", s)
 	}
 	if s.OnPath {
@@ -191,10 +194,11 @@ func TestProbe_SameDirOnPathAndHostDir_Deduplicated(t *testing.T) {
 }
 
 func TestProbe_HostDirErrorSkipped(t *testing.T) {
+	bin1 := fakeAbsDir("bin1")
 	f := &fakeEnv{
-		pathDirs:    []string{"/bin1"},
+		pathDirs:    []string{bin1},
 		hostErr:     errors.New("cannot resolve host dir"),
-		executables: map[string]bool{filepath.Join("/bin1", "testcli"): true},
+		executables: map[string]bool{fakeAbsExe(bin1, "testcli"): true},
 		run:         jsonRun("testcli", "1.0.0", "", "", ""),
 	}
 	got := Probe(context.Background(), []Entry{testEntry}, "", f.env(), ProbeOptions{})
@@ -208,14 +212,15 @@ func TestProbe_WindowsExecutableSuffix(t *testing.T) {
 	t.Cleanup(func() { goosName = origGOOS })
 	goosName = "windows"
 
-	// Uses a POSIX-style absolute directory even though goosName is forced
-	// to "windows": filepath.IsAbs runs under the actual host GOOS this
-	// test executes on (this repository's tests always run on Linux/macOS
-	// CI), so a real "C:\..." path would be filtered out as non-absolute
-	// here. Only the ".exe" suffix decision is under test.
+	// fakeAbsDir builds an absolute directory shaped for the ACTUAL host
+	// GOOS this test executes on (filepath.IsAbs runs under that, not
+	// under goosName), so this works whether the test process itself is
+	// running on Linux, macOS, or a real Windows CI job — only the ".exe"
+	// suffix decision below is under test via the goosName override.
+	bin := fakeAbsDir("bin")
 	f := &fakeEnv{
-		pathDirs:    []string{"/bin"},
-		executables: map[string]bool{filepath.Join("/bin", "testcli.exe"): true},
+		pathDirs:    []string{bin},
+		executables: map[string]bool{filepath.Join(bin, "testcli.exe"): true},
 		run:         jsonRun("testcli", "1.0.0", "", "", ""),
 	}
 	got := Probe(context.Background(), []Entry{testEntry}, "", f.env(), ProbeOptions{})
@@ -223,7 +228,7 @@ func TestProbe_WindowsExecutableSuffix(t *testing.T) {
 	if s.State != Installed {
 		t.Fatalf("State = %v, want Installed (must search for the .exe suffix)", s.State)
 	}
-	if s.Path != filepath.Join("/bin", "testcli.exe") {
+	if s.Path != filepath.Join(bin, "testcli.exe") {
 		t.Errorf("Path = %q, want the .exe path", s.Path)
 	}
 }
@@ -248,9 +253,10 @@ func ids(statuses []Status) []string {
 // --- Probe: unrecognized / timeout ---------------------------------------
 
 func TestProbe_Unrecognized_NoStepMatches(t *testing.T) {
+	bin := fakeAbsDir("bin")
 	f := &fakeEnv{
-		pathDirs:    []string{"/bin"},
-		executables: map[string]bool{filepath.Join("/bin", "testcli"): true},
+		pathDirs:    []string{bin},
+		executables: map[string]bool{fakeAbsExe(bin, "testcli"): true},
 		run: func(_ context.Context, _ string, args []string) ([]byte, error) {
 			switch {
 			case len(args) == 2 && args[0] == "version" && args[1] == "--json":
@@ -274,9 +280,10 @@ func TestProbe_Unrecognized_NoStepMatches(t *testing.T) {
 }
 
 func TestProbe_Timeout(t *testing.T) {
+	bin := fakeAbsDir("bin")
 	f := &fakeEnv{
-		pathDirs:    []string{"/bin"},
-		executables: map[string]bool{filepath.Join("/bin", "testcli"): true},
+		pathDirs:    []string{bin},
+		executables: map[string]bool{fakeAbsExe(bin, "testcli"): true},
 		run: func(ctx context.Context, _ string, _ []string) ([]byte, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
@@ -315,11 +322,12 @@ func TestProbe_ConcurrencyBounded(t *testing.T) {
 		max     int
 	)
 	targets := make([]Entry, numTargets)
-	f := &fakeEnv{pathDirs: []string{"/bin"}, executables: map[string]bool{}}
+	bin := fakeAbsDir("bin")
+	f := &fakeEnv{pathDirs: []string{bin}, executables: map[string]bool{}}
 	for i := range targets {
 		id := fmt.Sprintf("cli%d", i)
 		targets[i] = Entry{ID: id}
-		f.executables[filepath.Join("/bin", id)] = true
+		f.executables[fakeAbsExe(bin, id)] = true
 	}
 	f.run = func(_ context.Context, _ string, args []string) ([]byte, error) {
 		mu.Lock()
@@ -546,12 +554,19 @@ func TestContainsPath(t *testing.T) {
 // --- searchDirs -------------------------------------------------------------
 
 func TestSearchDirs_OrderAndFiltering(t *testing.T) {
+	// searchDirs filters PathDirs entries on filepath.IsAbs under the REAL
+	// host GOOS this test executes on — "relative" must still be filtered
+	// on any OS, but "/p1"/"/p2" must be absolute on it too (a POSIX-only
+	// literal is not absolute on a real Windows CI run). hostDir and dir
+	// are appended unconditionally regardless of IsAbs, so they don't need
+	// the same treatment.
+	p1, p2 := fakeAbsDir("p1"), fakeAbsDir("p2")
 	f := &fakeEnv{
-		pathDirs: []string{"/p1", "relative", "/p2"},
+		pathDirs: []string{p1, "relative", p2},
 		hostDir:  "/host",
 	}
 	rd := searchDirs(f.env(), "/dirflag")
-	want := []string{"/p1", "/p2", "/host", "/dirflag"}
+	want := []string{p1, p2, "/host", "/dirflag"}
 	if !equalStrings(rd.dirs, want) {
 		t.Fatalf("dirs = %v, want %v", rd.dirs, want)
 	}
@@ -564,10 +579,11 @@ func TestSearchDirs_OrderAndFiltering(t *testing.T) {
 }
 
 func TestSearchDirs_NoDirFlag(t *testing.T) {
-	f := &fakeEnv{pathDirs: []string{"/p1"}, hostErr: errors.New("no host")}
+	p1 := fakeAbsDir("p1")
+	f := &fakeEnv{pathDirs: []string{p1}, hostErr: errors.New("no host")}
 	rd := searchDirs(f.env(), "")
-	if !equalStrings(rd.dirs, []string{"/p1"}) {
-		t.Errorf("dirs = %v, want [/p1]", rd.dirs)
+	if !equalStrings(rd.dirs, []string{p1}) {
+		t.Errorf("dirs = %v, want [%s]", rd.dirs, p1)
 	}
 }
 
