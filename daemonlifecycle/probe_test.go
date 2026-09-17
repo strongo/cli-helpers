@@ -385,11 +385,13 @@ func TestStartDetachedRetriesOnlyAcceptedFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = log.Close() }()
-	missing := filepath.Join(dir, "missing")
+	missing := filepath.Join(dir, "daemonlifecycle-missing-probe")
 	breakMissing := func(command *exec.Cmd) { command.Path = missing }
-	// Unix reports a missing executable as ENOENT, Windows as a failed lookup;
-	// both name the path.
-	isMissing := func(err error) bool { return err != nil && strings.Contains(err.Error(), missing) }
+	// Unix reports a missing executable as ENOENT, Windows as a failed lookup
+	// that quotes (and so escapes) the path; both contain its base name.
+	isMissing := func(err error) bool {
+		return err != nil && strings.Contains(err.Error(), filepath.Base(missing))
+	}
 	retryMissing := isMissing
 
 	process, err := startDetached(probeCommand("sleep", dir), log,
