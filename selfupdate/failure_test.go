@@ -24,11 +24,52 @@ func TestFailureKind_String(t *testing.T) {
 		{KindUnexpected, "unexpected"},
 		{KindManagedVersion, "managed_version"},
 		{KindManagedCommand, "managed_command"},
+		{KindUnknownTarget, "unknown_target"},
+		{KindNoInstallDir, "no_install_dir"},
+		{KindDestinationExists, "destination_exists"},
 		{FailureKind(999), "unknown"},
 	}
 	for _, c := range cases {
 		if got := c.k.String(); got != c.want {
 			t.Errorf("FailureKind(%d).String() = %q, want %q", c.k, got, c.want)
+		}
+	}
+}
+
+// cli-install#req-host-owned-exit-codes requires KindUnknownTarget,
+// KindNoInstallDir and KindDestinationExists to be "appended after the
+// existing kinds so existing values do not change" — every consumer's exit
+// mapper switches on these numeric values indirectly through the named
+// constants, but a future edit that inserts a new constant ABOVE
+// KindManagedCommand instead of appending below it would silently renumber
+// every kind after the insertion point. This test pins the exact int value
+// of every kind that existed before cli-install's three, and of the three
+// themselves, so such a mistake fails here instead of only surfacing as a
+// consumer's exit code silently changing.
+func TestFailureKind_ExistingValuesPinned(t *testing.T) {
+	cases := []struct {
+		k    FailureKind
+		want int
+	}{
+		{KindAmbiguous, 0},
+		{KindReleaseLookup, 1},
+		{KindDownload, 2},
+		{KindChecksum, 3},
+		{KindPermission, 4},
+		{KindNonInteractive, 5},
+		{KindDowngrade, 6},
+		{KindUnknownTag, 7},
+		{KindUnsupportedPlatform, 8},
+		{KindUnexpected, 9},
+		{KindManagedVersion, 10},
+		{KindManagedCommand, 11},
+		{KindUnknownTarget, 12},
+		{KindNoInstallDir, 13},
+		{KindDestinationExists, 14},
+	}
+	for _, c := range cases {
+		if got := int(c.k); got != c.want {
+			t.Errorf("%s = %d, want %d (a FailureKind value must never change once shipped)", c.k, got, c.want)
 		}
 	}
 }

@@ -57,6 +57,38 @@ const (
 	// KindManagedCommand means the executable manager runner or its required
 	// configuration failed. The underlying process error remains unwrap-able.
 	KindManagedCommand
+
+	// The three kinds below belong to the Install Command Library
+	// (cli-install, package cliinstall) built on top of this package, not to
+	// self-update itself (cli-install#req-host-owned-exit-codes: "Install
+	// failures MUST be the Self-Update Library's typed *selfupdate.Failure,
+	// extended with KindUnknownTarget, KindNoInstallDir and
+	// KindDestinationExists appended after the existing kinds so existing
+	// values do not change"). They live here, not in cliinstall, so every
+	// consumer keeps switching on one FailureKind type regardless of which
+	// package produced a given *Failure. They are appended strictly after
+	// KindManagedCommand — never inserted earlier — so no value any existing
+	// consumer already switches on changes meaning; see
+	// TestFailureKind_ExistingValuesPinned.
+
+	// KindUnknownTarget means a named install target is not a catalog id.
+	// Produced by cliinstall before any confirmation, network request, or
+	// write (cli-install#req-unknown-target-refused).
+	KindUnknownTarget
+	// KindNoInstallDir means no destination directory could be used for a
+	// direct install: the per-user bin directory is not on PATH, or the only
+	// available directory is refused by the destination denylist. Produced by
+	// cliinstall's destination policy (cli-install#req-per-user-bin-dir,
+	// cli-install#req-destination-denylist).
+	KindNoInstallDir
+	// KindDestinationExists means a direct install's chosen destination path
+	// is already occupied by a file this package will not overwrite,
+	// including one that appears after status was probed and before
+	// placement. Path is always set. Produced directly by this package's own
+	// InstallNew (cli-install#req-install-never-overwrites) as well as by
+	// cliinstall when an unrecognized copy already occupies the destination
+	// (cli-install#req-unrecognized-copy-not-trusted).
+	KindDestinationExists
 )
 
 // String renders the kind as a stable, lower_snake_case token suitable for
@@ -87,6 +119,12 @@ func (k FailureKind) String() string {
 		return "managed_version"
 	case KindManagedCommand:
 		return "managed_command"
+	case KindUnknownTarget:
+		return "unknown_target"
+	case KindNoInstallDir:
+		return "no_install_dir"
+	case KindDestinationExists:
+		return "destination_exists"
 	default:
 		return "unknown"
 	}
