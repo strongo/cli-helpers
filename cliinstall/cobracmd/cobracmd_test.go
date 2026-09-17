@@ -531,10 +531,17 @@ func releaseServer(t *testing.T, id, version string) *httptest.Server {
 		t.Fatalf("catalog missing %s", id)
 	}
 	tag := "v" + version
-	ext := "tar.gz"
-	if runtime.GOOS == "windows" {
-		ext = "zip"
-	}
+	content := []byte("the installed binary")
+	// equivArchiveFixture (selfupdate_equivalence_test.go, same package)
+	// builds the archive FORMAT selfupdate.extractBinary actually reads
+	// per GOOS — a real .zip on windows, a real .tar.gz elsewhere — not
+	// just an asset NAME with the right extension on unreadable content.
+	// Naming the asset "*.zip" while always packing a .tar.gz (this
+	// fixture's own bug before it was ever run on Windows CI) made every
+	// TestInstall_RealSuccess_* test fail there with "open zip archive:
+	// zip: not a valid zip file".
+	archive, archiveExt := equivArchiveFixture(t, id, content)
+	ext := strings.TrimPrefix(archiveExt, ".")
 	assetName := entry.AssetName
 	if assetName == nil {
 		assetName = func(binary, version, goos, goarch string) string {
@@ -546,8 +553,6 @@ func releaseServer(t *testing.T, id, version string) *httptest.Server {
 		checksumsName = func(binary, version string) string { return fmt.Sprintf("%s_%s_checksums.txt", binary, version) }
 	}
 	asset := assetName(id, version, runtime.GOOS, runtime.GOARCH)
-	content := []byte("the installed binary")
-	archive := makeTarGzFixture(t, id, content)
 	checksum := sha256HexFixture(archive)
 	checksumsFile := checksumsName(id, version)
 	checksumsBody := fmt.Sprintf("%s  %s\n", checksum, asset)

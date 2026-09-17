@@ -147,7 +147,10 @@ func equivReleaseServer(t *testing.T, tag string) *httptest.Server {
 // task-22 third review S5 first ran it on Windows) made "manual real
 // replacement (--yes)" fail there with "open zip archive: zip: not a valid
 // zip file" — extractBinary never even looks at a .tar.gz payload once
-// goos is windows.
+// goos is windows. cobracmd_test.go's own releaseServer (the install
+// command's fixture, same package) had the identical bug and now shares
+// this one helper rather than a second copy — "reuse selfupdate's asset-
+// name/extract logic, don't fork" (task-22 fourth review).
 func equivArchiveFixture(t *testing.T, binName string, content []byte) (archive []byte, ext string) {
 	t.Helper()
 	if runtime.GOOS != "windows" {

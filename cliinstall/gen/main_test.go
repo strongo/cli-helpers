@@ -269,7 +269,13 @@ func withFakeGH(t *testing.T, script string) {
 }
 
 func TestExecGH_Success(t *testing.T) {
-	withFakeGH(t, `echo -n "hello world"`)
+	// printf, not `echo -n`: POSIX leaves -n's meaning to `echo`
+	// unspecified, and macOS's /bin/sh (unlike Linux's, typically dash)
+	// does not treat it as a flag at all — it printed the literal "-n"
+	// (task-22 fourth review), which this fixture never actually needed
+	// anyway, since execGH's own bytes.TrimSpace already strips any
+	// trailing newline.
+	withFakeGH(t, `printf '%s' "hello world"`)
 	out, err := execGH("release", "view")
 	if err != nil {
 		t.Fatalf("execGH() = %v, want nil", err)

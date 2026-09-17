@@ -64,15 +64,22 @@ func TestDefaultHostDir_Success(t *testing.T) {
 	origExe, origEval := osExecutable, evalSymlinksFunc
 	t.Cleanup(func() { osExecutable, evalSymlinksFunc = origExe, origEval })
 
-	osExecutable = func() (string, error) { return "/opt/app/bin/mycli", nil }
+	// filepath.Dir/Clean normalize separators to the REAL host OS's own
+	// (backslash on windows), so a hardcoded "/opt/app/bin/mycli" literal
+	// compared byte-for-byte against defaultHostDir()'s result fails on a
+	// real Windows CI run even though defaultHostDir never checks
+	// filepath.IsAbs itself — fakeAbsDir/fakeAbsExe build both sides from
+	// the same OS-native join so they agree on any OS.
+	wantDir := fakeAbsDir("opt", "app", "bin")
+	osExecutable = func() (string, error) { return fakeAbsExe(wantDir, "mycli"), nil }
 	evalSymlinksFunc = func(p string) (string, error) { return p, nil }
 
 	dir, err := defaultHostDir()
 	if err != nil {
 		t.Fatalf("defaultHostDir() error = %v", err)
 	}
-	if dir != "/opt/app/bin" {
-		t.Errorf("defaultHostDir() = %q, want /opt/app/bin", dir)
+	if dir != wantDir {
+		t.Errorf("defaultHostDir() = %q, want %q", dir, wantDir)
 	}
 }
 
@@ -92,15 +99,16 @@ func TestDefaultHostDir_SymlinkResolutionFailsFallsBackToUnresolved(t *testing.T
 	origExe, origEval := osExecutable, evalSymlinksFunc
 	t.Cleanup(func() { osExecutable, evalSymlinksFunc = origExe, origEval })
 
-	osExecutable = func() (string, error) { return "/opt/app/bin/mycli", nil }
+	wantDir := fakeAbsDir("opt", "app", "bin")
+	osExecutable = func() (string, error) { return fakeAbsExe(wantDir, "mycli"), nil }
 	evalSymlinksFunc = func(string) (string, error) { return "", errors.New("cannot resolve") }
 
 	dir, err := defaultHostDir()
 	if err != nil {
 		t.Fatalf("defaultHostDir() error = %v, want nil (falls back to unresolved)", err)
 	}
-	if dir != "/opt/app/bin" {
-		t.Errorf("defaultHostDir() = %q, want /opt/app/bin", dir)
+	if dir != wantDir {
+		t.Errorf("defaultHostDir() = %q, want %q", dir, wantDir)
 	}
 }
 

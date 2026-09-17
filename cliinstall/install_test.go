@@ -2,6 +2,7 @@ package cliinstall
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -47,6 +48,36 @@ func makeTarGz(t *testing.T, binName string, content []byte) []byte {
 func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// makeArchive builds the single-binary archive selfupdate.extractBinary
+// actually reads for the CURRENT runtime.GOOS — a real .zip on windows, a
+// real .tar.gz (via makeTarGz) everywhere else — matching GoReleaser's own
+// per-platform archive convention (selfupdate/download.go's own doc
+// comment). Fixtures that named the asset "*.zip" (correctly, per goos)
+// but always packed a .tar.gz payload (this file's own bug before task-22
+// fourth review first ran these tests on Windows CI) made every direct-
+// install test fail there with "open zip archive: zip: not a valid zip
+// file" — extractBinary never even looks at a .tar.gz payload once goos is
+// windows.
+func makeArchive(t *testing.T, binName string, content []byte) (archive []byte, ext string) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return makeTarGz(t, binName, content), "tar.gz"
+	}
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	fw, err := zw.Create(binName + ".exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes(), "zip"
 }
 
 // newReleaseServer serves a releases listing at /releases and, for each key
@@ -145,12 +176,14 @@ func TestPlanDirectResult_Success(t *testing.T) {
 	target := Entry{ID: "ovdb", Repository: "openvaultdb/ovdb"}
 	opts := Options{ConfigureRelease: configureReleaseFromServer(srv)}
 
-	got := planDirectResult(context.Background(), target, "/home/alex/.local/bin", Status{}, nil, opts)
+	dir := fakeAbsDir("home", "alex", ".local", "bin")
+	got := planDirectResult(context.Background(), target, dir, Status{}, nil, opts)
 	if got.Outcome != OutcomeDryRun || got.Method != MethodDirect {
 		t.Fatalf("planDirectResult = %+v", got)
 	}
-	if got.Destination != "/home/alex/.local/bin/ovdb" {
-		t.Errorf("Destination = %q", got.Destination)
+	// installFilePath is the same function planDirectResult itself uses.
+	if want := installFilePath(goosName, dir, "ovdb"); got.Destination != want {
+		t.Errorf("Destination = %q, want %q", got.Destination, want)
 	}
 	if got.Version != "1.2.3" || got.Tag != "v1.2.3" {
 		t.Errorf("Version/Tag = %q/%q", got.Version, got.Tag)
@@ -222,12 +255,8 @@ func directInstallFixture(t *testing.T) (*httptest.Server, []byte, string, strin
 	version := "1.2.3"
 	tag := "v1.2.3"
 	binContent := []byte("the installed binary")
-	ext := "tar.gz"
-	if runtime.GOOS == "windows" {
-		ext = "zip"
-	}
+	archive, ext := makeArchive(t, "ovdb", binContent)
 	asset := fmt.Sprintf("ovdb_%s_%s_%s.%s", version, runtime.GOOS, runtime.GOARCH, ext)
-	archive := makeTarGz(t, "ovdb", binContent)
 	checksums := fmt.Sprintf("%s  %s\n", sha256Hex(archive), asset)
 	srv := newReleaseServer(t, `[{"tag_name":"`+tag+`","prerelease":false,"draft":false}]`, map[string][]byte{
 		"/" + tag + "/" + asset:                           archive,
@@ -392,11 +421,12 @@ func TestExecuteHomebrewInstall_RunManagedFails(t *testing.T) {
 
 func TestExecuteHomebrewInstall_Success(t *testing.T) {
 	jr := jsonRun("ovdb", "1.2.3", "abc", "2026-01-01T00:00:00Z", buildinfo.DateSourceBuild)
+	homebrewBin := fakeAbsDir("opt", "homebrew", "bin")
 	env := InstallEnv{
 		Env: Env{
 			HostDir:      noHostDir,
-			PathDirs:     func() []string { return []string{"/opt/homebrew/bin"} },
-			IsExecutable: func(p string) bool { return p == "/opt/homebrew/bin/ovdb" },
+			PathDirs:     func() []string { return []string{homebrewBin} },
+			IsExecutable: func(p string) bool { return p == fakeAbsExe(homebrewBin, "ovdb") },
 			Run:          jr,
 		},
 		RunManaged: func(context.Context, string, []string) error { return nil },
@@ -417,13 +447,15 @@ func TestExecuteHomebrewInstall_Success(t *testing.T) {
 
 func TestVerifyInstalled_DirectMatch(t *testing.T) {
 	jr := jsonRun("ovdb", "1.2.3", "abc", "2026-01-01T00:00:00Z", buildinfo.DateSourceBuild)
+	bin := fakeAbsDir("bin")
+	destPath := fakeAbsExe(bin, "ovdb")
 	env := Env{
 		HostDir:      noHostDir,
-		PathDirs:     func() []string { return []string{"/bin"} },
-		IsExecutable: func(p string) bool { return p == "/bin/ovdb" },
+		PathDirs:     func() []string { return []string{bin} },
+		IsExecutable: func(p string) bool { return p == destPath },
 		Run:          jr,
 	}
-	status, warnings := verifyInstalled(context.Background(), Entry{ID: "ovdb"}, Options{Env: InstallEnv{Env: env}}, MethodDirect, "/bin/ovdb", "1.2.3")
+	status, warnings := verifyInstalled(context.Background(), Entry{ID: "ovdb"}, Options{Env: InstallEnv{Env: env}}, MethodDirect, destPath, "1.2.3")
 	if status.State != Installed {
 		t.Fatalf("status.State = %v, want Installed", status.State)
 	}
@@ -463,13 +495,15 @@ func TestVerifyInstalled_HomebrewVerificationFailedNamesQuarantine(t *testing.T)
 
 func TestVerifyInstalled_VersionMismatch(t *testing.T) {
 	jr := jsonRun("ovdb", "9.9.9", "", "", "")
+	bin := fakeAbsDir("bin")
+	destPath := fakeAbsExe(bin, "ovdb")
 	env := Env{
 		HostDir:      noHostDir,
-		PathDirs:     func() []string { return []string{"/bin"} },
-		IsExecutable: func(p string) bool { return p == "/bin/ovdb" },
+		PathDirs:     func() []string { return []string{bin} },
+		IsExecutable: func(p string) bool { return p == destPath },
 		Run:          jr,
 	}
-	_, warnings := verifyInstalled(context.Background(), Entry{ID: "ovdb"}, Options{Env: InstallEnv{Env: env}}, MethodDirect, "/bin/ovdb", "1.2.3")
+	_, warnings := verifyInstalled(context.Background(), Entry{ID: "ovdb"}, Options{Env: InstallEnv{Env: env}}, MethodDirect, destPath, "1.2.3")
 	found := false
 	for _, w := range warnings {
 		if strings.Contains(w, "9.9.9") {
@@ -483,16 +517,18 @@ func TestVerifyInstalled_VersionMismatch(t *testing.T) {
 
 func TestVerifyInstalled_DifferentCopyOnPath(t *testing.T) {
 	jr := jsonRun("ovdb", "1.2.3", "", "", "")
+	other := fakeAbsDir("other")
+	otherPath := fakeAbsExe(other, "ovdb")
 	env := Env{
 		HostDir:      noHostDir,
-		PathDirs:     func() []string { return []string{"/other"} },
-		IsExecutable: func(p string) bool { return p == "/other/ovdb" },
+		PathDirs:     func() []string { return []string{other} },
+		IsExecutable: func(p string) bool { return p == otherPath },
 		Run:          jr,
 	}
-	_, warnings := verifyInstalled(context.Background(), Entry{ID: "ovdb"}, Options{Env: InstallEnv{Env: env}}, MethodDirect, "/bin/ovdb", "1.2.3")
+	_, warnings := verifyInstalled(context.Background(), Entry{ID: "ovdb"}, Options{Env: InstallEnv{Env: env}}, MethodDirect, fakeAbsExe(fakeAbsDir("bin"), "ovdb"), "1.2.3")
 	found := false
 	for _, w := range warnings {
-		if strings.Contains(w, "/other/ovdb") {
+		if strings.Contains(w, otherPath) {
 			found = true
 		}
 	}
@@ -503,10 +539,11 @@ func TestVerifyInstalled_DifferentCopyOnPath(t *testing.T) {
 
 func TestVerifyInstalled_HomebrewSuccessSkipsDirectOnlyChecks(t *testing.T) {
 	jr := jsonRun("ovdb", "1.2.3", "", "", "")
+	homebrewBin := fakeAbsDir("opt", "homebrew", "bin")
 	env := Env{
 		HostDir:      noHostDir,
-		PathDirs:     func() []string { return []string{"/opt/homebrew/bin"} },
-		IsExecutable: func(p string) bool { return p == "/opt/homebrew/bin/ovdb" },
+		PathDirs:     func() []string { return []string{homebrewBin} },
+		IsExecutable: func(p string) bool { return p == fakeAbsExe(homebrewBin, "ovdb") },
 		Run:          jr,
 	}
 	status, warnings := verifyInstalled(context.Background(), Entry{ID: "ovdb"}, Options{Env: InstallEnv{Env: env}}, MethodHomebrew, "", "")

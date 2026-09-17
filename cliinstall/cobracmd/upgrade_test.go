@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -14,6 +16,21 @@ import (
 	"github.com/strongo/cli-helpers/cliinstall"
 	"github.com/strongo/cli-helpers/selfupdate"
 )
+
+// execName appends the real host OS's own executable suffix (".exe" on
+// windows, none elsewhere) — cliinstall's own probeOne search (package
+// cliinstall, unexported, not reachable from here) decides this the same
+// way, via its own goosName test seam; this package can only ever see the
+// REAL runtime.GOOS since it has no access to that seam, so these fixtures
+// never override it either. A fixture that wrote its "old" binary at
+// ".../bin/ovdb" while probeOne searched for ".../bin/ovdb.exe" on a real
+// Windows CI run would never find it at all (task-22 fourth review).
+func execName(base string) string {
+	if runtime.GOOS == "windows" {
+		return base + ".exe"
+	}
+	return base
+}
 
 // --- fixtures --------------------------------------------------------------
 
@@ -154,11 +171,11 @@ func TestUpgradeReport_Bare_PrintsReportAndNextStep(t *testing.T) {
 // its transition line is looked up and shown even without --all or --check.
 func TestUpgradeReport_Bare_IncludesInstalledTargets(t *testing.T) {
 	srv := releaseServer(t, "ovdb", "0.5.0")
-	destDir := t.TempDir() + "/bin"
+	destDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	destPath := destDir + "/ovdb"
+	destPath := filepath.Join(destDir, execName("ovdb"))
 	if err := os.WriteFile(destPath, []byte("old"), 0o755); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}
@@ -180,11 +197,11 @@ func TestUpgradeReport_Bare_IncludesInstalledTargets(t *testing.T) {
 
 func TestUpgradeReport_Bare_NeverCallsUpgradesAvailable(t *testing.T) {
 	srv := releaseServer(t, "ovdb", "0.5.0")
-	destDir := t.TempDir() + "/bin"
+	destDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	destPath := destDir + "/ovdb"
+	destPath := filepath.Join(destDir, execName("ovdb"))
 	if err := os.WriteFile(destPath, []byte("old"), 0o755); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}
@@ -239,11 +256,11 @@ func TestUpgradeReport_Bare_FailsOnLookupFailure(t *testing.T) {
 
 func TestUpgradeCheck_CallsUpgradesAvailableForAvailableTargets(t *testing.T) {
 	srv := releaseServer(t, "ovdb", "0.5.0")
-	destDir := t.TempDir() + "/bin"
+	destDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	destPath := destDir + "/ovdb"
+	destPath := filepath.Join(destDir, execName("ovdb"))
 	if err := os.WriteFile(destPath, []byte("old"), 0o755); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}
@@ -274,11 +291,11 @@ func TestUpgradeCheck_CallsUpgradesAvailableForAvailableTargets(t *testing.T) {
 
 func TestUpgradeCheck_AheadAndUpToDateNeverCountAsAvailable(t *testing.T) {
 	srv := releaseServer(t, "ovdb", "0.5.0")
-	destDir := t.TempDir() + "/bin"
+	destDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	destPath := destDir + "/ovdb"
+	destPath := filepath.Join(destDir, execName("ovdb"))
 	if err := os.WriteFile(destPath, []byte("old"), 0o755); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}
@@ -309,11 +326,11 @@ func TestUpgradeCheck_AheadAndUpToDateNeverCountAsAvailable(t *testing.T) {
 // TestUpgradeCheck_AheadAndUpToDateNeverCountAsAvailable).
 func TestUpgradeCheck_SkipsTargetsWithNoLookup(t *testing.T) {
 	srv := releaseServer(t, "ovdb", "0.5.0")
-	destDir := t.TempDir() + "/bin"
+	destDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	destPath := destDir + "/ovdb"
+	destPath := filepath.Join(destDir, execName("ovdb"))
 	if err := os.WriteFile(destPath, []byte("old"), 0o755); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}
@@ -345,11 +362,11 @@ func TestUpgradeCheck_SkipsTargetsWithNoLookup(t *testing.T) {
 // that opted in.
 func TestUpgradeCheck_PlainErrorMapperNeverCallsUpgradesAvailable(t *testing.T) {
 	srv := releaseServer(t, "ovdb", "0.5.0")
-	destDir := t.TempDir() + "/bin"
+	destDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	destPath := destDir + "/ovdb"
+	destPath := filepath.Join(destDir, execName("ovdb"))
 	if err := os.WriteFile(destPath, []byte("old"), 0o755); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}
@@ -415,11 +432,11 @@ func TestUpgradeCheck_UnknownTarget_JSON_WriteErrorIsMapped(t *testing.T) {
 
 func TestUpgradeCheck_JSON_SingleDocument(t *testing.T) {
 	srv := releaseServer(t, "ovdb", "0.5.0")
-	destDir := t.TempDir() + "/bin"
+	destDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	destPath := destDir + "/ovdb"
+	destPath := filepath.Join(destDir, execName("ovdb"))
 	if err := os.WriteFile(destPath, []byte("old"), 0o755); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}
@@ -487,11 +504,11 @@ func TestUpgrade_TwoErrorMappersYieldDifferentExitCodesForSameFailure(t *testing
 
 func TestUpgrade_NonInteractiveWithoutYesRefuses(t *testing.T) {
 	srv := releaseServer(t, "ovdb", "0.5.0")
-	destDir := t.TempDir() + "/bin"
+	destDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	destPath := destDir + "/ovdb"
+	destPath := filepath.Join(destDir, execName("ovdb"))
 	if err := os.WriteFile(destPath, []byte("old"), 0o755); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}
@@ -511,11 +528,11 @@ func TestUpgrade_NonInteractiveWithoutYesRefuses(t *testing.T) {
 
 func TestUpgrade_DryRun_PrintsReportOnceAndNoConfirmPrompt(t *testing.T) {
 	srv := releaseServer(t, "ovdb", "0.5.0")
-	destDir := t.TempDir() + "/bin"
+	destDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	destPath := destDir + "/ovdb"
+	destPath := filepath.Join(destDir, execName("ovdb"))
 	if err := os.WriteFile(destPath, []byte("old"), 0o755); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}
@@ -548,11 +565,11 @@ func TestUpgrade_DryRun_PrintsReportOnceAndNoConfirmPrompt(t *testing.T) {
 
 func TestUpgrade_DryRun_JSON_SingleDocument(t *testing.T) {
 	srv := releaseServer(t, "ovdb", "0.5.0")
-	destDir := t.TempDir() + "/bin"
+	destDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	destPath := destDir + "/ovdb"
+	destPath := filepath.Join(destDir, execName("ovdb"))
 	if err := os.WriteFile(destPath, []byte("old"), 0o755); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}
@@ -581,11 +598,11 @@ func TestUpgrade_DryRun_JSON_SingleDocument(t *testing.T) {
 
 func TestUpgrade_DryRun_JSON_WriteErrorIsMapped(t *testing.T) {
 	srv := releaseServer(t, "ovdb", "0.5.0")
-	destDir := t.TempDir() + "/bin"
+	destDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	destPath := destDir + "/ovdb"
+	destPath := filepath.Join(destDir, execName("ovdb"))
 	if err := os.WriteFile(destPath, []byte("old"), 0o755); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}
@@ -611,11 +628,11 @@ func TestUpgrade_DryRun_JSON_WriteErrorIsMapped(t *testing.T) {
 // not reachable from this package) closely enough for this test's purposes.
 func ovdbUpgradeFixture(t *testing.T) (destPath string, env cliinstall.InstallEnv, configureRelease func(cliinstall.Entry, selfupdate.Config) selfupdate.Config) {
 	t.Helper()
-	destDir := t.TempDir() + "/bin"
+	destDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	dest := destDir + "/ovdb"
+	dest := filepath.Join(destDir, execName("ovdb"))
 	if err := os.WriteFile(dest, []byte("old-binary"), 0o755); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}
@@ -722,11 +739,11 @@ func TestUpgrade_RealSuccess_JSON_FinalWriteErrorIsMapped(t *testing.T) {
 
 func TestUpgrade_DryRun_NeverCallsMapperWithNil(t *testing.T) {
 	srv := releaseServer(t, "ovdb", "0.5.0")
-	destDir := t.TempDir() + "/bin"
+	destDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	destPath := destDir + "/ovdb"
+	destPath := filepath.Join(destDir, execName("ovdb"))
 	if err := os.WriteFile(destPath, []byte("old"), 0o755); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}

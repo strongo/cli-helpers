@@ -631,7 +631,7 @@ func TestPlanUpgrade_UnknownNameFailsWholeBatch(t *testing.T) {
 		probed = true
 		return nil, errors.New("must not be called")
 	}
-	env := batchEnv(nil, "/opt/cover100", nil, run, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, run, noRunManaged)
 	opts := UpgradeOptions{HostID: "cover100", Env: env}
 
 	result, err := PlanUpgrade(context.Background(), []string{"nosuchcli", "ovdb"}, opts)
@@ -654,8 +654,8 @@ func TestPlanUpgrade_UnknownNameFailsWholeBatch(t *testing.T) {
 
 func TestPlanUpgrade_NotInstalledAndUnrecognized(t *testing.T) {
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/usr/bin/ovdb": true},
+		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true},
 		func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("no match") },
 		noRunManaged,
 	)
@@ -678,8 +678,8 @@ func TestPlanUpgrade_NotInstalledAndUnrecognized(t *testing.T) {
 
 func TestCheckUpgrades_NotInstalledAndUnrecognized(t *testing.T) {
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/usr/bin/ovdb": true},
+		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true},
 		func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("no match") },
 		noRunManaged,
 	)
@@ -752,15 +752,15 @@ func TestCheckUpgrades_HostDetectFails(t *testing.T) {
 
 func TestPlanUpgrade_NonReleaseBuildSkippedUnderAll(t *testing.T) {
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/usr/bin/ovdb": true},
-		jsonRunFor("/usr/bin/ovdb", "ovdb", "0.20.3+dirty"),
+		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"), "ovdb", "0.20.3+dirty"),
 		noRunManaged,
 	)
 	opts := UpgradeOptions{
 		HostID: "cover100", All: true, Env: env,
 		HostConfig: selfupdate.Config{BinaryName: "cover100", CurrentVersion: "dev"},
-		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, fakeAbsExe(fakeAbsDir("opt", "cover100"), "cover100")),
 	}
 
 	result, err := PlanUpgrade(context.Background(), nil, opts)
@@ -791,11 +791,11 @@ func TestPlanUpgrade_NonReleaseBuildSkippedUnderAll(t *testing.T) {
 }
 
 func TestCheckUpgrades_NonReleaseBuildSkippedUnderAll(t *testing.T) {
-	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
 	opts := UpgradeOptions{
 		HostID: "cover100", All: true, Env: env,
 		HostConfig: selfupdate.Config{BinaryName: "cover100", CurrentVersion: "dev"},
-		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, fakeAbsExe(fakeAbsDir("opt", "cover100"), "cover100")),
 	}
 	result, err := CheckUpgrades(context.Background(), nil, opts)
 	if err != nil {
@@ -809,9 +809,9 @@ func TestCheckUpgrades_NonReleaseBuildSkippedUnderAll(t *testing.T) {
 func TestPlanUpgrade_NonReleaseBuildProceedsWhenExplicit(t *testing.T) {
 	srv := upgradeReleaseServer(t, map[string]string{"ovdb": releasesJSON("v1.0.0")}, nil)
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/usr/bin/ovdb": true},
-		jsonRunFor("/usr/bin/ovdb", "ovdb", "dev"),
+		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"), "ovdb", "dev"),
 		noRunManaged,
 	)
 	opts := UpgradeOptions{HostID: "cover100", Env: env, ConfigureRelease: configureUpgradeRelease(srv)}
@@ -836,9 +836,9 @@ func TestPlanUpgrade_NonReleaseBuildProceedsWhenExplicit(t *testing.T) {
 
 func TestPlanUpgrade_AllSelectsInstalledPlusHost(t *testing.T) {
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/usr/bin/ovdb": true},
-		jsonRunFor("/usr/bin/ovdb", "ovdb", "1.0.0"),
+		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"), "ovdb", "1.0.0"),
 		noRunManaged,
 	)
 	srv := upgradeReleaseServer(t, map[string]string{"ovdb": releasesJSON("v1.0.0"), "cover100": releasesJSON("v1.0.0")}, nil)
@@ -846,7 +846,7 @@ func TestPlanUpgrade_AllSelectsInstalledPlusHost(t *testing.T) {
 		HostID: "cover100", All: true, Env: env,
 		ConfigureRelease: configureUpgradeRelease(srv),
 		HostConfig:       hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
-		DetectHost:       fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+		DetectHost:       fakeDetectHost(selfupdate.Manual, nil, fakeAbsExe(fakeAbsDir("opt", "cover100"), "cover100")),
 	}
 
 	result, err := PlanUpgrade(context.Background(), nil, opts)
@@ -868,12 +868,12 @@ func TestPlanUpgrade_AllSelectsInstalledPlusHost(t *testing.T) {
 }
 
 func TestPlanUpgrade_BareReportBehavesLikeAll(t *testing.T) {
-	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("none") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("none") }, noRunManaged)
 	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.0.0")}, nil)
 	opts := UpgradeOptions{
 		HostID: "cover100", Env: env, // All left false, names left nil
 		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
-		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, fakeAbsExe(fakeAbsDir("opt", "cover100"), "cover100")),
 	}
 
 	result, err := PlanUpgrade(context.Background(), nil, opts)
@@ -892,12 +892,12 @@ func TestPlanUpgrade_BareReportBehavesLikeAll(t *testing.T) {
 }
 
 func TestCheckUpgrades_BareReportBehavesLikeAll(t *testing.T) {
-	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("none") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("none") }, noRunManaged)
 	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.1.0")}, nil)
 	opts := UpgradeOptions{
 		HostID: "cover100", Env: env,
 		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
-		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, fakeAbsExe(fakeAbsDir("opt", "cover100"), "cover100")),
 	}
 	result, err := CheckUpgrades(context.Background(), nil, opts)
 	if err != nil {
@@ -915,8 +915,8 @@ func TestCheckUpgrades_BareReportBehavesLikeAll(t *testing.T) {
 
 func TestPlanUpgrade_AlreadyCurrentAndAhead(t *testing.T) {
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/usr/bin/ovdb": true, "/usr/bin/synchestra": true},
+		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true, fakeAbsExe(fakeAbsDir("usr", "bin"), "synchestra"): true},
 		multiJSONRun(map[string]string{"ovdb": "1.0.0", "synchestra": "9.9.9"}),
 		noRunManaged,
 	)
@@ -943,8 +943,8 @@ func TestPlanUpgrade_AlreadyCurrentAndAhead(t *testing.T) {
 
 func TestCheckUpgrades_AlreadyCurrentAndAhead(t *testing.T) {
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/usr/bin/ovdb": true, "/usr/bin/synchestra": true},
+		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true, fakeAbsExe(fakeAbsDir("usr", "bin"), "synchestra"): true},
 		multiJSONRun(map[string]string{"ovdb": "1.0.0", "synchestra": "9.9.9"}),
 		noRunManaged,
 	)
@@ -968,12 +968,12 @@ func TestCheckUpgrades_AlreadyCurrentAndAhead(t *testing.T) {
 
 func TestPlanUpgrade_ManagedRedirectAndExecutable(t *testing.T) {
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/opt/homebrew/bin/ingitdb": true, "/opt/homebrew/bin/wb": true},
+		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("opt", "homebrew", "bin"), "ingitdb"): true, fakeAbsExe(fakeAbsDir("opt", "homebrew", "bin"), "wb"): true},
 		multiJSONRun(map[string]string{"ingitdb": "1.0.0", "wb": "1.0.0"}),
 		noRunManaged,
 	)
-	env.PathDirs = func() []string { return []string{"/opt/homebrew/bin"} }
+	env.PathDirs = func() []string { return []string{fakeAbsDir("opt", "homebrew", "bin")} }
 	env.EvalSymlinks = func(p string) (string, error) { return p, nil }
 	srv := upgradeReleaseServer(t, map[string]string{
 		"ingitdb": releasesJSON("v2.0.0"),
@@ -1001,9 +1001,9 @@ func TestPlanUpgrade_ManagedRedirectAndExecutable(t *testing.T) {
 // never skipped merely because the version already matches.
 func TestPlanUpgrade_ManagedUpToDateStillOffered(t *testing.T) {
 	env := batchEnv(
-		[]string{"/opt/homebrew/bin"}, "/opt/cover100",
-		map[string]bool{"/opt/homebrew/bin/wb": true},
-		jsonRunFor("/opt/homebrew/bin/wb", "wb", "2.0.0"),
+		[]string{fakeAbsDir("opt", "homebrew", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("opt", "homebrew", "bin"), "wb"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("opt", "homebrew", "bin"), "wb"), "wb", "2.0.0"),
 		noRunManaged,
 	)
 	env.EvalSymlinks = func(p string) (string, error) { return p, nil }
@@ -1037,8 +1037,8 @@ func TestPlanUpgrade_AmbiguousRefusedRegardlessOfVerdict(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			env := batchEnv(nil, "/opt/cover100", map[string]bool{"/opt/weird/ovdb": true}, jsonRunFor("/opt/weird/ovdb", "ovdb", c.version), noRunManaged)
-			env.PathDirs = func() []string { return []string{"/opt/weird"} }
+			env := batchEnv(nil, fakeAbsDir("opt", "cover100"), map[string]bool{fakeAbsExe(fakeAbsDir("opt", "weird"), "ovdb"): true}, jsonRunFor(fakeAbsExe(fakeAbsDir("opt", "weird"), "ovdb"), "ovdb", c.version), noRunManaged)
+			env.PathDirs = func() []string { return []string{fakeAbsDir("opt", "weird")} }
 			srv := upgradeReleaseServer(t, map[string]string{"ovdb": releasesJSON("v2.0.0")}, nil)
 			opts := UpgradeOptions{HostID: "cover100", Env: env, ConfigureRelease: configureUpgradeRelease(srv)}
 
@@ -1060,8 +1060,8 @@ func TestPlanUpgrade_AmbiguousRefusedRegardlessOfVerdict(t *testing.T) {
 }
 
 func TestCheckUpgrades_AmbiguousRefusedButNeverFailsTheReport(t *testing.T) {
-	env := batchEnv(nil, "/opt/cover100", map[string]bool{"/opt/weird/ovdb": true}, jsonRunFor("/opt/weird/ovdb", "ovdb", "1.0.0"), noRunManaged)
-	env.PathDirs = func() []string { return []string{"/opt/weird"} }
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), map[string]bool{fakeAbsExe(fakeAbsDir("opt", "weird"), "ovdb"): true}, jsonRunFor(fakeAbsExe(fakeAbsDir("opt", "weird"), "ovdb"), "ovdb", "1.0.0"), noRunManaged)
+	env.PathDirs = func() []string { return []string{fakeAbsDir("opt", "weird")} }
 	srv := upgradeReleaseServer(t, map[string]string{"ovdb": releasesJSON("v2.0.0")}, nil)
 	opts := UpgradeOptions{HostID: "cover100", Env: env, ConfigureRelease: configureUpgradeRelease(srv)}
 
@@ -1089,9 +1089,9 @@ func TestCheckUpgrades_AmbiguousRefusedButNeverFailsTheReport(t *testing.T) {
 
 func TestPlanUpgrade_LookupFailure(t *testing.T) {
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/usr/bin/ovdb": true},
-		jsonRunFor("/usr/bin/ovdb", "ovdb", "1.0.0"),
+		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"), "ovdb", "1.0.0"),
 		noRunManaged,
 	)
 	srv := upgradeReleaseServer(t, nil, nil) // no "ovdb" key -> 404 from the handler's own NotFound
@@ -1127,9 +1127,9 @@ func TestPlanUpgrade_LookupRetrySucceedsCarriesTagForward(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/usr/bin/ovdb": true},
-		jsonRunFor("/usr/bin/ovdb", "ovdb", "1.0.0"),
+		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"), "ovdb", "1.0.0"),
 		noRunManaged,
 	)
 	opts := UpgradeOptions{
@@ -1159,9 +1159,9 @@ func TestPlanUpgrade_LookupRetrySucceedsCarriesTagForward(t *testing.T) {
 
 func TestCheckUpgrades_LookupFailure(t *testing.T) {
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/usr/bin/ovdb": true},
-		jsonRunFor("/usr/bin/ovdb", "ovdb", "1.0.0"),
+		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"), "ovdb", "1.0.0"),
 		noRunManaged,
 	)
 	srv := upgradeReleaseServer(t, nil, nil)
@@ -1184,9 +1184,9 @@ func TestCheckUpgrades_LookupFailure(t *testing.T) {
 // self-update's own managed-availability-report REQ requires.
 func TestPlanUpgrade_ManagedLookupFailureBecomesWarningNotFailure(t *testing.T) {
 	env := batchEnv(
-		[]string{"/opt/homebrew/bin"}, "/opt/cover100",
-		map[string]bool{"/opt/homebrew/bin/wb": true},
-		jsonRunFor("/opt/homebrew/bin/wb", "wb", "1.0.0"),
+		[]string{fakeAbsDir("opt", "homebrew", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("opt", "homebrew", "bin"), "wb"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("opt", "homebrew", "bin"), "wb"), "wb", "1.0.0"),
 		noRunManaged,
 	)
 	env.EvalSymlinks = func(p string) (string, error) { return p, nil }
@@ -1220,9 +1220,9 @@ func TestPlanUpgrade_RateLimitMessage(t *testing.T) {
 	t.Cleanup(rateLimited.Close)
 
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/usr/bin/ovdb": true},
-		jsonRunFor("/usr/bin/ovdb", "ovdb", "1.0.0"),
+		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"), "ovdb", "1.0.0"),
 		noRunManaged,
 	)
 	opts := UpgradeOptions{
@@ -1273,10 +1273,10 @@ func TestPlanUpgrade_LookupConcurrencyBounded(t *testing.T) {
 	executables := map[string]bool{}
 	versions := map[string]string{}
 	for _, id := range ids {
-		executables["/usr/bin/"+id] = true
+		executables[fakeAbsExe(fakeAbsDir("usr", "bin"), id)] = true
 		versions[id] = "0.1.0"
 	}
-	env := batchEnv([]string{"/usr/bin"}, "/opt/cover100", executables, multiJSONRun(versions), noRunManaged)
+	env := batchEnv([]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"), executables, multiJSONRun(versions), noRunManaged)
 	opts := UpgradeOptions{
 		HostID: "cover100", Env: env, LookupConcurrency: 2,
 		ConfigureRelease: func(_ Entry, cfg selfupdate.Config) selfupdate.Config {
@@ -1301,9 +1301,9 @@ func TestPlanUpgrade_LookupTimeoutKillsSlowRequest(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/usr/bin/ovdb": true},
-		jsonRunFor("/usr/bin/ovdb", "ovdb", "1.0.0"),
+		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"), "ovdb", "1.0.0"),
 		noRunManaged,
 	)
 	opts := UpgradeOptions{
@@ -1333,7 +1333,7 @@ func TestPlanUpgrade_LookupTimeoutKillsSlowRequest(t *testing.T) {
 func pendingManualResult(target, tag, current string) UpgradeResult {
 	return UpgradeResult{
 		Target: target, Outcome: UpgradeOutcomeDryRun, InstallMethod: selfupdate.Manual,
-		ResolvedPath: "/usr/bin/" + target, Current: current, Tag: tag,
+		ResolvedPath: fakeAbsExe(fakeAbsDir("usr", "bin"), target), Current: current, Tag: tag,
 	}
 }
 
@@ -1432,7 +1432,7 @@ func manualUpgradeFixture(t *testing.T) (*httptest.Server, InstallEnv, string) {
 
 	probed := 0
 	env := batchEnv(
-		[]string{dir}, "/opt/cover100",
+		[]string{dir}, fakeAbsDir("opt", "cover100"),
 		map[string]bool{destPath: true},
 		func(_ context.Context, path string, args []string) ([]byte, error) {
 			if path != destPath || len(args) != 2 || args[0] != "version" || args[1] != "--json" {
@@ -1531,7 +1531,7 @@ func TestCheckUpgrades_NeverExecutes(t *testing.T) {
 }
 
 func TestUpgrade_PropagatesPlanError(t *testing.T) {
-	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
 	opts := UpgradeOptions{HostID: "cover100", Env: env}
 	_, err := Upgrade(context.Background(), []string{"nosuchcli"}, opts)
 	if selfupdate.KindOf(err) != selfupdate.KindUnknownTarget {
@@ -1552,10 +1552,10 @@ func TestExecuteUpgrade_ManagerExecutedWithFinishHint(t *testing.T) {
 
 	probed := 0
 	env := batchEnv(
-		[]string{"/opt/homebrew/bin"}, "/opt/cover100",
-		map[string]bool{"/opt/homebrew/bin/wb": true},
+		[]string{fakeAbsDir("opt", "homebrew", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("opt", "homebrew", "bin"), "wb"): true},
 		func(_ context.Context, path string, args []string) ([]byte, error) {
-			if path != "/opt/homebrew/bin/wb" || len(args) != 2 || args[0] != "version" || args[1] != "--json" {
+			if path != fakeAbsExe(fakeAbsDir("opt", "homebrew", "bin"), "wb") || len(args) != 2 || args[0] != "version" || args[1] != "--json" {
 				return nil, errors.New("unrecognized")
 			}
 			probed++
@@ -1616,10 +1616,10 @@ func TestExecuteUpgrade_HostManagedExecutedRunsHostAfterUpdate(t *testing.T) {
 
 	probed := 0
 	env := batchEnv(
-		[]string{"/opt/homebrew/bin"}, "/opt/homebrew/bin",
-		map[string]bool{"/opt/homebrew/bin/wb": true},
+		[]string{fakeAbsDir("opt", "homebrew", "bin")}, fakeAbsDir("opt", "homebrew", "bin"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("opt", "homebrew", "bin"), "wb"): true},
 		func(_ context.Context, path string, args []string) ([]byte, error) {
-			if path != "/opt/homebrew/bin/wb" || len(args) != 2 || args[0] != "version" || args[1] != "--json" {
+			if path != fakeAbsExe(fakeAbsDir("opt", "homebrew", "bin"), "wb") || len(args) != 2 || args[0] != "version" || args[1] != "--json" {
 				return nil, errors.New("unrecognized")
 			}
 			probed++
@@ -1646,7 +1646,7 @@ func TestExecuteUpgrade_HostManagedExecutedRunsHostAfterUpdate(t *testing.T) {
 			hookCalled = true
 			return nil
 		},
-		DetectHost:    fakeDetectHost(selfupdate.Managed, &homebrew, "/opt/homebrew/bin/wb"),
+		DetectHost:    fakeDetectHost(selfupdate.Managed, &homebrew, fakeAbsExe(fakeAbsDir("opt", "homebrew", "bin"), "wb")),
 		VerifyManaged: testVerifyManaged(env),
 	}
 
@@ -1686,13 +1686,13 @@ func TestExecuteUpgrade_HostManagedExecutedRunsHostAfterUpdate(t *testing.T) {
 // ExecuteUpgrade is what fires it for a real run — see the next test.
 func TestPlanUpgrade_HostAlreadyCurrentNeverRunsAfterUpdate(t *testing.T) {
 	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.0.0")}, nil)
-	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
 
 	calls := 0
 	opts := UpgradeOptions{
 		HostID: "cover100", Env: env,
 		HostConfig:      hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
-		DetectHost:      fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+		DetectHost:      fakeDetectHost(selfupdate.Manual, nil, fakeAbsExe(fakeAbsDir("opt", "cover100"), "cover100")),
 		HostAfterUpdate: func(context.Context, selfupdate.AfterUpdate) error { calls++; return nil },
 	}
 
@@ -1734,7 +1734,7 @@ func realHostPath(t *testing.T) string {
 // whether any OTHER pending target in the same batch was declined.
 func TestExecuteUpgrade_HostAlreadyCurrentRunsAfterUpdateExactlyOnce(t *testing.T) {
 	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.0.0")}, nil)
-	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
 	hostPath := realHostPath(t)
 
 	calls := 0
@@ -1778,7 +1778,7 @@ func TestExecuteUpgrade_HostAlreadyCurrentHookRunsEvenWhenOtherTargetDeclined(t 
 		{Target: "cover100", Host: true, Outcome: UpgradeOutcomeAlreadyCurrent, InstallMethod: selfupdate.Manual, ResolvedPath: hostPath, Current: "1.0.0", Tag: "v1.0.0"},
 	}}
 	opts := UpgradeOptions{
-		HostID: "cover100", Env: batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged),
+		HostID: "cover100", Env: batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged),
 		HostConfig:      hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
 		Confirm:         func([]UpgradeResult) (bool, error) { return false, nil }, // decline ovdb's pending upgrade
 		HostAfterUpdate: func(context.Context, selfupdate.AfterUpdate) error { calls++; return nil },
@@ -1816,7 +1816,7 @@ func TestExecuteUpgrade_HostAlreadyCurrentHookRunsOnNonInteractiveRefusal(t *tes
 		{Target: "cover100", Host: true, Outcome: UpgradeOutcomeAlreadyCurrent, InstallMethod: selfupdate.Manual, ResolvedPath: hostPath, Current: "1.0.0", Tag: "v1.0.0"},
 	}}
 	opts := UpgradeOptions{
-		HostID: "cover100", Env: batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged),
+		HostID: "cover100", Env: batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged),
 		HostConfig:      hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
 		HostAfterUpdate: func(context.Context, selfupdate.AfterUpdate) error { calls++; return nil },
 		// Yes is false and Confirm is nil: ovdb's own pending upgrade hits
@@ -1850,7 +1850,7 @@ func TestExecuteUpgrade_HostAlreadyCurrentHookRunsOnConfirmError(t *testing.T) {
 		{Target: "cover100", Host: true, Outcome: UpgradeOutcomeAlreadyCurrent, InstallMethod: selfupdate.Manual, ResolvedPath: hostPath, Current: "1.0.0", Tag: "v1.0.0"},
 	}}
 	opts := UpgradeOptions{
-		HostID: "cover100", Env: batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged),
+		HostID: "cover100", Env: batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged),
 		HostConfig:      hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
 		Confirm:         func([]UpgradeResult) (bool, error) { return false, errors.New("boom") },
 		HostAfterUpdate: func(context.Context, selfupdate.AfterUpdate) error { calls++; return nil },
@@ -1875,7 +1875,7 @@ func TestExecuteUpgrade_HostAlreadyCurrentHookRunsOnConfirmError(t *testing.T) {
 // the daemon... upgrade wb --yes does nothing" was the bug).
 func TestUpgrade_HostAlreadyCurrentRunsAfterUpdateExactlyOnceEndToEnd(t *testing.T) {
 	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.0.0")}, nil)
-	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
 
 	calls := 0
 	opts := UpgradeOptions{
@@ -2002,11 +2002,11 @@ func TestExecuteHostUpgrade_NeverGetsFinishHint(t *testing.T) {
 	// verified end to end via wb-as-host below, since wb.SelfUpdateHooks is
 	// true and would otherwise be the one case that could leak a hint.
 	srv := upgradeReleaseServer(t, map[string]string{"wb": releasesJSON("v1.0.0")}, nil)
-	env := batchEnv(nil, "/opt/wb", map[string]bool{"/opt/wb/wb": true}, jsonRunFor("/opt/wb/wb", "wb", "1.0.0"), noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "wb"), map[string]bool{fakeAbsExe(fakeAbsDir("opt", "wb"), "wb"): true}, jsonRunFor(fakeAbsExe(fakeAbsDir("opt", "wb"), "wb"), "wb", "1.0.0"), noRunManaged)
 	opts := UpgradeOptions{
 		HostID: "wb", Yes: true, Env: env,
 		HostConfig: hostReleaseConfig(srv, "wb", selfupdate.Config{BinaryName: "wb", CurrentVersion: "1.0.0"}),
-		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/wb/wb"),
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, fakeAbsExe(fakeAbsDir("opt", "wb"), "wb")),
 	}
 	result, err := Upgrade(context.Background(), []string{"wb"}, opts)
 	if err != nil {
@@ -2024,15 +2024,15 @@ func TestExecuteHostUpgrade_NeverGetsFinishHint(t *testing.T) {
 
 func TestPlanUpgrade_HostOtherCopyWarning(t *testing.T) {
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/usr/bin/cover100": true},
-		jsonRunFor("/usr/bin/cover100", "cover100", "1.0.0"),
+		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "cover100"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "bin"), "cover100"), "cover100", "1.0.0"),
 		noRunManaged,
 	)
 	opts := UpgradeOptions{
 		HostID: "cover100", Env: env,
 		HostConfig: selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"},
-		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, fakeAbsExe(fakeAbsDir("opt", "cover100"), "cover100")),
 	}
 
 	// cover100 named explicitly with no lookup server configured: the
@@ -2053,7 +2053,7 @@ func TestPlanUpgrade_HostOtherCopyWarning(t *testing.T) {
 	if !found {
 		t.Errorf("Warnings = %v, want another-copy warning", r.Warnings)
 	}
-	if len(r.OtherPaths) != 1 || r.OtherPaths[0] != "/usr/bin/cover100" {
+	if len(r.OtherPaths) != 1 || r.OtherPaths[0] != fakeAbsExe(fakeAbsDir("usr", "bin"), "cover100") {
 		t.Errorf("OtherPaths = %v, want the PATH copy", r.OtherPaths)
 	}
 	// task-22 review M2: Status is always zero for the host row — the
@@ -2064,12 +2064,12 @@ func TestPlanUpgrade_HostOtherCopyWarning(t *testing.T) {
 }
 
 func TestPlanUpgrade_HostAllIncludedEvenWhenNotOnPath(t *testing.T) {
-	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
 	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.0.0")}, nil)
 	opts := UpgradeOptions{
 		HostID: "cover100", All: true, Env: env,
 		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
-		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, fakeAbsExe(fakeAbsDir("opt", "cover100"), "cover100")),
 	}
 	result, err := PlanUpgrade(context.Background(), nil, opts)
 	if err != nil {
@@ -2083,7 +2083,7 @@ func TestPlanUpgrade_HostAllIncludedEvenWhenNotOnPath(t *testing.T) {
 // --- additional CheckUpgrades / PlanUpgrade coverage ------------------------
 
 func TestCheckUpgrades_UnknownNameFailsWholeBatch(t *testing.T) {
-	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
 	opts := UpgradeOptions{HostID: "cover100", Env: env}
 
 	result, err := CheckUpgrades(context.Background(), []string{"nosuchcli"}, opts)
@@ -2100,15 +2100,15 @@ func TestCheckUpgrades_UnknownNameFailsWholeBatch(t *testing.T) {
 
 func TestCheckUpgrades_NonHostNonReleaseBuildSkippedUnderAll(t *testing.T) {
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/usr/bin/ovdb": true},
-		jsonRunFor("/usr/bin/ovdb", "ovdb", "0.20.3+dirty"),
+		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"), "ovdb", "0.20.3+dirty"),
 		noRunManaged,
 	)
 	opts := UpgradeOptions{
 		HostID: "cover100", All: true, Env: env,
 		HostConfig: selfupdate.Config{BinaryName: "cover100", CurrentVersion: "dev"},
-		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, fakeAbsExe(fakeAbsDir("opt", "cover100"), "cover100")),
 	}
 	result, err := CheckUpgrades(context.Background(), nil, opts)
 	if err != nil {
@@ -2128,9 +2128,9 @@ func TestCheckUpgrades_NonHostNonReleaseBuildSkippedUnderAll(t *testing.T) {
 func TestCheckUpgrades_ExplicitNonReleaseBuildProceeds(t *testing.T) {
 	srv := upgradeReleaseServer(t, map[string]string{"ovdb": releasesJSON("v1.0.0")}, nil)
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/usr/bin/ovdb": true},
-		jsonRunFor("/usr/bin/ovdb", "ovdb", "dev"),
+		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "bin"), "ovdb"), "ovdb", "dev"),
 		noRunManaged,
 	)
 	opts := UpgradeOptions{HostID: "cover100", Env: env, ConfigureRelease: configureUpgradeRelease(srv)}
@@ -2150,34 +2150,34 @@ func TestCheckUpgrades_ExplicitNonReleaseBuildProceeds(t *testing.T) {
 
 func TestCheckUpgrades_HostOtherCopyWarning(t *testing.T) {
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/usr/bin/cover100": true},
-		jsonRunFor("/usr/bin/cover100", "cover100", "1.0.0"),
+		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("usr", "bin"), "cover100"): true},
+		jsonRunFor(fakeAbsExe(fakeAbsDir("usr", "bin"), "cover100"), "cover100", "1.0.0"),
 		noRunManaged,
 	)
 	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.0.0")}, nil)
 	opts := UpgradeOptions{
 		HostID: "cover100", Env: env,
 		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
-		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, fakeAbsExe(fakeAbsDir("opt", "cover100"), "cover100")),
 	}
 	result, err := CheckUpgrades(context.Background(), []string{"cover100"}, opts)
 	if err != nil {
 		t.Fatalf("CheckUpgrades error = %v", err)
 	}
 	r := result.Results[0]
-	if len(r.OtherPaths) != 1 || r.OtherPaths[0] != "/usr/bin/cover100" {
+	if len(r.OtherPaths) != 1 || r.OtherPaths[0] != fakeAbsExe(fakeAbsDir("usr", "bin"), "cover100") {
 		t.Errorf("OtherPaths = %v, want the PATH copy", r.OtherPaths)
 	}
 }
 
 func TestCheckUpgrades_HostExplicitNonReleaseBuildProceeds(t *testing.T) {
 	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.0.0")}, nil)
-	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
 	opts := UpgradeOptions{
 		HostID: "cover100", Env: env,
 		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "dev"}),
-		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, fakeAbsExe(fakeAbsDir("opt", "cover100"), "cover100")),
 	}
 	result, err := CheckUpgrades(context.Background(), []string{"cover100"}, opts)
 	if err != nil {
@@ -2189,13 +2189,13 @@ func TestCheckUpgrades_HostExplicitNonReleaseBuildProceeds(t *testing.T) {
 }
 
 func TestCheckUpgrades_HostManagedCommandShown(t *testing.T) {
-	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
 	srv := upgradeReleaseServer(t, map[string]string{"wb": releasesJSON("v2.0.0")}, nil)
 	homebrew := selfupdate.HomebrewCask("wb")
 	opts := UpgradeOptions{
 		HostID: "wb", Env: env,
 		HostConfig: hostReleaseConfig(srv, "wb", selfupdate.Config{BinaryName: "wb", CurrentVersion: "1.0.0"}),
-		DetectHost: fakeDetectHost(selfupdate.Managed, &homebrew, "/opt/homebrew/bin/wb"),
+		DetectHost: fakeDetectHost(selfupdate.Managed, &homebrew, fakeAbsExe(fakeAbsDir("opt", "homebrew", "bin"), "wb")),
 	}
 	result, err := CheckUpgrades(context.Background(), []string{"wb"}, opts)
 	if err != nil {
@@ -2207,12 +2207,12 @@ func TestCheckUpgrades_HostManagedCommandShown(t *testing.T) {
 }
 
 func TestCheckUpgrades_HostAmbiguous(t *testing.T) {
-	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
 	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v2.0.0")}, nil)
 	opts := UpgradeOptions{
 		HostID: "cover100", Env: env,
 		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
-		DetectHost: fakeDetectHost(selfupdate.Ambiguous, nil, "/src/cover100/cover100"),
+		DetectHost: fakeDetectHost(selfupdate.Ambiguous, nil, fakeAbsExe(fakeAbsDir("src", "cover100"), "cover100")),
 	}
 	result, err := CheckUpgrades(context.Background(), []string{"cover100"}, opts)
 	if err != nil {
@@ -2239,8 +2239,8 @@ func TestCheckUpgrades_HostAmbiguous(t *testing.T) {
 // classifying ambiguous BEFORE the lookup let the row's own Refused
 // classification swallow the lookup failure as a warning.
 func TestCheckUpgrades_AmbiguousLookupFailureFailsExactlyLikeSelfUpdate(t *testing.T) {
-	env := batchEnv(nil, "/opt/cover100", map[string]bool{"/opt/weird/ovdb": true}, jsonRunFor("/opt/weird/ovdb", "ovdb", "1.0.0"), noRunManaged)
-	env.PathDirs = func() []string { return []string{"/opt/weird"} }
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), map[string]bool{fakeAbsExe(fakeAbsDir("opt", "weird"), "ovdb"): true}, jsonRunFor(fakeAbsExe(fakeAbsDir("opt", "weird"), "ovdb"), "ovdb", "1.0.0"), noRunManaged)
+	env.PathDirs = func() []string { return []string{fakeAbsDir("opt", "weird")} }
 	srv := upgradeReleaseServer(t, nil, nil) // no "ovdb" key -> lookup fails
 	opts := UpgradeOptions{HostID: "cover100", Env: env, ConfigureRelease: configureUpgradeRelease(srv)}
 
@@ -2266,12 +2266,12 @@ func TestCheckUpgrades_AmbiguousLookupFailureFailsExactlyLikeSelfUpdate(t *testi
 // (buildCheckHostRow/resolveCheckRow's own deferred-classification path,
 // separate code from the non-host one above).
 func TestCheckUpgrades_AmbiguousHostLookupFailureFailsExactlyLikeSelfUpdate(t *testing.T) {
-	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
 	srv := upgradeReleaseServer(t, nil, nil) // no "cover100" key -> lookup fails
 	opts := UpgradeOptions{
 		HostID: "cover100", Env: env,
 		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
-		DetectHost: fakeDetectHost(selfupdate.Ambiguous, nil, "/src/cover100/cover100"),
+		DetectHost: fakeDetectHost(selfupdate.Ambiguous, nil, fakeAbsExe(fakeAbsDir("src", "cover100"), "cover100")),
 	}
 
 	result, err := CheckUpgrades(context.Background(), []string{"cover100"}, opts)
@@ -2286,12 +2286,12 @@ func TestCheckUpgrades_AmbiguousHostLookupFailureFailsExactlyLikeSelfUpdate(t *t
 
 func TestCheckUpgrades_ManagedRedirectAndExecutable(t *testing.T) {
 	env := batchEnv(
-		[]string{"/usr/bin"}, "/opt/cover100",
-		map[string]bool{"/opt/homebrew/bin/ingitdb": true, "/opt/homebrew/bin/wb": true},
+		[]string{fakeAbsDir("usr", "bin")}, fakeAbsDir("opt", "cover100"),
+		map[string]bool{fakeAbsExe(fakeAbsDir("opt", "homebrew", "bin"), "ingitdb"): true, fakeAbsExe(fakeAbsDir("opt", "homebrew", "bin"), "wb"): true},
 		multiJSONRun(map[string]string{"ingitdb": "1.0.0", "wb": "1.0.0"}),
 		noRunManaged,
 	)
-	env.PathDirs = func() []string { return []string{"/opt/homebrew/bin"} }
+	env.PathDirs = func() []string { return []string{fakeAbsDir("opt", "homebrew", "bin")} }
 	env.EvalSymlinks = func(p string) (string, error) { return p, nil }
 	srv := upgradeReleaseServer(t, map[string]string{
 		"ingitdb": releasesJSON("v2.0.0"),
@@ -2312,12 +2312,12 @@ func TestCheckUpgrades_ManagedRedirectAndExecutable(t *testing.T) {
 }
 
 func TestPlanUpgrade_HostAmbiguous(t *testing.T) {
-	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
 	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v2.0.0")}, nil)
 	opts := UpgradeOptions{
 		HostID: "cover100", Env: env,
 		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "1.0.0"}),
-		DetectHost: fakeDetectHost(selfupdate.Ambiguous, nil, "/src/cover100/cover100"),
+		DetectHost: fakeDetectHost(selfupdate.Ambiguous, nil, fakeAbsExe(fakeAbsDir("src", "cover100"), "cover100")),
 	}
 	result, err := PlanUpgrade(context.Background(), []string{"cover100"}, opts)
 	if err != nil {
@@ -2331,11 +2331,11 @@ func TestPlanUpgrade_HostAmbiguous(t *testing.T) {
 
 func TestPlanUpgrade_HostExplicitNonReleaseBuildProceeds(t *testing.T) {
 	srv := upgradeReleaseServer(t, map[string]string{"cover100": releasesJSON("v1.0.0")}, nil)
-	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
 	opts := UpgradeOptions{
 		HostID: "cover100", Env: env,
 		HostConfig: hostReleaseConfig(srv, "cover100", selfupdate.Config{BinaryName: "cover100", CurrentVersion: "dev"}),
-		DetectHost: fakeDetectHost(selfupdate.Manual, nil, "/opt/cover100/cover100"),
+		DetectHost: fakeDetectHost(selfupdate.Manual, nil, fakeAbsExe(fakeAbsDir("opt", "cover100"), "cover100")),
 	}
 	result, err := PlanUpgrade(context.Background(), []string{"cover100"}, opts)
 	if err != nil {
@@ -2349,7 +2349,7 @@ func TestPlanUpgrade_HostExplicitNonReleaseBuildProceeds(t *testing.T) {
 // --- candidate-building direct unit tests ---------------------------------
 
 func TestNamedUpgradeCandidates_Dedupe(t *testing.T) {
-	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
 	opts := UpgradeOptions{HostID: "cover100", Env: env}
 	candidates, _, _, err := namedUpgradeCandidates(context.Background(), []string{"ovdb", "ovdb", "cover100"}, opts)
 	if err != nil {
@@ -2367,7 +2367,7 @@ func TestNamedUpgradeCandidates_Dedupe(t *testing.T) {
 }
 
 func TestAllUpgradeCandidates_HostLastRegardlessOfCatalogPosition(t *testing.T) {
-	env := batchEnv(nil, "/opt/wb", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "wb"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
 	candidates, _, _ := allUpgradeCandidates(context.Background(), UpgradeOptions{HostID: "wb", Env: env})
 	last := candidates[len(candidates)-1]
 	if !last.isHost || last.id != "wb" {
@@ -2381,7 +2381,7 @@ func TestAllUpgradeCandidates_HostLastRegardlessOfCatalogPosition(t *testing.T) 
 }
 
 func TestResolveUpgradeCandidates_UsesAllWhenNamesEmpty(t *testing.T) {
-	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
 	candidates, _, _, err := resolveUpgradeCandidates(context.Background(), nil, UpgradeOptions{HostID: "cover100", Env: env})
 	if err != nil {
 		t.Fatalf("err = %v", err)
@@ -2392,7 +2392,7 @@ func TestResolveUpgradeCandidates_UsesAllWhenNamesEmpty(t *testing.T) {
 }
 
 func TestResolveUpgradeCandidates_UsesNamedWhenGiven(t *testing.T) {
-	env := batchEnv(nil, "/opt/cover100", nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
+	env := batchEnv(nil, fakeAbsDir("opt", "cover100"), nil, func(context.Context, string, []string) ([]byte, error) { return nil, errors.New("x") }, noRunManaged)
 	candidates, _, _, err := resolveUpgradeCandidates(context.Background(), []string{"ovdb"}, UpgradeOptions{HostID: "cover100", Env: env})
 	if err != nil {
 		t.Fatalf("err = %v", err)
