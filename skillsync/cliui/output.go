@@ -95,15 +95,19 @@ func writeChanges(out io.Writer, report skillsync.Report) error {
 	}{
 		{"planned", skillsync.Added, []skillsync.Outcome{skillsync.Planned}},
 		{"planned", skillsync.Updated, []skillsync.Outcome{skillsync.Planned}},
+		{"planned", skillsync.Adopted, []skillsync.Outcome{skillsync.Planned}},
 		{"planned removal", skillsync.Removed, []skillsync.Outcome{skillsync.Planned}},
 		{"added", skillsync.Added, []skillsync.Outcome{skillsync.Applied}},
 		{"updated", skillsync.Updated, []skillsync.Outcome{skillsync.Applied}},
+		// adopted (applied) is rendered separately below, with backup paths.
 		{"removed", skillsync.Removed, []skillsync.Outcome{skillsync.Applied}},
 		{"restored", skillsync.Added, []skillsync.Outcome{skillsync.Restored}},
 		{"restored", skillsync.Updated, []skillsync.Outcome{skillsync.Restored}},
+		{"restored", skillsync.Adopted, []skillsync.Outcome{skillsync.Restored}},
 		{"restored removal", skillsync.Removed, []skillsync.Outcome{skillsync.Restored}},
 		{"incomplete", skillsync.Added, []skillsync.Outcome{skillsync.Incomplete}},
 		{"incomplete", skillsync.Updated, []skillsync.Outcome{skillsync.Incomplete}},
+		{"incomplete", skillsync.Adopted, []skillsync.Outcome{skillsync.Incomplete}},
 		{"incomplete removal", skillsync.Removed, []skillsync.Outcome{skillsync.Incomplete}},
 		{"conflicts", skillsync.Conflict, nil},
 	} {
@@ -112,6 +116,19 @@ func writeChanges(out io.Writer, report skillsync.Report) error {
 			continue
 		}
 		if _, err := fmt.Fprintf(out, "  %s: %s\n", group.label, strings.Join(names, ", ")); err != nil {
+			return err
+		}
+	}
+	if adopted := report.ChangesFor(skillsync.Adopted, skillsync.Applied); len(adopted) > 0 {
+		parts := make([]string, 0, len(adopted))
+		for _, c := range adopted {
+			if c.BackupPath != "" {
+				parts = append(parts, fmt.Sprintf("%s (backup: %s)", c.Name, c.BackupPath))
+			} else {
+				parts = append(parts, c.Name)
+			}
+		}
+		if _, err := fmt.Fprintf(out, "  adopted: %s\n", strings.Join(parts, ", ")); err != nil {
 			return err
 		}
 	}

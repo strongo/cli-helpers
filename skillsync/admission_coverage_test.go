@@ -170,14 +170,14 @@ func TestAdmissionClassificationRejectsUnsafeFilesystemShapes(t *testing.T) {
 		if err := os.WriteFile(fileParent, []byte("file"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := classify(fileParent, item, prior, owners, "strongo/plugin"); err == nil {
+		if _, _, err := classify(fileParent, item, prior, owners, "strongo/plugin", nil); err == nil {
 			t.Fatal("classification accepted file parent")
 		}
 		dir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(dir, "alpha"), []byte("file"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if action, reason, err := classify(dir, item, prior, owners, "strongo/plugin"); err != nil || action != Conflict || reason != "non-directory target" {
+		if action, reason, err := classify(dir, item, prior, owners, "strongo/plugin", nil); err != nil || action != Conflict || reason != "non-directory target" {
 			t.Fatalf("file classify action=%q reason=%q err=%v", action, reason, err)
 		}
 		if err := os.Remove(filepath.Join(dir, "alpha")); err != nil {
@@ -189,7 +189,7 @@ func TestAdmissionClassificationRejectsUnsafeFilesystemShapes(t *testing.T) {
 		if err := os.Symlink(filepath.Join(dir, "elsewhere"), filepath.Join(dir, "alpha", "link")); err != nil {
 			t.Fatal(err)
 		}
-		if action, reason, err := classify(dir, item, prior, owners, "strongo/plugin"); err != nil || action != Conflict || reason != "unsafe target" {
+		if action, reason, err := classify(dir, item, prior, owners, "strongo/plugin", nil); err != nil || action != Conflict || reason != "unsafe target" {
 			t.Fatalf("unsafe classify action=%q reason=%q err=%v", action, reason, err)
 		}
 	})

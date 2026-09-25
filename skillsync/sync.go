@@ -107,6 +107,7 @@ type operation struct {
 	plugin      PluginIdentity
 	name        string
 	remove      bool
+	adopted     bool
 	old         string
 	new         string
 }
@@ -230,7 +231,7 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 		desired := map[string]string{}
 		for _, item := range rb.Skills {
 			desired[item.Name] = item.Digest
-			action, reason, err := classify(opts.Dir, item, prior, owners, key)
+			action, reason, err := classify(opts.Dir, item, prior, owners, key, rb.Bundle.FS)
 			if desiredNames[item.Name] > 1 {
 				action, reason = Conflict, "requested by multiple plugins"
 			}
@@ -239,18 +240,38 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 			}
 			report.Changes = append(report.Changes, Change{Plugin: rb.Bundle.Plugin, Name: item.Name, Action: action, Reason: reason})
 			if action == Conflict {
-				bundleConflict = true
+				// Atomicity protects a skill this plugin already owns: mixing a
+				// successful revision advance with a stuck old digest under the
+				// one recorded plugin Revision would misrepresent that skill's
+				// real content (see the pluginState assignment below). A skill
+				// this plugin has never owned before — a missing Added skill, an
+				// Adopted candidate, or one that failed to adopt — carries no
+				// such prior digest to protect, so its conflict stays isolated
+				// and never blocks a sibling Added/Adopted/Unchanged skill of the
+				// same plugin. This is the fix for the reported bug: a stray
+				// unmanaged folder for one skill must not refuse an unrelated
+				// missing sibling.
+				if _, wasOwned := prior.Skills[item.Name]; wasOwned {
+					bundleConflict = true
+				}
 				continue
 			}
-			if action == Added || action == Updated {
+			if action == Added || action == Updated || action == Adopted {
 				report.Changes[len(report.Changes)-1].Outcome = Planned
 			}
-			if action == Added || action == Updated {
+			if action == Added || action == Updated || action == Adopted {
 				old := ""
-				if action == Updated {
+				switch action {
+				case Updated:
 					old = prior.Skills[item.Name]
+				case Adopted:
+					existing, err := installedDigest(opts.Dir, item.Name)
+					if err != nil {
+						return report, err
+					}
+					old = existing
 				}
-				operations = append(operations, operation{source: rb.Bundle.FS, executables: rb.Bundle.ExecutablePaths, plugin: rb.Bundle.Plugin, name: item.Name, old: old, new: item.Digest})
+				operations = append(operations, operation{source: rb.Bundle.FS, executables: rb.Bundle.ExecutablePaths, plugin: rb.Bundle.Plugin, name: item.Name, old: old, new: item.Digest, adopted: action == Adopted})
 			}
 		}
 		for name, oldDigest := range prior.Skills {
@@ -351,10 +372,21 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 			return report, err
 		}
 		var err error
+		var backupPath string
 		if op.remove {
 			err = tx.remove(op.name, op.old)
 		} else {
-			err = tx.replace(op.source, op.executables, op.name, op.old, op.new)
+			// A durable adoption backup runs before this transaction touches
+			// the target at all, so it captures the user's original content
+			// even if the transaction itself is later interrupted and
+			// recovered from its own (transaction-scoped, cleaned-up-on-commit)
+			// backup.
+			if op.adopted {
+				backupPath, err = backupAdoptedSkill(opts.Dir, op.name)
+			}
+			if err == nil {
+				err = tx.replace(op.source, op.executables, op.name, op.old, op.new)
+			}
 		}
 		if err != nil {
 			if rollbackErr := tx.rollback(); rollbackErr != nil {
@@ -363,6 +395,9 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 			}
 			markOutcomes(&report, operations, tx, Restored, Incomplete)
 			return report, fmt.Errorf("apply %s: %w", op.name, err)
+		}
+		if backupPath != "" {
+			setBackupPath(&report, op, backupPath)
 		}
 		setOutcome(&report, op, Applied)
 	}
@@ -418,6 +453,16 @@ func setOutcome(report *Report, op operation, outcome Outcome) {
 		change := &report.Changes[i]
 		if change.Plugin == op.plugin && change.Name == op.name {
 			change.Outcome = outcome
+			return
+		}
+	}
+}
+
+func setBackupPath(report *Report, op operation, path string) {
+	for i := range report.Changes {
+		change := &report.Changes[i]
+		if change.Plugin == op.plugin && change.Name == op.name {
+			change.BackupPath = path
 			return
 		}
 	}
@@ -490,7 +535,7 @@ func statesEqual(a, b state) bool {
 	return true
 }
 
-func classify(dir string, item skill, prior pluginState, owners map[string]string, plugin string) (Action, string, error) {
+func classify(dir string, item skill, prior pluginState, owners map[string]string, plugin string, source fs.FS) (Action, string, error) {
 	if err := rejectSymlink(dir); err != nil {
 		return "", "", err
 	}
@@ -513,7 +558,8 @@ func classify(dir string, item skill, prior pluginState, owners map[string]strin
 	}
 	previous, known := prior.Skills[item.Name]
 	if !known {
-		return Conflict, "unmanaged target", nil
+		action, reason := classifyAdoption(dir, item, source)
+		return action, reason, nil
 	}
 	digest, err := installedDigest(dir, item.Name)
 	if err != nil {
@@ -1313,6 +1359,29 @@ func (t *transaction) commit() error {
 	return finalizeJournal(filepath.Join(t.dir, recoveryFileName), t.transactionDir())
 }
 func copySkill(source fs.FS, name, stage string, executables map[string]bool) error {
+	return copyTree(source, name, stage, func(path string, _ fs.FileInfo) fs.FileMode {
+		if executables[path] {
+			return 0o755
+		}
+		return 0o644
+	})
+}
+
+// copyDurableBackup preserves the exact on-disk permission bits of an
+// existing target folder rather than a bundle's declared executable set: a
+// durable adoption backup exists to prove the user's original content, not
+// to participate in bundle digesting.
+func copyDurableBackup(source fs.FS, name, stage string) error {
+	return copyTree(source, name, stage, func(_ string, info fs.FileInfo) fs.FileMode {
+		return info.Mode().Perm()
+	})
+}
+
+// copyTree durably copies one source subtree into stage/<name>, rejecting
+// any symlink or non-regular entry. modeFor lets copySkill apply a bundle's
+// declared executable manifest and copyDurableBackup preserve a target's own
+// file modes without duplicating the walk, write, and directory-sync logic.
+func copyTree(source fs.FS, name, stage string, modeFor func(path string, info fs.FileInfo) fs.FileMode) error {
 	created := map[string]bool{}
 	makeDir := func(path string) error {
 		if err := transactionOperations.mkdirAll(path, 0o755); err != nil {
@@ -1342,11 +1411,11 @@ func copySkill(source fs.FS, name, stage string, executables map[string]bool) er
 		if err := makeDir(filepath.Dir(dest)); err != nil {
 			return err
 		}
-		mode := fs.FileMode(0o644)
-		if executables[path] {
-			mode = 0o755
+		info, err := e.Info()
+		if err != nil {
+			return err
 		}
-		file, err := durableFileOperations.createFile(dest, mode)
+		file, err := durableFileOperations.createFile(dest, modeFor(path, info))
 		if err != nil {
 			return err
 		}

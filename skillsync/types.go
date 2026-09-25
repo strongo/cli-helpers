@@ -204,6 +204,12 @@ const (
 	Unchanged Action = "unchanged"
 	Removed   Action = "removed"
 	Conflict  Action = "conflict"
+	// Adopted marks an existing, unrecorded target folder that classify
+	// proved was already this bundled skill (matching SKILL.md frontmatter
+	// name, no foreign files) and that Sync therefore took ownership of
+	// instead of refusing as Conflict. Its pre-adoption content is preserved;
+	// see Change.BackupPath.
+	Adopted Action = "adopted"
 )
 
 type Change struct {
@@ -212,6 +218,11 @@ type Change struct {
 	Action  Action         `json:"action"`
 	Outcome Outcome        `json:"outcome,omitempty"`
 	Reason  string         `json:"reason,omitempty"`
+	// BackupPath is set only for an applied Adopted change. It names the
+	// durable, timestamped copy of the folder's complete pre-adoption
+	// content, preserved outside any transaction so it survives that
+	// transaction's own commit-time cleanup.
+	BackupPath string `json:"backup_path,omitempty"`
 }
 
 // Outcome tells callers whether a planned mutation reached durable ownership.
@@ -281,7 +292,7 @@ func (r Report) NamesFor(a Action, outcomes ...Outcome) []string {
 }
 func (r Report) Changed() bool {
 	for _, c := range r.Changes {
-		if c.Action == Added || c.Action == Updated || c.Action == Removed {
+		if c.Action == Added || c.Action == Updated || c.Action == Removed || c.Action == Adopted {
 			return true
 		}
 	}

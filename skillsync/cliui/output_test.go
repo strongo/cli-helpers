@@ -75,6 +75,46 @@ func TestWriteTargetTextCallsDryRunWithoutFailurePreview(t *testing.T) {
 	}
 }
 
+func TestWriteTextRendersAdoptedWithAndWithoutBackupPath(t *testing.T) {
+	var out bytes.Buffer
+	report := skillsync.Report{Dir: "/skills", Changes: []skillsync.Change{
+		{Name: "alpha", Action: skillsync.Adopted, Outcome: skillsync.Applied, BackupPath: "/skills/.cli-helpers-skills-adopted-backup/2026/alpha"},
+		{Name: "beta", Action: skillsync.Adopted, Outcome: skillsync.Applied},
+		{Name: "gamma", Action: skillsync.Adopted, Outcome: skillsync.Planned},
+	}}
+	if err := WriteText(&out, report); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	for _, want := range []string{"planned: gamma", "adopted: alpha (backup: /skills/.cli-helpers-skills-adopted-backup/2026/alpha), beta"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q missing from %q", want, got)
+		}
+	}
+}
+
+func TestWriteTargetJSONCarriesBackupPath(t *testing.T) {
+	var out bytes.Buffer
+	report := skillsync.Report{Dir: "/skills", Changes: []skillsync.Change{
+		{Name: "alpha", Action: skillsync.Adopted, Outcome: skillsync.Applied, BackupPath: "/skills/.cli-helpers-skills-adopted-backup/2026/alpha"},
+	}}
+	if err := WriteTargetJSON(&out, []TargetReport{{Dir: "/skills", Report: report}}); err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Changes []struct {
+			Action     string `json:"action"`
+			BackupPath string `json:"backup_path"`
+		} `json:"changes"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Changes) != 1 || decoded.Changes[0].Action != "adopted" || decoded.Changes[0].BackupPath == "" {
+		t.Fatalf("decoded = %#v", decoded.Changes)
+	}
+}
+
 func TestWriteTargetJSONCarriesHarnessAndRuntimeError(t *testing.T) {
 	var out bytes.Buffer
 	if err := WriteTargetJSON(&out, []TargetReport{{Harness: "wb", Dir: "/skills", Report: skillsync.Report{Dir: "/skills"}, Err: errors.New("denied")}}); err != nil {
