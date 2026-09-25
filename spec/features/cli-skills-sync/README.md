@@ -60,6 +60,33 @@ different plugin, or never registered with skillsync, are left untouched by a
 `Sync` call that does not name their key — this is validated in
 `skillsync/perskill_identity_test.go`.
 
+An existing target folder no plugin has recorded owning is not automatically
+a conflict. The library MUST adopt it — recording ownership instead of
+refusing it — when its own `SKILL.md` frontmatter `name` equals the bundled
+skill's name and every file it contains is already part of what that
+skill's bundle ships (a byte difference on a shared path is expected and
+gets replaced; a path the bundle does not ship is not, and stays `Conflict`
+with a reason naming what was found and what would let sync manage the
+folder). An adopted folder's complete pre-adoption content MUST be preserved
+at a durable, timestamped location outside any transaction before it is
+replaced, so the backup survives that transaction's own commit-time cleanup;
+`Sync` MUST report the adoption as a distinct `adopted` change kind carrying
+that backup's path. A folder that fails either adoption check, one already
+owned by a different plugin, or one with unsafe target shape remains
+`Conflict` exactly as before.
+
+Per-plugin atomicity protects only a skill this plugin already owns: mixing a
+successful revision advance with a stuck old digest under the one recorded
+plugin `Revision` would misrepresent that skill's real content, so a
+`Conflict` on an already-owned skill (a failed update or removal) still
+blocks every other skill of that plugin, and the whole plugin's ownership
+record reverts to what it verified last. A skill this plugin has never
+owned before — one that is simply missing, one adoption succeeds for, or one
+adoption or ownership refuses — carries no such prior digest to protect: its
+`Conflict` MUST stay isolated and MUST NOT block a sibling Added, Adopted, or
+Unchanged skill of the same plugin from being written and recorded in that
+same `Sync` call.
+
 ### REQ: crash-safe-transaction
 
 The library MUST classify the whole requested plan before its first target
@@ -222,6 +249,21 @@ never present a restored or incomplete mutation as a successful sync.
 Given a CLI with a digest-pinned embedded bundle, when it syncs an empty target,
 then the bundle's skills and verified ownership marker exist without a network
 request; a repeated sync leaves skill timestamps unchanged.
+
+### AC: adopts-proven-unmanaged-sibling
+
+Given an unrecorded target folder whose `SKILL.md` frontmatter names it as
+one bundled skill and whose files are all part of that skill's bundle, when
+that skill's plugin syncs, then sync backs up the folder's complete original
+content to a durable path outside the transaction, replaces it with the
+bundled content, records ownership, and reports one `adopted` change naming
+that backup path; a repeated sync then reports it `unchanged` and creates no
+further backup. Given instead a folder with no `SKILL.md`, a mismatched or
+absent frontmatter name, or a file the bundle does not ship, sync leaves it
+untouched and reports `conflict` with a reason naming what was found and
+what would let sync manage it. Given a plugin's bundle contains both such a
+conflicting skill and one that is simply missing, sync still adds and
+records ownership of the missing skill in that same call.
 
 ### AC: safe-plugin-update
 
