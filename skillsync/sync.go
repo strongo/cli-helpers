@@ -644,8 +644,7 @@ func rejectUnsafeDirectoryAncestor(path string) error {
 	}
 }
 func installedDigest(dir, name string) (string, error) {
-	hfs := os.DirFS(dir)
-	return installedSubtreeDigest(hfs, name, nil)
+	return installedSubtreeDigest(transactionOperations.dirFS(dir), name, nil)
 }
 
 type transaction struct {
@@ -672,6 +671,12 @@ type transactionOperationSet struct {
 	mkdirAll      func(string, fs.FileMode) error
 	remove        func(string) error
 	syncDirectory func(string) error
+	// dirFS opens a target directory as an fs.FS for read-only walk/read/stat
+	// use (adoption's frontmatter read, its foreign-file scan, and its
+	// durable backup copy). It is a distinct seam field, not a new package
+	// var, precisely so a test can substitute a deterministic failing fs.FS
+	// for one of those read paths instead of reaching for OS permission bits.
+	dirFS func(string) fs.FS
 }
 
 var transactionOperations = transactionOperationSet{
@@ -680,6 +685,7 @@ var transactionOperations = transactionOperationSet{
 	mkdirAll:      func(path string, mode fs.FileMode) error { return os.MkdirAll(path, mode) },
 	remove:        os.Remove,
 	syncDirectory: syncDirectory,
+	dirFS:         os.DirFS,
 }
 
 var transactionBoundary = func(string) {}

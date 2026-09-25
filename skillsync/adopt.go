@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -51,9 +51,12 @@ func classifyAdoption(dir string, item skill, source fs.FS) (Action, string) {
 // targetFrontmatterName reads the leading YAML frontmatter "name" field from
 // an existing target skill's own SKILL.md. It returns fs.ErrNotExist when the
 // file is absent and "" (no error) when the file exists but declares no such
-// field, which callers treat identically: not proof of adoption.
+// field, which callers treat identically: not proof of adoption. It reads
+// through transactionOperations.dirFS rather than os.ReadFile directly, so a
+// test can inject a deterministic read failure instead of an OS permission
+// trick.
 func targetFrontmatterName(dir, name string) (string, error) {
-	data, err := os.ReadFile(filepath.Join(dir, name, "SKILL.md"))
+	data, err := fs.ReadFile(transactionOperations.dirFS(dir), path.Join(name, "SKILL.md"))
 	if err != nil {
 		return "", err
 	}
@@ -104,7 +107,7 @@ func foreignTargetFile(dir, name string, source fs.FS) (string, error) {
 		return "", err
 	}
 	var foreign string
-	err := fs.WalkDir(os.DirFS(dir), name, func(path string, entry fs.DirEntry, err error) error {
+	err := fs.WalkDir(transactionOperations.dirFS(dir), name, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -146,12 +149,12 @@ func backupAdoptedSkill(dir, name string) (string, error) {
 	if err := syncCreatedDirectoryAncestry(created, transactionOperations.syncDirectory); err != nil {
 		return "", err
 	}
-	if err := copyDurableBackup(os.DirFS(dir), name, root); err != nil {
+	if err := copyDurableBackup(transactionOperations.dirFS(dir), name, root); err != nil {
 		return "", err
 	}
-	dest := filepath.Join(root, name)
-	if err := syncDirectoryChain(dest, root); err != nil {
-		return "", err
-	}
-	return dest, nil
+	// copyDurableBackup (via copyTree) already durably syncs every directory
+	// it created — including root/name itself — plus root and its own parent
+	// via its trailing sync chain. No further sync is needed here; adding one
+	// would only repeat what copyTree already guarantees.
+	return filepath.Join(root, name), nil
 }

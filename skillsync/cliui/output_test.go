@@ -93,6 +93,18 @@ func TestWriteTextRendersAdoptedWithAndWithoutBackupPath(t *testing.T) {
 	}
 }
 
+func TestWriteTargetTextPropagatesAdoptedLineWriterFailure(t *testing.T) {
+	report := skillsync.Report{Dir: "/skills", Changes: []skillsync.Change{
+		{Name: "alpha", Action: skillsync.Adopted, Outcome: skillsync.Applied, BackupPath: "/backup/alpha"},
+	}}
+	// Write #1 is the "directory synced: ..." header; write #2 is the
+	// "adopted: ..." line writeChanges renders separately (it carries the
+	// backup path, so it isn't covered by the generic group-table loop).
+	if err := WriteTargetText(&failAtWriter{fail: 2}, []TargetReport{{Dir: "/skills", Report: report}}); err == nil {
+		t.Fatal("expected the adopted line's writer failure to surface")
+	}
+}
+
 func TestWriteTargetJSONCarriesBackupPath(t *testing.T) {
 	var out bytes.Buffer
 	report := skillsync.Report{Dir: "/skills", Changes: []skillsync.Change{
