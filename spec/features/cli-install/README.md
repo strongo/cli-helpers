@@ -158,6 +158,8 @@ itself. The initial matrix, with the basis for each pair:
 | `datatug` → `ingitdb` | create, validate and edit the inGitDB databases DataTug reads | datatug `go.mod` |
 | `datatug` → `ovdb` | run a user-owned OpenVaultDB server with `ovdb serve`, then register it in DataTug as an `openvaultdb` catalog to query it under that server's access policies | datatug `pkg/openvaultdb` + `docs/layered-acl-publication.md` (shipped) |
 | `datatug` → `specscore` | if you're contributing to or extending DataTug, its own specifications are SpecScore artifacts — read and lint them with `specscore spec lint` | datatug README, `spec/` |
+| `sneat` → `chatwright` | verify conversational flows and agent actions in Sneat using Chatwright scenarios | sneat and chatwright READMEs |
+| `sneat` → `specscore` | specify and validate Sneat actions, domain schemas, and plans as SpecScore features | sneat README, specscore spec lint |
 
 Listing order per host is the order of its rows above.
 
@@ -727,6 +729,22 @@ exactly like a failed one — see
 [REQ: upgrade-per-target-policy](#req-upgrade-per-target-policy)'s own
 ambiguous-failure rule — except under `--check`/the bare report, whose own
 narrower rule is [REQ: upgrade-check](#req-upgrade-check)'s.
+
+### Uninstallation
+
+#### REQ: uninstall-targets
+
+`<cli> uninstall <name>...` uninstalls the named catalog CLIs. `<cli> uninstall --all` uninstalls every installed catalog CLI on the system. Positional target names MUST NOT be combined with `--all`. When a named target is not installed, the command reports its uninstalled status without failing.
+
+#### REQ: uninstall-method-policy
+
+The command MUST respect how each target was installed:
+- Direct binary installs MUST be deleted from their executable path on disk.
+- Homebrew cask installs MUST run `brew uninstall --cask <cask-token>` when a managed command runner is configured, or print the command when in redirect-only mode.
+
+#### REQ: uninstall-batch-semantics
+
+Uninstallation inherits multi-target batch semantics: unknown target names MUST be refused before any write or managed command execution. Interactive confirmation MUST be requested before removal unless `--yes/-y` is provided. With `--dry-run`, the command reports what would be removed without deleting files or running uninstallation commands.
 
 ### Consumer integration
 

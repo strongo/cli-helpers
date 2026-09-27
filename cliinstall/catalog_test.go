@@ -19,7 +19,7 @@ import (
 // instead of silently shrinking or growing the compiled-in catalog.
 var wantIDs = []string{
 	"chatwright", "codegrapher", "cover100", "datatug", "ingitdb",
-	"ovdb", "specscore", "synchestra", "wb",
+	"ovdb", "sneat", "specscore", "synchestra", "wb",
 }
 
 func TestIDs(t *testing.T) {

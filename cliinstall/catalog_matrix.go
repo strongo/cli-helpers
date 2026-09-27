@@ -54,4 +54,6 @@ var matrixRows = []relevanceRow{
 	{"datatug", "ingitdb", "create, validate and edit the inGitDB databases DataTug reads"},
 	{"datatug", "ovdb", "run a user-owned OpenVaultDB server with `ovdb serve`, then register it in DataTug as an `openvaultdb` catalog to query it under that server's access policies"},
 	{"datatug", "specscore", "if you're contributing to or extending DataTug, its own specifications are SpecScore artifacts — read and lint them with `specscore spec lint`"},
+	{"sneat", "chatwright", "verify conversational flows and agent actions in Sneat using Chatwright scenarios"},
+	{"sneat", "specscore", "specify and validate Sneat actions, domain schemas, and plans as SpecScore features"},
 }

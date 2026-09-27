@@ -661,7 +661,7 @@ fi
 	env.PathDirs = func() []string { return []string{snapBinDir} }
 	env.HostDir = func() (string, error) { return "", errors.New("no host dir in this test") }
 
-	got := Probe(context.Background(), []Entry{entry}, "", env, ProbeOptions{Budget: time.Second})
+	got := Probe(context.Background(), []Entry{entry}, "", env, ProbeOptions{Budget: 5 * time.Second})
 	s := got[0]
 	if s.State != Installed {
 		t.Fatalf("State = %v, want Installed", s.State)

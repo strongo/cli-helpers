@@ -1,0 +1,13 @@
+{
+  "repo": "sneat-co/sneat-cli",
+  "tag": "v0.14.0",
+  "version": "0.14.0",
+  "assets": [
+    "checksums.txt",
+    "sneat_0.14.0_darwin_amd64.tar.gz",
+    "sneat_0.14.0_darwin_arm64.tar.gz",
+    "sneat_0.14.0_linux_amd64.tar.gz",
+    "sneat_0.14.0_linux_arm64.tar.gz",
+    "sneat_0.14.0_windows_amd64.zip"
+  ]
+}
