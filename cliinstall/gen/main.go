@@ -66,6 +66,7 @@ var targets = []target{
 	{id: "synchestra", repo: "synchestra-io/synchestra-releases", tagPrefix: "cli-"},
 	{id: "ingitdb", repo: "ingitdb/ingitdb-cli", caskRepo: "ingitdb/homebrew-cli", caskPath: "Casks/ingitdb.rb"},
 	{id: "datatug", repo: "datatug/datatug-cli", caskRepo: "datatug/homebrew-tap", caskPath: "Casks/datatug.rb"},
+	{id: "sneat", repo: "sneat-co/sneat-cli", caskRepo: "sneat-co/homebrew-tap", caskPath: "Casks/sneat.rb"},
 }
 
 // releaseSnapshot is the recorded shape of <snapshotsDir>/releases/<id>.json.
