@@ -38,32 +38,32 @@ func WriteUninstallReport(out, errOut io.Writer, hostID string, rows []Uninstall
 		switch r.Outcome {
 		case cliinstall.UninstallOutcomeUninstalled:
 			if r.Method == cliinstall.UninstallMethodHomebrew {
-				fmt.Fprintf(out, "✓ Uninstalled %s (via brew cask %s)\n", name, row.Entry.CaskToken)
+				fmt.Fprintf(out, "✓ Uninstalled %s (via brew cask %s)\n", name, row.Entry.CaskToken) //nolint:errcheck
 			} else {
-				fmt.Fprintf(out, "✓ Uninstalled %s (%s)\n", name, r.Path)
+				fmt.Fprintf(out, "✓ Uninstalled %s (%s)\n", name, r.Path) //nolint:errcheck
 			}
 		case cliinstall.UninstallOutcomeDryRun:
 			if r.Method == cliinstall.UninstallMethodHomebrew {
-				fmt.Fprintf(out, "• Would uninstall %s via %s\n", name, strings.Join(r.CaskArgv, " "))
+				fmt.Fprintf(out, "• Would uninstall %s via %s\n", name, strings.Join(r.CaskArgv, " ")) //nolint:errcheck
 			} else {
-				fmt.Fprintf(out, "• Would remove %s (%s)\n", name, r.Path)
+				fmt.Fprintf(out, "• Would remove %s (%s)\n", name, r.Path) //nolint:errcheck
 			}
 		case cliinstall.UninstallOutcomeNotInstalled:
-			fmt.Fprintf(out, "- %s is not installed\n", name)
+			fmt.Fprintf(out, "- %s is not installed\n", name) //nolint:errcheck
 		case cliinstall.UninstallOutcomeRedirected:
-			fmt.Fprintf(out, "! %s: to uninstall, run: %s\n", name, strings.Join(r.CaskArgv, " "))
+			fmt.Fprintf(out, "! %s: to uninstall, run: %s\n", name, strings.Join(r.CaskArgv, " ")) //nolint:errcheck
 		case cliinstall.UninstallOutcomeFailed:
 			if r.Failure != nil {
-				fmt.Fprintf(out, "✗ Failed to uninstall %s: %v\n", name, r.Failure.Err)
+				fmt.Fprintf(out, "✗ Failed to uninstall %s: %v\n", name, r.Failure.Err) //nolint:errcheck
 			} else {
-				fmt.Fprintf(out, "✗ Failed to uninstall %s\n", name)
+				fmt.Fprintf(out, "✗ Failed to uninstall %s\n", name) //nolint:errcheck
 			}
 		default:
-			fmt.Fprintf(out, "? %s: %s\n", name, r.Outcome.String())
+			fmt.Fprintf(out, "? %s: %s\n", name, r.Outcome.String()) //nolint:errcheck
 		}
 
 		for _, w := range r.Warnings {
-			fmt.Fprintf(errOut, "warning (%s): %s\n", name, w)
+			fmt.Fprintf(errOut, "warning (%s): %s\n", name, w) //nolint:errcheck
 		}
 	}
 	return nil

@@ -150,9 +150,7 @@ func PlanUninstall(ctx context.Context, names []string, opts UninstallOptions) (
 
 	var entries []Entry
 	if opts.All && len(names) == 0 {
-		for _, e := range Entries() {
-			entries = append(entries, e)
-		}
+		entries = append(entries, Entries()...)
 	} else {
 		unique := dedupeNames(names)
 		var unknown []string
@@ -196,7 +194,7 @@ func PlanUninstall(ctx context.Context, names []string, opts UninstallOptions) (
 		}
 
 		// Target is installed; determine method
-		method := UninstallMethodDirect
+		var method UninstallMethod
 		var caskArgv []string
 		var path string
 
