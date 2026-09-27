@@ -165,10 +165,7 @@ func NewUninstall(opts UninstallCommandOptions) *cobra.Command {
 				}
 			}
 
-			executed, execErr := cliinstall.ExecuteUninstall(ctx, plan, uninstallOpts)
-			if execErr != nil {
-				return mapFailure(opts.Errors, execErr)
-			}
+			executed, _ := cliinstall.ExecuteUninstall(ctx, plan, uninstallOpts)
 
 			// Update rows with executed outcomes
 			for i, r := range executed.Results {

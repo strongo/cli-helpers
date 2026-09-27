@@ -200,7 +200,7 @@ func PlanUninstall(ctx context.Context, names []string, opts UninstallOptions) (
 		var caskArgv []string
 		var path string
 
-		if status.Manager != nil && status.Manager.Name == "brew" && e.CaskToken != "" {
+		if status.Manager != nil && (strings.EqualFold(status.Manager.Name, "homebrew") || strings.EqualFold(status.Manager.Name, "brew")) && e.CaskToken != "" {
 			method = UninstallMethodHomebrew
 			caskArgv = []string{"brew", "uninstall", "--cask", e.CaskToken}
 		} else {
@@ -231,9 +231,6 @@ func ExecuteUninstall(ctx context.Context, batch UninstallBatchResult, opts Unin
 	copy(results, batch.Results)
 
 	removeFile := os.Remove
-	if opts.Env.IsExecutable != nil {
-		removeFile = os.Remove
-	}
 
 	for i, r := range results {
 		if r.Outcome != UninstallOutcomeDryRun {
