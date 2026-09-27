@@ -100,7 +100,7 @@ func TestNewUninstall_UsageErrors(t *testing.T) {
 
 func TestNewUninstall_DryRunAndExecution(t *testing.T) {
 	tempDir := t.TempDir()
-	specscorePath := filepath.Join(tempDir, "specscore")
+	specscorePath := filepath.Join(tempDir, execName("specscore"))
 	if err := os.WriteFile(specscorePath, []byte("#!/bin/sh\necho 'specscore 1.0.0'"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestNewUninstall_DryRunAndExecution(t *testing.T) {
 
 func TestNewUninstall_JSONOutput(t *testing.T) {
 	tempDir := t.TempDir()
-	specscorePath := filepath.Join(tempDir, "specscore")
+	specscorePath := filepath.Join(tempDir, execName("specscore"))
 	if err := os.WriteFile(specscorePath, []byte("#!/bin/sh\necho 'specscore 1.0.0'"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestNewUninstall_JSONOutput(t *testing.T) {
 
 func TestNewUninstall_InteractiveConfirmation(t *testing.T) {
 	tempDir := t.TempDir()
-	specscorePath := filepath.Join(tempDir, "specscore")
+	specscorePath := filepath.Join(tempDir, execName("specscore"))
 	if err := os.WriteFile(specscorePath, []byte("#!/bin/sh\necho 'specscore 1.0.0'"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +300,7 @@ func TestNewUninstall_InteractiveConfirmation(t *testing.T) {
 
 func TestNewUninstall_NonInteractiveRefusalWithoutYes(t *testing.T) {
 	tempDir := t.TempDir()
-	specscorePath := filepath.Join(tempDir, "specscore")
+	specscorePath := filepath.Join(tempDir, execName("specscore"))
 	if err := os.WriteFile(specscorePath, []byte("#!/bin/sh\necho 'specscore 1.0.0'"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +366,7 @@ func TestNewUninstall_DefaultEnvAndFailures(t *testing.T) {
 
 	// Test Execution failure mapping (when deletion fails, e.g. path is a non-empty directory)
 	tempDir := t.TempDir()
-	specscoreDir := filepath.Join(tempDir, "specscore")
+	specscoreDir := filepath.Join(tempDir, execName("specscore"))
 	_ = os.MkdirAll(filepath.Join(specscoreDir, "sub"), 0o755)
 
 	fakeEnv := cliinstall.InstallEnv{

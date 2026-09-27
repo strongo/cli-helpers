@@ -5,11 +5,19 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/strongo/cli-helpers/selfupdate"
 )
+
+func execName(base string) string {
+	if runtime.GOOS == "windows" {
+		return base + ".exe"
+	}
+	return base
+}
 
 func TestUninstallOutcome_String(t *testing.T) {
 	cases := []struct {
@@ -131,7 +139,7 @@ func TestPlanUninstall_UnknownTarget(t *testing.T) {
 
 func TestPlanUninstall_All(t *testing.T) {
 	tempDir := t.TempDir()
-	specscorePath := filepath.Join(tempDir, "specscore")
+	specscorePath := filepath.Join(tempDir, execName("specscore"))
 	if err := os.WriteFile(specscorePath, []byte("#!/bin/sh\necho 'specscore 1.0.0'"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +221,7 @@ func TestPlanUninstall_NotInstalled(t *testing.T) {
 
 func TestPlanAndExecuteUninstall_Direct(t *testing.T) {
 	tempDir := t.TempDir()
-	specscorePath := filepath.Join(tempDir, "specscore")
+	specscorePath := filepath.Join(tempDir, execName("specscore"))
 	if err := os.WriteFile(specscorePath, []byte("#!/bin/sh\necho 'specscore 1.0.0'"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +305,7 @@ func TestPlanAndExecuteUninstall_Direct(t *testing.T) {
 
 func TestPlanAndExecuteUninstall_Homebrew(t *testing.T) {
 	tempDir := t.TempDir()
-	brewPath := filepath.Join(tempDir, "specscore")
+	brewPath := filepath.Join(tempDir, execName("specscore"))
 
 	fakeEnv := InstallEnv{
 		Env: Env{
@@ -442,7 +450,7 @@ func TestPlanUninstall_HomebrewDetection(t *testing.T) {
 	if err := os.MkdirAll(brewDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	specscorePath := filepath.Join(brewDir, "specscore")
+	specscorePath := filepath.Join(brewDir, execName("specscore"))
 	if err := os.WriteFile(specscorePath, []byte("#!/bin/sh\necho 'specscore 1.0.0'"), 0o755); err != nil {
 		t.Fatal(err)
 	}
