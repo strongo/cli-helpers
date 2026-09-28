@@ -128,3 +128,17 @@ jobs:
           cache: true
       - name: go mod tidy -diff
         run: go mod tidy -diff
+
+  full_statement_coverage:
+    name: 100% statement coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Fail on any statement with zero coverage
+        run: |
+          go test -count=1 -coverprofile=cover.out ./...
+          awk 'NR>1 && $NF==0 {print; bad=1} END{exit bad}' cover.out
