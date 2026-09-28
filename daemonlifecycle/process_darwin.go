@@ -11,8 +11,10 @@ import (
 // darwinZombie is SZOMB from <sys/proc.h>.
 const darwinZombie = 5
 
+var sysctlKinfoProcSlice = unix.SysctlKinfoProcSlice
+
 func processIdentity(pid int) (string, error) {
-	procs, err := unix.SysctlKinfoProcSlice("kern.proc.pid", pid)
+	procs, err := sysctlKinfoProcSlice("kern.proc.pid", pid)
 	if err != nil {
 		return "", fmt.Errorf("process %d identity: %w", pid, err)
 	}
