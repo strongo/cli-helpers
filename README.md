@@ -34,6 +34,12 @@ placement machinery rather than re-implementing it. See
 `spec/features/cli-install/README.md` for the full behavioral contract and
 [Install command](#install-command) below for wiring.
 
+`github.com/strongo/cli-helpers/fsutil` holds two UI-free path helpers
+shared by CLIs and terminal apps: `ExpandHome` (expands a leading `~` or `~/`,
+returning the path unchanged if the home directory is unknown) and `DirExists`
+(false with a nil error for a missing path, the stat error for any other
+failure). Standard library only.
+
 ## Safety guarantees
 
 - **A managed install is never overwritten directly.** `Classify`
