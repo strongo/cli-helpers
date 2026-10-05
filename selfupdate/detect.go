@@ -95,14 +95,27 @@ type Detection struct {
 // resolves to Manual, because that would make self-replace eligible for a
 // binary the package cannot actually place.
 func Classify(path string, managers []Manager) Detection {
+	return classify(path, managers, nil)
+}
+
+// classify is Classify with an optional override of the hint shown for a
+// path inside a system package directory: hint receives the host's GOOS and
+// the matched SystemPackageDirs entry, and an empty result keeps the
+// library's own text.
+func classify(path string, managers []Manager, hint func(goos, dir string) string) Detection {
 	if det := ClassifyManagers(path, managers); det.Method == Managed {
 		return det
 	}
 
 	p := normalizePath(path)
 
-	if inSystemPackageDir(p) {
+	if dir, ok := systemPackageDirOf(p); ok {
 		m := systemPackageManagerFor(goosName)
+		if hint != nil {
+			if custom := hint(goosName, dir); custom != "" {
+				m.UpgradeHint = custom
+			}
+		}
 		return Detection{Method: Managed, Manager: &m, Path: path}
 	}
 
@@ -146,7 +159,7 @@ func ClassifyManagers(path string, managers []Manager) Detection {
 	return Detection{Method: Ambiguous, Path: path}
 }
 
-// inSystemPackageDir reports whether normalizedPath (already run through
+// systemPackageDirOf reports whether normalizedPath (already run through
 // normalizePath) lies inside one of the host's own SystemPackageDirs,
 // boundary-aware so a sibling directory that merely starts with the same
 // characters (normalizePath("/usr/binx") never matches normalizePath("/usr/
@@ -154,14 +167,15 @@ func ClassifyManagers(path string, managers []Manager) Detection {
 // entry (its Windows branch only appends a getenv result once it has
 // confirmed that result is non-empty), so every dir here normalizes to a
 // non-empty string.
-func inSystemPackageDir(normalizedPath string) bool {
+// It also returns the matching SystemPackageDirs entry as the list spelled it.
+func systemPackageDirOf(normalizedPath string) (string, bool) {
 	for _, dir := range SystemPackageDirs(goosName, getenvFunc) {
 		nd := normalizePath(dir)
 		if normalizedPath == nd || strings.HasPrefix(normalizedPath, nd+"/") {
-			return true
+			return dir, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // normalizePath lowercases s and folds backslashes to forward slashes, so
@@ -189,7 +203,7 @@ func looksLikeManualInstall(normalized string) bool {
 // installed binary or a real symlink (REQ: no-network-in-tests extends to
 // "no faking the test binary's own location" — these seams are how the
 // package's tests satisfy that without ever calling os.Executable for real).
-// getenvFunc is the same kind of seam for inSystemPackageDir's Windows
+// getenvFunc is the same kind of seam for systemPackageDirOf's Windows
 // environment-variable lookups (REQ: system-package-dirs-are-managed); it
 // follows replace.go's goosName, which this package already overrides in
 // tests to exercise Windows-only behavior from any host.
@@ -216,5 +230,26 @@ func (c Config) DetectSelf() (Detection, error) {
 	if err != nil {
 		resolved = exe
 	}
-	return Classify(resolved, c.Managers), nil
+	return c.Classify(resolved), nil
+}
+
+// Classify is the package-level Classify for this configuration: the same
+// verdict for the same path, except that a path inside a system package
+// directory carries the hint the consumer supplied in SystemPackageHintFor or
+// SystemPackageHint (see Config), so a consumer's own explain-path style
+// tooling shows the text self-update shows.
+func (c Config) Classify(path string) Detection {
+	return classify(path, c.Managers, c.systemPackageHint)
+}
+
+// systemPackageHint resolves the consumer's hint for a system-directory path:
+// SystemPackageHintFor first, then SystemPackageHint, else "" for the
+// library's own text.
+func (c Config) systemPackageHint(goos, dir string) string {
+	if c.SystemPackageHintFor != nil {
+		if hint := c.SystemPackageHintFor(goos, dir); hint != "" {
+			return hint
+		}
+	}
+	return c.SystemPackageHint
 }
