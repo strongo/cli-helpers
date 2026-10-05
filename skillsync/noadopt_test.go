@@ -346,3 +346,159 @@ func TestNoAdoptNeverAdoptsUnderConcurrentSync(t *testing.T) {
 		}
 	})
 }
+
+// reportJSON is the report as a consumer sees it, for byte comparison.
+func reportJSON(t *testing.T, report Report) string {
+	t.Helper()
+	report.Dir = "<dir>"
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+// otherConflictSetup is the review's repro: plugin owns "old", the person
+// hand-edited it (a modified target, an unresolved conflict of the plugin), an
+// adoptable folder "beta" sits beside it, and a new revision ships both.
+func otherConflictSetup(t *testing.T) (dir string, next Config) {
+	t.Helper()
+	dir = t.TempDir()
+	first := bundleWith(t, "plugin", "r1", map[string]string{"old": frontmatterSKILL("old", "v1")})
+	if _, err := Sync(context.Background(), config(t, first), Options{Dir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "old", "SKILL.md"), []byte("hand edited"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeUnmanagedSkill(t, dir, "beta", map[string]string{"SKILL.md": frontmatterSKILL("beta", "mine")})
+	second := adoptionBundle(t, "plugin", "r2", "old", "beta")
+	return dir, config(t, second)
+}
+
+// A folder the plugin's other conflict withdraws is not one this call would
+// have adopted, so NoAdopt must not call it adoptable or change its reason:
+// the report is byte-identical with the flag on and off.
+func TestNoAdoptReportsAFolderWithdrawnByAnotherConflictAsWithoutTheFlag(t *testing.T) {
+	for _, dry := range []bool{true, false} {
+		dirOff, cfg := otherConflictSetup(t)
+		off, err := Sync(context.Background(), cfg, Options{Dir: dirOff, DryRun: dry})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dirOn, cfgOn := otherConflictSetup(t)
+		on, err := Sync(context.Background(), cfgOn, Options{Dir: dirOn, DryRun: dry, NoAdopt: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		beta := changeFor(t, on, "beta")
+		if beta.Action != Conflict || beta.Reason != "plugin has unresolved conflicts" || beta.Adoptable {
+			t.Fatalf("dry=%v NoAdopt beta = %#v", dry, beta)
+		}
+		// The two runs used different temporary directories, so compare the
+		// reports as consumers see them, apart from timestamps nobody reports.
+		if a, b := reportJSON(t, off), reportJSON(t, on); a != b {
+			t.Fatalf("dry=%v reports differ with the flag:\n off %s\n on  %s", dry, a, b)
+		}
+	}
+}
+
+// For every shape adoption does not take over, the report is byte-identical
+// with NoAdopt on and off, in a dry run and a real sync; the only difference
+// the flag makes is for a folder this call would have adopted.
+func TestNoAdoptChangesNothingButAdoptionAcrossShapes(t *testing.T) {
+	type shape struct {
+		name  string
+		setup func(t *testing.T, dir string)
+	}
+	shapes := []shape{
+		{"missing", func(*testing.T, string) {}},
+		{"foreign file", func(t *testing.T, dir string) {
+			writeUnmanagedSkill(t, dir, "alpha", map[string]string{"SKILL.md": frontmatterSKILL("alpha", "x"), "extra.txt": "e"})
+		}},
+		{"no SKILL.md", func(t *testing.T, dir string) {
+			writeUnmanagedSkill(t, dir, "alpha", map[string]string{"other.md": "x"})
+		}},
+		{"wrong name", func(t *testing.T, dir string) {
+			writeUnmanagedSkill(t, dir, "alpha", map[string]string{"SKILL.md": frontmatterSKILL("zzz", "x")})
+		}},
+		{"no frontmatter", func(t *testing.T, dir string) {
+			writeUnmanagedSkill(t, dir, "alpha", map[string]string{"SKILL.md": "plain"})
+		}},
+		{"non-directory", func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "alpha"), []byte("file"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	cfg := config(t, adoptionBundle(t, "plugin", "r1", "alpha"))
+	for _, s := range shapes {
+		for _, dry := range []bool{true, false} {
+			var out [2]string
+			for i, noAdopt := range []bool{false, true} {
+				dir := t.TempDir()
+				s.setup(t, dir)
+				report, err := Sync(context.Background(), cfg, Options{Dir: dir, DryRun: dry, NoAdopt: noAdopt})
+				if err != nil {
+					t.Fatalf("%s dry=%v: %v", s.name, dry, err)
+				}
+				out[i] = reportJSON(t, report)
+			}
+			if out[0] != out[1] {
+				t.Errorf("%s dry=%v differs with the flag:\n off %s\n on  %s", s.name, dry, out[0], out[1])
+			}
+		}
+	}
+}
+
+// NoAdopt is about this call's own take-over, not about a transaction an
+// earlier call began: when the pending journal is an interrupted adoption of
+// the same folder (begun by a call that asked for adoption), the next call
+// with NoAdopt recovers forward, the folder ends up owned and reported
+// Unchanged, and no backup is made by this call.
+func TestNoAdoptCompletesAnEarlierCallsInterruptedAdoption(t *testing.T) {
+	dir := t.TempDir()
+	writeUnmanagedSkill(t, dir, "alpha", map[string]string{"SKILL.md": frontmatterSKILL("alpha", "mine")})
+	b := adoptionBundle(t, "plugin", "r1", "alpha")
+	cfg := config(t, b)
+
+	stateSyncErr := errors.New("state directory sync")
+	previous := stateDirectorySync
+	stateDirectorySync = func(string) error { return stateSyncErr }
+	first, err := Sync(context.Background(), cfg, Options{Dir: dir})
+	stateDirectorySync = previous
+	if !errors.Is(err, stateSyncErr) {
+		t.Fatalf("setup err = %v", err)
+	}
+	if c := changeFor(t, first, "alpha"); c.Action != Adopted || c.Outcome != Incomplete {
+		t.Fatalf("setup change = %#v", c)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, recoveryFileName)); err != nil {
+		t.Fatalf("setup left no journal: %v", err)
+	}
+	backups := listAdoptionBackups(t, dir)
+	if len(backups) != 1 {
+		t.Fatalf("setup backups = %v", backups)
+	}
+
+	if _, err := Sync(context.Background(), cfg, Options{Dir: dir, DryRun: true, NoAdopt: true}); !errors.Is(err, ErrRecoveryPending) {
+		t.Fatalf("dry run err = %v, want ErrRecoveryPending", err)
+	}
+	report, err := Sync(context.Background(), cfg, Options{Dir: dir, NoAdopt: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := changeFor(t, report, "alpha"); c.Action != Unchanged || c.Adoptable || c.BackupPath != "" {
+		t.Fatalf("change = %#v, want Unchanged", c)
+	}
+	state, err := readState(dir)
+	if err != nil || state.Plugins[b.Plugin.String()].Skills["alpha"] == "" {
+		t.Fatalf("folder not owned after completing the earlier adoption: %#v, %v", state, err)
+	}
+	if got := listAdoptionBackups(t, dir); len(got) != 1 || got[0] != backups[0] {
+		t.Fatalf("backups = %v, want only the first call's %v", got, backups)
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "alpha", "SKILL.md")); err != nil || string(data) != frontmatterSKILL("alpha", "bundled body for alpha") {
+		t.Fatalf("folder = %q, %v", data, err)
+	}
+}

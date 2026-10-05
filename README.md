@@ -150,6 +150,12 @@ left byte-identical, with `Change.Adoptable` (`"adoptable": true` in JSON) set
 so the host can offer the take-over and call `Sync` again without `NoAdopt`.
 The decision is made inside the target lock, at the write and after any pending
 recovery journal has been recovered, so no check of the host's own can go stale.
+Every report is byte-identical with the flag on and off except for a folder that
+very call would have adopted. `NoAdopt` governs the call's own take-over, not a
+transaction an earlier call began: if a pending recovery journal is an
+interrupted adoption of the same folder, begun by a call that did not set
+`NoAdopt`, the next call recovers it forward, the folder ends up owned and is
+reported `unchanged`, and that call makes no backup of its own.
 
 ## Wiring example
 

@@ -82,8 +82,15 @@ reason `unmanaged target` and `Change.Adoptable` true (`"adoptable": true`),
 MUST be left byte-identical with no backup made, and MUST NOT be recorded as
 owned. That decision MUST be made inside the target lock together with the
 write, after any pending recovery journal has been recovered, so no check
-made before `Sync` can go stale. `Adoptable` MUST be false on every other
-change, including a conflicting folder adoption would also have refused.
+made before `Sync` can go stale. `Adoptable` MUST be true only for a folder
+that very call would have adopted with the flag off, and every report MUST be
+byte-identical with the flag on and off otherwise: a conflicting folder
+adoption would also have refused, and a folder withdrawn by the plugin's other
+unresolved conflict (`plugin has unresolved conflicts`), keep their reasons and
+are not adoptable. `NoAdopt` governs the call's own take-over only: completing
+the recovery journal of an earlier call, including an interrupted adoption of
+the same folder begun by a call that did not set it, is not covered; the folder
+then ends up owned and is reported `unchanged`, and this call makes no backup.
 
 Per-plugin atomicity protects only a skill this plugin already owns: mixing a
 successful revision advance with a stuck old digest under the one recorded
@@ -282,7 +289,12 @@ when sync runs (including after a dry run that saw no folder, with a recovery
 journal from an interrupted install pending, and with concurrent callers on the
 same target), then it reports `conflict` with the reason `unmanaged target` and
 `adoptable` true, leaves the folder byte-identical, makes no backup, and
-records no ownership; the same call without `NoAdopt` adopts it.
+records no ownership; the same call without `NoAdopt` adopts it. This holds
+except for completing a transaction an earlier call started: when the pending
+journal is an interrupted adoption of that same folder, the call recovers it
+forward, reports `unchanged` and makes no backup of its own. Given the plugin
+also has another unresolved conflict, the folder is reported exactly as without
+`NoAdopt` (`plugin has unresolved conflicts`, not adoptable).
 
 ### AC: safe-plugin-update
 

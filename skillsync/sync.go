@@ -304,10 +304,15 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 		// mutation for this plugin for a later safe retry.
 		if bundleConflict {
 			for i := changeStart; i < len(report.Changes); i++ {
-				if report.Changes[i].Action != Conflict {
+				// A folder NoAdopt refused is rewritten like the Adopted candidate
+				// it stands for: this call would not have adopted it, because the
+				// plugin's own conflict withdraws every planned change, so the
+				// report must be the one the flag-off call gives.
+				if report.Changes[i].Action != Conflict || report.Changes[i].Adoptable {
 					report.Changes[i].Action = Conflict
 					report.Changes[i].Outcome = ""
 					report.Changes[i].Reason = "plugin has unresolved conflicts"
+					report.Changes[i].Adoptable = false
 				}
 			}
 			operations = operations[:operationStart]
