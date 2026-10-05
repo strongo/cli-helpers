@@ -553,6 +553,14 @@ behavior above is inherited, not restated.
 **When** an update is requested
 **Then** the system-directory copy is classified managed by the built-in system package manager and redirected — its `UpgradeCommand` empty and `UpgradeHint` naming that OS's own real tooling, never a wrong-OS example, rendered as a natural sentence and never as `"Run: "` followed by prose — with no download, write, or replacement, while the sibling paths remain classified manual or ambiguous exactly as they were before this check existed, and a WinGet machine-scope install under `%ProgramFiles%` is recognized as WinGet-managed rather than falling through to this built-in check.
 
+### AC: system-directory-hint-is-the-consumers-to-set
+
+**Requirements:** self-update#req:system-package-dirs-are-managed
+
+**Given** a binary resolved inside a system package directory and a `Config` with `SystemPackageHint` or `SystemPackageHintFor(goos, dir)` set
+**When** `DetectSelf`, `Update` or `Config.Classify` classifies it
+**Then** the verdict is the same managed, redirect-only classification and the hint is the consumer's (the function first, an empty result falling back to the string, then to the library's text for that OS); the library's Windows text also names a copy extracted from an archive; and a path outside a system directory never reaches the hint.
+
 ### AC: upgrade-classifies-a-symlink-identically-to-self-update
 
 **Requirements:** self-update#req:system-package-dirs-are-managed, cli-install#req:self-update-equals-upgrade-self

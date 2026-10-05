@@ -87,6 +87,19 @@ type Config struct {
 	// fetch whatever is currently latest instead of the pinned release
 	// (REQ: pinned-exact-tag).
 	DownloadURL func(repository, tag, asset string) string
+	// SystemPackageHint replaces the library's text in the redirect shown for
+	// a binary found in a system package directory (SystemPackageDirs), on
+	// every OS, because only the consumer knows how it is distributed: a
+	// consumer that ships a zip archive, not an installer, says so here.
+	// It completes the sentence "update it with ..." (Manager.UpgradeHint's
+	// form: a fragment, no command). Empty keeps the library's own text per OS.
+	SystemPackageHint string
+	// SystemPackageHintFor is SystemPackageHint as a function of the host's
+	// GOOS and the matched system directory (as SystemPackageDirs spells it).
+	// It takes precedence; an empty result falls back to SystemPackageHint,
+	// then to the library's text. It is used by DetectSelf, and so by Update,
+	// and by Config.Classify.
+	SystemPackageHintFor func(goos, dir string) string
 	// HTTPClient is used for every GitHub request. Defaults to
 	// http.DefaultClient.
 	HTTPClient *http.Client

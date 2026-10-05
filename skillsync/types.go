@@ -141,6 +141,28 @@ type Options struct {
 	Resolver              Resolver
 	LockTimeout           time.Duration
 	Legacy                LegacyImport
+	// NoAdopt refuses to take over an unmanaged folder that already holds
+	// the bundled skill. By default (false) Sync adopts such a folder: it
+	// backs the folder up durably and replaces it with the bundle, reporting
+	// Adopted. With NoAdopt set, the same folder is reported as Conflict with
+	// the reason "unmanaged target", the folder is left byte-identical, and no
+	// backup is made; Change.Adoptable tells the caller the folder would have
+	// been adopted, so it can ask the person and run Sync again without
+	// NoAdopt. The decision is made inside the target lock together with the
+	// write, after any pending recovery journal has been recovered, so there is
+	// no window between a caller's own check and Sync's write. Folders that
+	// are not adoptable keep their specific reason either way, and every
+	// report is byte-identical with the flag on and off except for a folder
+	// this call would have adopted.
+	//
+	// NoAdopt is about this call's own take-over. It does not stop Sync from
+	// completing the recovery journal of an earlier call: when that journal
+	// is an interrupted adoption of the same folder (begun by a call that did
+	// not set NoAdopt), the recovery rolls forward, the folder ends up owned
+	// and is reported Unchanged, and this call makes no backup of its own. So
+	// "left byte-identical, no ownership recorded" holds for what this call
+	// would have started, not for a transaction an earlier call began.
+	NoAdopt bool
 }
 
 // LegacyImport enables only a host's explicit one-time marker migration.
@@ -223,6 +245,14 @@ type Change struct {
 	// content, preserved outside any transaction so it survives that
 	// transaction's own commit-time cleanup.
 	BackupPath string `json:"backup_path,omitempty"`
+	// Adoptable is set only on a Conflict that Options.NoAdopt caused: the
+	// unmanaged folder is proven to be this skill (matching SKILL.md name, no
+	// file the bundle does not ship) and this very call would have Adopted it
+	// without NoAdopt. It is false on every other change, including a
+	// conflicting folder that adoption would also have refused and a folder
+	// the plugin's other unresolved conflict withdraws (that one reports
+	// "plugin has unresolved conflicts" with or without NoAdopt).
+	Adoptable bool `json:"adoptable,omitempty"`
 }
 
 // Outcome tells callers whether a planned mutation reached durable ownership.

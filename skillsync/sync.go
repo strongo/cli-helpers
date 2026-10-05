@@ -238,7 +238,14 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 			if err != nil {
 				return report, err
 			}
-			report.Changes = append(report.Changes, Change{Plugin: rb.Bundle.Plugin, Name: item.Name, Action: action, Reason: reason})
+			// Adoption is decided here, inside the target lock and after any
+			// pending recovery journal was recovered, so a caller that opted
+			// out cannot lose a race between its own check and this write.
+			adoptable := false
+			if action == Adopted && opts.NoAdopt {
+				action, reason, adoptable = Conflict, "unmanaged target", true
+			}
+			report.Changes = append(report.Changes, Change{Plugin: rb.Bundle.Plugin, Name: item.Name, Action: action, Reason: reason, Adoptable: adoptable})
 			if action == Conflict {
 				// Atomicity protects a skill this plugin already owns: mixing a
 				// successful revision advance with a stuck old digest under the
@@ -297,10 +304,15 @@ func syncLocked(ctx context.Context, cfg Config, bundles []resolvedBundle, opts 
 		// mutation for this plugin for a later safe retry.
 		if bundleConflict {
 			for i := changeStart; i < len(report.Changes); i++ {
-				if report.Changes[i].Action != Conflict {
+				// A folder NoAdopt refused is rewritten like the Adopted candidate
+				// it stands for: this call would not have adopted it, because the
+				// plugin's own conflict withdraws every planned change, so the
+				// report must be the one the flag-off call gives.
+				if report.Changes[i].Action != Conflict || report.Changes[i].Adoptable {
 					report.Changes[i].Action = Conflict
 					report.Changes[i].Outcome = ""
 					report.Changes[i].Reason = "plugin has unresolved conflicts"
+					report.Changes[i].Adoptable = false
 				}
 			}
 			operations = operations[:operationStart]

@@ -177,11 +177,16 @@ const systemPackageManagerName = "the system package manager"
 // Windows, and Windows Update names nothing useful on Linux — a wrong
 // example is worse than a generic one because it sends the reader looking
 // for a tool that was never involved.
+//
+// Only the consumer knows how its own binary is distributed (an installer, or
+// a zip archive extracted by hand), so Config.SystemPackageHint and
+// Config.SystemPackageHintFor replace this text; the Windows default names
+// the archive case too.
 func systemPackageManagerFor(goos string) Manager {
 	hint := "the package manager that installed it (e.g. apt, dnf, pacman/AUR, apk, or nix)"
 	switch goos {
 	case "windows":
-		hint = "Windows Update, or the installer (MSI/EXE) that originally placed it there"
+		hint = "Windows Update, the installer (MSI/EXE) that placed it there, or, for a copy extracted from an archive, a new download of that archive"
 	case "darwin":
 		hint = "macOS itself (this directory is protected by System Integrity Protection), or whatever tool originally placed it there"
 	}

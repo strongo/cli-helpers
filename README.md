@@ -138,6 +138,25 @@ import "embed"
 var generatedSkills embed.FS
 ```
 
+## Adopting an existing skill folder, or not
+
+`skillsync.Sync` adopts an unmanaged target folder that already is the bundled
+skill (matching `SKILL.md` name, no file the bundle does not ship): it keeps a
+durable backup, replaces the folder, and reports `adopted`. That stays the
+default. A host that must not take a folder over without being asked, such as a
+server answering clients of several versions, sets `Options.NoAdopt`: the same
+folder is then reported as a `conflict` with the reason `unmanaged target`,
+left byte-identical, with `Change.Adoptable` (`"adoptable": true` in JSON) set
+so the host can offer the take-over and call `Sync` again without `NoAdopt`.
+The decision is made inside the target lock, at the write and after any pending
+recovery journal has been recovered, so no check of the host's own can go stale.
+Every report is byte-identical with the flag on and off except for a folder that
+very call would have adopted. `NoAdopt` governs the call's own take-over, not a
+transaction an earlier call began: if a pending recovery journal is an
+interrupted adoption of the same folder, begun by a call that did not set
+`NoAdopt`, the next call recovers it forward, the folder ends up owned and is
+reported `unchanged`, and that call makes no backup of its own.
+
 ## Wiring example
 
 A minimal CLI wires one `Config` and builds a Cobra command from it:
@@ -208,6 +227,15 @@ to every consumer: refresh Homebrew metadata, run the package-specific upgrade
 as structured argv with Homebrew's `--yes`, verify the installed binary, and
 then run any configured post-update hook. The Cobra command asks once in an
 interactive terminal; `--yes` skips that prompt for non-interactive automation.
+
+A binary found in a system package directory (`/usr/bin`, `%ProgramFiles%`, and
+so on) is redirected with a hint naming the OS's own tooling; on Windows the
+default reads "Windows Update, the installer (MSI/EXE) that placed it there, or,
+for a copy extracted from an archive, a new download of that archive". A CLI
+that knows how it is distributed sets `Config.SystemPackageHint` (a fixed
+fragment) or `Config.SystemPackageHintFor(goos, dir)` to replace it;
+`Config.Classify(path)` gives the same verdict, hint included, to
+`--explain-path`-style tooling.
 
 A CLI that doesn't use Cobra calls `cfg.Check(ctx)` and `cfg.Update(ctx,
 opts)` directly — `cobracmd` is optional sugar over the same two calls; the
