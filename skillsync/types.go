@@ -141,6 +141,18 @@ type Options struct {
 	Resolver              Resolver
 	LockTimeout           time.Duration
 	Legacy                LegacyImport
+	// NoAdopt refuses to take over an unmanaged folder that already holds
+	// the bundled skill. By default (false) Sync adopts such a folder: it
+	// backs the folder up durably and replaces it with the bundle, reporting
+	// Adopted. With NoAdopt set, the same folder is reported as Conflict with
+	// the reason "unmanaged target", the folder is left byte-identical, and no
+	// backup is made; Change.Adoptable tells the caller the folder would have
+	// been adopted, so it can ask the person and run Sync again without
+	// NoAdopt. The decision is made inside the target lock together with the
+	// write, after any pending recovery journal has been recovered, so there is
+	// no window between a caller's own check and Sync's write. Folders that
+	// are not adoptable keep their specific reason either way.
+	NoAdopt bool
 }
 
 // LegacyImport enables only a host's explicit one-time marker migration.
@@ -223,6 +235,12 @@ type Change struct {
 	// content, preserved outside any transaction so it survives that
 	// transaction's own commit-time cleanup.
 	BackupPath string `json:"backup_path,omitempty"`
+	// Adoptable is set only on a Conflict that Options.NoAdopt caused: the
+	// unmanaged folder is proven to be this skill (matching SKILL.md name, no
+	// file the bundle does not ship) and would have been Adopted without
+	// NoAdopt. It is false on every other change, including a conflicting
+	// folder that adoption would also have refused.
+	Adoptable bool `json:"adoptable,omitempty"`
 }
 
 // Outcome tells callers whether a planned mutation reached durable ownership.

@@ -75,6 +75,16 @@ that backup's path. A folder that fails either adoption check, one already
 owned by a different plugin, or one with unsafe target shape remains
 `Conflict` exactly as before.
 
+A host MAY turn adoption off with `Options.NoAdopt` (default false: adoption
+stays on, so existing callers are unchanged). With it set, a folder that
+adoption would have taken over MUST instead be reported `Conflict` with the
+reason `unmanaged target` and `Change.Adoptable` true (`"adoptable": true`),
+MUST be left byte-identical with no backup made, and MUST NOT be recorded as
+owned. That decision MUST be made inside the target lock together with the
+write, after any pending recovery journal has been recovered, so no check
+made before `Sync` can go stale. `Adoptable` MUST be false on every other
+change, including a conflicting folder adoption would also have refused.
+
 Per-plugin atomicity protects only a skill this plugin already owns: mixing a
 successful revision advance with a stuck old digest under the one recorded
 plugin `Revision` would misrepresent that skill's real content, so a
@@ -264,6 +274,15 @@ untouched and reports `conflict` with a reason naming what was found and
 what would let sync manage it. Given a plugin's bundle contains both such a
 conflicting skill and one that is simply missing, sync still adds and
 records ownership of the missing skill in that same call.
+
+### AC: no-adopt-refuses-without-a-window
+
+Given an unrecorded folder that adoption would take over, and `Options.NoAdopt`,
+when sync runs (including after a dry run that saw no folder, with a recovery
+journal from an interrupted install pending, and with concurrent callers on the
+same target), then it reports `conflict` with the reason `unmanaged target` and
+`adoptable` true, leaves the folder byte-identical, makes no backup, and
+records no ownership; the same call without `NoAdopt` adopts it.
 
 ### AC: safe-plugin-update
 
