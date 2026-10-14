@@ -528,7 +528,7 @@ untested.
 | `cover100` | `sneat-dev/cover100-cli` — no package managers, plain release archives |
 | `synchestra` | `synchestra-io/synchestra` — planned: migrates from `github.com/strongo/selfupdate` per the [cli-install plan](../../plans/cli-install/README.md); `cli-` tag prefix on a mirror releases repository |
 | `ingitdb` | `ingitdb/ingitdb-cli` — planned: replaces its internal copy per the [cli-install plan](../../plans/cli-install/README.md) |
-| `datatug` | `datatug/datatug-cli` — planned: gains self-update per the [cli-install plan](../../plans/cli-install/README.md) |
+| `datatug` | `datatug/datatug` — gains self-update per the [cli-install plan](../../plans/cli-install/README.md) |
 | `synchestra-channel` | `synchestra-io/synchestra-servers` — planned: migrates from `github.com/strongo/selfupdate` per the [cli-install plan](../../plans/cli-install/README.md); `servers-` tag prefix, flat `checksums.txt` |
 | `synchestra-vm-host` | `synchestra-io/synchestra-vm` — planned: migrates from `github.com/strongo/selfupdate` per the [cli-install plan](../../plans/cli-install/README.md); `vm-` tag prefix, flat `checksums.txt` |
 

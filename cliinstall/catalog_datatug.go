@@ -15,7 +15,7 @@ func init() {
 			"`openvaultdb` catalogs; `datatug db copy` can move data into and out of both. Its " +
 			"own specifications are SpecScore artifacts.",
 
-		Repository: "datatug/datatug-cli",
+		Repository: "datatug/datatug",
 		// datatug has no self-update today; task-15 adds one built from
 		// this entry with HomebrewCask("datatug") steps.
 		Managers: []selfupdate.Manager{
