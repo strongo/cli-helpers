@@ -415,7 +415,7 @@ Verification: 80% floor, `golangci-lint run` with the repository config, no
 **Status:** complete
 **Note:** datatug-cli PR #257 merged; released v0.31.0.
 
-Repository `datatug/datatug-cli`. Releases already carry the default GoReleaser
+Repository `datatug/datatug`. Releases already carry the default GoReleaser
 identity (`datatug_<v>_<os>_<arch>` tarballs, windows zip,
 `datatug_<v>_checksums.txt`, cask `datatug/tap/datatug`), so no pipeline change.
 Add `self-update` (no `update` alias — the earlier plan's alias is dropped

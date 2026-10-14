@@ -822,7 +822,7 @@ by confirming the old import is gone fleet-wide.
 | `ovdb` | `openvaultdb/ovdb` | `openvaultdb/tap/ovdb` | own releases, flat `checksums.txt` | `strongo/selfupdate` v0.6.0 → cli-helpers | none (repository has no `spec/`) |
 | `synchestra` | `synchestra-io/synchestra` | none | `synchestra-io/synchestra-releases`, tag prefix `cli-` | `strongo/selfupdate` v0.4.0 → cli-helpers | `spec/features/cli/install` |
 | `ingitdb` | `ingitdb/ingitdb-cli` | `ingitdb/cli/ingitdb` (unsigned) | own releases, flat `checksums.txt` | `internal/selfupdate` → cli-helpers | `spec/features/cli/install` |
-| `datatug` | `datatug/datatug-cli` | `datatug/tap/datatug` | own releases | none → cli-helpers | `spec/features/cli/install`, `spec/features/cli/self-update` |
+| `datatug` | `datatug/datatug` | `datatug/tap/datatug` | own releases | none → cli-helpers | `spec/features/cli/install`, `spec/features/cli/self-update` |
 
 Self-update-only migrations (not catalog entries): `synchestra-channel`
 (`synchestra-io/synchestra-servers`, tag prefix `servers-`) and
