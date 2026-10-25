@@ -1,0 +1,201 @@
+package selfupdate
+
+import "strings"
+
+// Manager describes one package manager that might own the running binary's
+// install. PathMarkers are lowercased, '/'-separated substrings of a
+// resolved executable path that identify that manager's install layout —
+// Classify normalizes both the candidate path and these markers the same
+// way (lowercase, backslashes folded to forward slashes) so a Windows path
+// can be classified on any host, including in tests.
+//
+// Consumers are not limited to Homebrew, Scoop, and WinGet: any manager can
+// be described by constructing a Manager literal directly with its own
+// Name, UpgradeCommand, and PathMarkers. A manager remains redirect-only
+// unless WithExecutableUpgrade explicitly configures structured argv; the
+// display command is never parsed or passed to a shell. The three
+// constructors below exist
+// because those three account for effectively every managed Go CLI install
+// in the wild, and getting their marker sets right (see Homebrew's doc
+// comment for the Intel-cask gotcha) is exactly the kind of detail this
+// package exists to get right once instead of per consumer.
+type Manager struct {
+	// Name is shown to the user, e.g. "Homebrew".
+	Name string
+	// UpgradeCommand is the exact command printed for the user to run,
+	// e.g. "brew upgrade --cask wb". It is display-only and is never parsed
+	// or passed to a shell. Leave it empty when there is no single
+	// copy-pasteable command — e.g. a built-in manager that only knows the
+	// CLASS of tool that owns the install, not which one — and set
+	// UpgradeHint instead; a renderer MUST NOT print an empty UpgradeCommand
+	// after a "Run:"-style prefix.
+	UpgradeCommand string
+	// UpgradeHint is a human-readable sentence fragment naming how to update
+	// this install when there is no single UpgradeCommand to print, e.g.
+	// "the package manager that installed it (e.g. apt, dnf, pacman/AUR,
+	// apk, or nix)". It is prose, never copy-pasteable argv: a renderer
+	// shows it in a natural sentence ("<binary> is managed by <name>.
+	// Update it with <hint>."), never after a "Run:" prefix the way
+	// UpgradeCommand is. At most one of UpgradeCommand and UpgradeHint is
+	// normally set; a manager with neither is redirect-only and names only
+	// itself.
+	UpgradeHint string
+	// UpgradeExecutable is the program invoked for an executable managed
+	// update. Empty keeps this manager redirect-only for backward
+	// compatibility. Configure it through WithExecutableUpgrade so its argv
+	// is copied rather than aliased.
+	UpgradeExecutable string
+	// UpgradeArgs are passed directly to UpgradeExecutable without shell
+	// parsing or interpolation.
+	UpgradeArgs []string
+	// UpgradeSteps are executed in order when non-empty. They allow a manager
+	// whose local metadata must be refreshed before upgrade to express both
+	// operations as structured argv without invoking a shell. A failed step
+	// stops the sequence.
+	UpgradeSteps []ManagedCommand
+	// PathMarkers are lowercased, '/'-separated substrings; a resolved
+	// executable path containing any one of them classifies as this
+	// manager's install.
+	PathMarkers []string
+}
+
+// ManagedCommand is one argv-safe package-manager process. Executable and Args
+// are passed directly to ManagedCommandRunner; neither is shell parsed.
+type ManagedCommand struct {
+	Executable string
+	Args       []string
+}
+
+// WithExecutableUpgrade opts this manager into executable updates. executable
+// and args are passed directly to the consumer-supplied ManagedCommandRunner;
+// UpgradeCommand remains the independently configured human-readable form.
+// The argument slice is copied so later caller mutations cannot change the
+// command that will run.
+func (m Manager) WithExecutableUpgrade(executable string, args ...string) Manager {
+	m.UpgradeExecutable = executable
+	m.UpgradeArgs = append([]string(nil), args...)
+	m.UpgradeSteps = nil
+	return m
+}
+
+// WithExecutableUpgradeSteps opts this manager into an ordered executable
+// update. It is intended for managers such as Homebrew where refreshing local
+// metadata and upgrading the package are separate commands. Every argv slice
+// is copied and empty executables are rejected by CanExecuteUpgrade.
+func (m Manager) WithExecutableUpgradeSteps(steps ...ManagedCommand) Manager {
+	m.UpgradeExecutable = ""
+	m.UpgradeArgs = nil
+	m.UpgradeSteps = make([]ManagedCommand, len(steps))
+	for i, step := range steps {
+		m.UpgradeSteps[i] = ManagedCommand{Executable: step.Executable, Args: append([]string(nil), step.Args...)}
+	}
+	return m
+}
+
+// CanExecuteUpgrade reports whether the consumer explicitly opted this manager
+// into executable updates. A display-only UpgradeCommand is never sufficient.
+func (m Manager) CanExecuteUpgrade() bool {
+	if len(m.UpgradeSteps) > 0 {
+		for _, step := range m.UpgradeSteps {
+			if step.Executable == "" {
+				return false
+			}
+		}
+		return true
+	}
+	return m.UpgradeExecutable != ""
+}
+
+func (m Manager) executableUpgradeSteps() []ManagedCommand {
+	if len(m.UpgradeSteps) > 0 {
+		steps := make([]ManagedCommand, len(m.UpgradeSteps))
+		for i, step := range m.UpgradeSteps {
+			steps[i] = ManagedCommand{Executable: step.Executable, Args: append([]string(nil), step.Args...)}
+		}
+		return steps
+	}
+	return []ManagedCommand{{Executable: m.UpgradeExecutable, Args: append([]string(nil), m.UpgradeArgs...)}}
+}
+
+// Homebrew describes a Homebrew-managed install (macOS, Linux, or
+// Linuxbrew), covering both Formula and Cask installs.
+//
+// The marker set has one non-obvious entry: a GoReleaser homebrew_casks
+// install resolves, through the symlink Homebrew creates, into a Caskroom
+// path. On Apple Silicon that path already contains "/homebrew/" (it lives
+// under /opt/homebrew/Caskroom/...) so the Cellar/Homebrew markers alone
+// would catch it, but on Intel it is /usr/local/Caskroom/..., which matches
+// none of the other markers — "/caskroom/" is required specifically so an
+// Intel cask install classifies as managed instead of falling through to
+// ambiguous.
+func Homebrew(upgradeCommand string) Manager {
+	return Manager{
+		Name:           "Homebrew",
+		UpgradeCommand: upgradeCommand,
+		PathMarkers:    []string{"/cellar/", "/homebrew/", "/linuxbrew/", "/caskroom/"},
+	}
+}
+
+// HomebrewCask describes an executable Homebrew cask update. It refreshes
+// Homebrew metadata before upgrading the named cask, using structured argv
+// rather than parsing or executing the display command through a shell.
+// Consumers should prefer this constructor when their cask is safe for
+// self-update to execute directly.
+func HomebrewCask(name string) Manager {
+	return Homebrew("brew update && brew upgrade --yes --cask -- "+shellDisplayArg(name)).WithExecutableUpgradeSteps(
+		ManagedCommand{Executable: "brew", Args: []string{"update"}},
+		ManagedCommand{Executable: "brew", Args: []string{"upgrade", "--yes", "--cask", "--", name}},
+	)
+}
+
+// HomebrewFormula describes an executable Homebrew formula update. It uses
+// the same ordered, argv-safe update contract as HomebrewCask.
+func HomebrewFormula(name string) Manager {
+	return Homebrew("brew update && brew upgrade --yes --formula -- "+shellDisplayArg(name)).WithExecutableUpgradeSteps(
+		ManagedCommand{Executable: "brew", Args: []string{"update"}},
+		ManagedCommand{Executable: "brew", Args: []string{"upgrade", "--yes", "--formula", "--", name}},
+	)
+}
+
+func shellDisplayArg(arg string) string {
+	if arg != "" && !strings.HasPrefix(arg, "-") && strings.IndexFunc(arg, func(r rune) bool {
+		return !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@+._/-", r)
+	}) == -1 {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", "'\"'\"'") + "'"
+}
+
+// Scoop describes a Scoop-managed install (Windows). Both the versioned
+// "apps" directory and the "shims" directory Scoop puts on PATH are
+// markers, because either one may be the resolved, symlink-followed path
+// depending on how the binary was invoked.
+func Scoop(upgradeCommand string) Manager {
+	return Manager{
+		Name:           "Scoop",
+		UpgradeCommand: upgradeCommand,
+		PathMarkers:    []string{"/scoop/apps/", "/scoop/shims/"},
+	}
+}
+
+// WinGet describes a WinGet-managed install (Windows Package Manager), under
+// either the user's own per-user Microsoft\WinGet packages/links directory,
+// or the machine-wide install WinGet uses for `winget install --scope
+// machine` (and for some packages by default): WinGet\Packages and
+// WinGet\Links directly under %ProgramFiles% (no "Microsoft\" segment there,
+// unlike the per-user location). Without the second pair of markers, a
+// machine-scope WinGet install would fall through to this package's own
+// built-in system-package-directory check (REQ: system-package-dirs-are-
+// managed) — it genuinely does sit under %ProgramFiles% — and redirect to a
+// generic "Windows Update" message instead of `winget upgrade`, since
+// Classify has no way to know WinGet owns it without this marker.
+func WinGet(upgradeCommand string) Manager {
+	return Manager{
+		Name:           "WinGet",
+		UpgradeCommand: upgradeCommand,
+		PathMarkers: []string{
+			"/microsoft/winget/packages/", "/microsoft/winget/links/",
+			"/winget/packages/", "/winget/links/",
+		},
+	}
+}

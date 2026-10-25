@@ -1,0 +1,13 @@
+{
+  "repo": "specscore/specscore-cli",
+  "tag": "v0.52.0",
+  "version": "0.52.0",
+  "assets": [
+    "specscore_0.52.0_checksums.txt",
+    "specscore_0.52.0_darwin_amd64.tar.gz",
+    "specscore_0.52.0_darwin_arm64.tar.gz",
+    "specscore_0.52.0_linux_amd64.tar.gz",
+    "specscore_0.52.0_linux_arm64.tar.gz",
+    "specscore_0.52.0_windows_amd64.zip"
+  ]
+}

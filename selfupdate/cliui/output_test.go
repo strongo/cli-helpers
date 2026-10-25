@@ -1,0 +1,682 @@
+package cliui
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/charmbracelet/colorprofile"
+	"github.com/strongo/cli-helpers/selfupdate"
+)
+
+func testConfig() selfupdate.Config {
+	return selfupdate.Config{BinaryName: "tool", Repository: "acme/tool", CurrentVersion: "1.0.0"}
+}
+
+// errWriter is an io.Writer stub whose Write always fails, used to exercise
+// the error-return branch of the JSON writers.
+type errWriter struct{ err error }
+
+func (w errWriter) Write([]byte) (int, error) { return 0, w.err }
+
+// --- WriteOutcome ---
+
+func TestWriteOutcome_ManagedRedirect(t *testing.T) {
+	mgr := selfupdate.Homebrew("brew upgrade tool")
+	var out bytes.Buffer
+	WriteOutcome(&out, &bytes.Buffer{}, testConfig(), selfupdate.Outcome{
+		Action:    selfupdate.ActionRedirected,
+		Detection: selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr},
+	})
+	if !strings.Contains(out.String(), "Homebrew") || !strings.Contains(out.String(), "brew upgrade tool") {
+		t.Errorf("stdout %q does not name the manager and its upgrade command", out.String())
+	}
+}
+
+// A manager with no UpgradeCommand (the built-in system-package manager)
+// renders its UpgradeHint as a natural sentence — never "Run: " followed by
+// prose, and the hint text still reaches the reader.
+func TestWriteOutcome_ManagedRedirectWithHintFallsBackFromEmptyCommand(t *testing.T) {
+	mgr := selfupdate.Manager{Name: "the system package manager", UpgradeHint: "apt, dnf, or pacman"}
+	var out bytes.Buffer
+	WriteOutcome(&out, &bytes.Buffer{}, testConfig(), selfupdate.Outcome{
+		Action:    selfupdate.ActionRedirected,
+		Detection: selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr},
+	})
+	if strings.Contains(out.String(), "Run:") {
+		t.Errorf("stdout %q must not say \"Run:\" for prose, not a command", out.String())
+	}
+	if !strings.Contains(out.String(), "the system package manager") || !strings.Contains(out.String(), "Update it with apt, dnf, or pacman.") {
+		t.Errorf("stdout %q does not render the hint as a natural sentence", out.String())
+	}
+}
+
+func TestWriteAvailabilityPreview_PlainAsciiContainsManagedVersionsAndCommand(t *testing.T) {
+	mgr := selfupdate.Homebrew("brew upgrade --cask tool")
+	availability := selfupdate.Availability{
+		Result:    selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0"},
+		Detection: selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr},
+	}
+	var out bytes.Buffer
+	WriteAvailabilityPreview(&out, testConfig(), availability)
+	if strings.Contains(out.String(), "\x1b[") {
+		t.Fatalf("piped preview contains ANSI: %q", out.String())
+	}
+	for _, want := range []string{"tool self-update", "Current", "1.0.0", "Latest", "1.1.0", "Install", "Homebrew", "Command", "brew upgrade --cask tool"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("preview %q missing %q", out.String(), want)
+		}
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		if len(line) > 80 {
+			t.Errorf("preview line width = %d, want <= 80: %q", len(line), line)
+		}
+	}
+}
+
+// A manager with only an UpgradeHint (no UpgradeCommand) gets an "Update"
+// preview row carrying the hint's prose, never a "Command" row — that label
+// is reserved for an actual copy-pasteable command.
+func TestWriteAvailabilityPreview_HintWithoutCommandUsesUpdateRow(t *testing.T) {
+	mgr := selfupdate.Manager{Name: "the system package manager", UpgradeHint: "apt, dnf, or pacman"}
+	availability := selfupdate.Availability{
+		Result:    selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0"},
+		Detection: selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr},
+	}
+	var out bytes.Buffer
+	WriteAvailabilityPreview(&out, testConfig(), availability)
+	if strings.Contains(out.String(), "Command") {
+		t.Errorf("preview %q must not label prose as Command", out.String())
+	}
+	for _, want := range []string{"Update", "apt, dnf, or pacman"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("preview %q missing %q", out.String(), want)
+		}
+	}
+}
+
+func TestRenderAvailabilityPreview_ColorsWhenWriterSupportsANSI(t *testing.T) {
+	availability := selfupdate.Availability{Result: selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0"}}
+	var out bytes.Buffer
+	writer := colorprofile.NewWriter(&out, []string{"TERM=xterm-256color"})
+	writer.Profile = colorprofile.ANSI
+	_, err := writer.WriteString(renderAvailabilityPreview(testConfig(), availability))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "\x1b[") {
+		t.Errorf("ANSI writer output = %q, want color sequences", out.String())
+	}
+}
+
+func TestAvailabilityPreviewNoColorOverridesCLICOLORForce(t *testing.T) {
+	profile := colorprofile.Env([]string{"TERM=xterm-256color", "NO_COLOR=1", "CLICOLOR_FORCE=1"})
+	if profile != colorprofile.ASCII {
+		t.Errorf("color profile = %v, want ASCII when NO_COLOR overrides CLICOLOR_FORCE", profile)
+	}
+	t.Setenv("TERM", "dumb")
+	t.Setenv("NO_COLOR", "1")
+	t.Setenv("CLICOLOR_FORCE", "1")
+	var out bytes.Buffer
+	WriteAvailabilityPreview(&out, testConfig(), selfupdate.Availability{Result: selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0"}})
+	if strings.Contains(out.String(), "\x1b[") {
+		t.Errorf("NO_COLOR preview contains ANSI: %q", out.String())
+	}
+}
+
+func TestTerminalWriterHandlesColorProfiles(t *testing.T) {
+	var out bytes.Buffer
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("CLICOLOR_FORCE", "1")
+	writeTerminal(&out, titleStyle.Render("terminal"))
+	if _, err := terminalWriter(&out).WriteString(titleStyle.Render("title")); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("NO_COLOR", "1")
+	if _, err := terminalWriter(&out).WriteString(titleStyle.Render("plain")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWriteAvailabilityPreview_PinnedUsesTargetNotLatest(t *testing.T) {
+	availability := selfupdate.Availability{
+		Result: selfupdate.CheckResult{Current: "1.1.0", Latest: "0.9.0"},
+		Target: "0.9.0", Pinned: true,
+	}
+	var out bytes.Buffer
+	WriteAvailabilityPreview(&out, testConfig(), availability)
+	if strings.Contains(out.String(), "Latest") || !strings.Contains(out.String(), "Target") {
+		t.Errorf("pinned preview = %q, want Target without Latest", out.String())
+	}
+}
+
+func TestWriteAvailabilityPreview_UnavailableLatestWrapsWithin80Columns(t *testing.T) {
+	availability := selfupdate.Availability{
+		Result:  selfupdate.CheckResult{Current: "1.0.0"},
+		Warning: errors.New(strings.Repeat("release lookup unavailable ", 10)),
+	}
+	var out bytes.Buffer
+	WriteAvailabilityPreview(&out, testConfig(), availability)
+	if !strings.Contains(out.String(), "Latest : unavailable") {
+		t.Errorf("preview = %q, want unavailable latest", out.String())
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		if len(line) > 80 {
+			t.Errorf("preview line width = %d, want <= 80: %q", len(line), line)
+		}
+	}
+}
+
+func TestPreviewValueWrappingAndTruncation(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string
+		width       int
+		wantLines   int
+	}{
+		{name: "short", value: "short", width: 10, wantLines: 1},
+		{name: "space boundary", value: "one two three", width: 7, wantLines: 2},
+		{name: "no spaces", value: "abcdefgh", width: 3, wantLines: 3},
+		{name: "zero width", value: "value", width: 0, wantLines: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := wrapPreviewValue(tc.value, tc.width); len(got) != tc.wantLines {
+				t.Errorf("wrapPreviewValue(%q, %d) = %q, want %d lines", tc.value, tc.width, got, tc.wantLines)
+			}
+		})
+	}
+	if got := truncatePreviewValue("short", 10); got != "short" {
+		t.Errorf("truncate short = %q", got)
+	}
+	if got := truncatePreviewValue("very long value", 8); !strings.HasSuffix(got, "...") {
+		t.Errorf("truncate long = %q, want ellipsis", got)
+	}
+}
+
+func TestWriteAvailabilityWarningOnlyWritesWhenPresent(t *testing.T) {
+	var out bytes.Buffer
+	WriteAvailabilityWarning(&out, selfupdate.Outcome{})
+	if out.Len() != 0 {
+		t.Errorf("nil warning output = %q, want empty", out.String())
+	}
+	WriteAvailabilityWarning(&out, selfupdate.Outcome{ReleaseCheckWarning: errors.New("github unavailable")})
+	if !strings.Contains(out.String(), "github unavailable") {
+		t.Errorf("warning output = %q", out.String())
+	}
+}
+
+func TestWriteOutcome_ManagerExecuted(t *testing.T) {
+	mgr := selfupdate.Homebrew("brew upgrade --cask tool").WithExecutableUpgrade("brew", "upgrade", "--cask", "tool")
+	var out bytes.Buffer
+	WriteOutcome(&out, &bytes.Buffer{}, testConfig(), selfupdate.Outcome{
+		Action:    selfupdate.ActionManagerExecuted,
+		Detection: selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr},
+	})
+	if !strings.Contains(out.String(), "Homebrew") || !strings.Contains(out.String(), "completed") {
+		t.Errorf("stdout %q does not report the completed manager update", out.String())
+	}
+	if !strings.Contains(out.String(), "hash -r") {
+		t.Errorf("stdout %q does not explain how to refresh a cached command path", out.String())
+	}
+}
+
+// A redirected outcome without a Manager (a contradiction the caller should
+// never actually produce) prints nothing rather than a half-sentence.
+func TestWriteOutcome_ManagedRedirectWithoutManagerPrintsNothing(t *testing.T) {
+	var out bytes.Buffer
+	WriteOutcome(&out, &bytes.Buffer{}, testConfig(), selfupdate.Outcome{Action: selfupdate.ActionRedirected})
+	if out.String() != "" {
+		t.Errorf("stdout = %q, want empty for a redirected outcome without a Manager", out.String())
+	}
+}
+
+func TestWriteOutcome_AlreadyCurrent(t *testing.T) {
+	var out bytes.Buffer
+	WriteOutcome(&out, &bytes.Buffer{}, testConfig(), selfupdate.Outcome{
+		Action: selfupdate.ActionAlreadyCurrent,
+		Result: selfupdate.CheckResult{Current: "1.0.0"},
+	})
+	if !strings.Contains(out.String(), "up to date") || !strings.Contains(out.String(), "1.0.0") {
+		t.Errorf("stdout %q does not report up to date", out.String())
+	}
+}
+
+// REQ: ahead-of-latest — text output is clear and distinct from "already up
+// to date".
+func TestWriteOutcome_Ahead(t *testing.T) {
+	var out bytes.Buffer
+	WriteOutcome(&out, &bytes.Buffer{}, testConfig(), selfupdate.Outcome{
+		Action: selfupdate.ActionAhead,
+		Result: selfupdate.CheckResult{Current: "2.0.0", Latest: "1.0.0", Verdict: selfupdate.Ahead},
+	})
+	if !strings.Contains(out.String(), "ahead") || !strings.Contains(out.String(), "2.0.0") || !strings.Contains(out.String(), "1.0.0") {
+		t.Errorf("stdout %q does not report ahead-of-latest with both versions", out.String())
+	}
+	if strings.Contains(out.String(), "up to date") {
+		t.Errorf("stdout %q must not read as an ordinary already-up-to-date report", out.String())
+	}
+}
+
+func TestWriteOutcome_Aborted(t *testing.T) {
+	var out bytes.Buffer
+	WriteOutcome(&out, &bytes.Buffer{}, testConfig(), selfupdate.Outcome{Action: selfupdate.ActionAborted})
+	if !strings.Contains(strings.ToLower(out.String()), "aborted") {
+		t.Errorf("stdout %q does not report the abort", out.String())
+	}
+}
+
+func TestWriteOutcome_PlannedUpdate(t *testing.T) {
+	var out bytes.Buffer
+	WriteOutcome(&out, &bytes.Buffer{}, testConfig(), selfupdate.Outcome{
+		Action:     selfupdate.ActionPlanned,
+		Result:     selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0"},
+		Target:     "1.1.0",
+		PlannedURL: "https://github.com/acme/tool/releases/download/v1.1.0/tool_1.1.0_linux_amd64.tar.gz",
+	})
+	if !strings.Contains(out.String(), "dry run") {
+		t.Errorf("stdout %q does not say 'dry run'", out.String())
+	}
+	if !strings.Contains(out.String(), "tool_1.1.0_linux_amd64.tar.gz") {
+		t.Errorf("stdout %q does not contain the planned asset URL", out.String())
+	}
+}
+
+func TestWriteOutcome_PlannedManagerCommand(t *testing.T) {
+	mgr := selfupdate.Homebrew("brew upgrade --cask tool").WithExecutableUpgrade("brew", "upgrade", "--cask", "tool")
+	outcome := selfupdate.Outcome{
+		Action:         selfupdate.ActionPlanned,
+		Detection:      selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr},
+		PlannedCommand: "brew upgrade --cask tool",
+	}
+	var out bytes.Buffer
+	WriteOutcome(&out, &bytes.Buffer{}, testConfig(), outcome)
+	if !strings.Contains(out.String(), "dry run") || !strings.Contains(out.String(), "brew upgrade --cask tool") {
+		t.Errorf("stdout %q does not report the planned manager command", out.String())
+	}
+
+	out.Reset()
+	if err := WriteOutcomeJSON(&out, outcome); err != nil {
+		t.Fatalf("unexpected JSON error: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("outcome JSON does not parse: %v\n%s", err, out.String())
+	}
+	if got["command"] != "brew upgrade --cask tool" {
+		t.Errorf("command = %v, want planned manager command", got["command"])
+	}
+}
+
+func TestWriteOutcome_PlannedDowngrade(t *testing.T) {
+	var out bytes.Buffer
+	WriteOutcome(&out, &bytes.Buffer{}, testConfig(), selfupdate.Outcome{
+		Action:     selfupdate.ActionPlanned,
+		Result:     selfupdate.CheckResult{Current: "1.1.0", Latest: "1.0.0"},
+		Target:     "1.0.0",
+		Downgrade:  true,
+		PlannedURL: "https://github.com/acme/tool/releases/download/v1.0.0/tool_1.0.0_linux_amd64.tar.gz",
+	})
+	if !strings.Contains(out.String(), "dry run: would downgrade") {
+		t.Errorf("stdout %q does not say 'dry run: would downgrade'", out.String())
+	}
+}
+
+func TestWriteOutcome_UpdatedWithoutWarning(t *testing.T) {
+	var out, errOut bytes.Buffer
+	WriteOutcome(&out, &errOut, testConfig(), selfupdate.Outcome{Action: selfupdate.ActionUpdated, Target: "1.1.0"})
+	if !strings.Contains(out.String(), "updated to 1.1.0") {
+		t.Errorf("stdout %q does not report the update", out.String())
+	}
+	if !strings.Contains(out.String(), "hash -r") || !strings.Contains(out.String(), "new shell") {
+		t.Errorf("stdout %q does not explain how to refresh a cached command path", out.String())
+	}
+	if errOut.String() != "" {
+		t.Errorf("stderr = %q, want empty without a post-swap warning", errOut.String())
+	}
+}
+
+func TestWriteOutcomeJSON_UpdatedIncludesShellRefreshHint(t *testing.T) {
+	var out bytes.Buffer
+	if err := WriteOutcomeJSON(&out, selfupdate.Outcome{Action: selfupdate.ActionUpdated, Target: "1.1.0"}); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if hint, ok := got["shell_refresh_hint"].(string); !ok || !strings.Contains(hint, "hash -r") {
+		t.Errorf("shell_refresh_hint = %v, want an explicit hash refresh remedy", got["shell_refresh_hint"])
+	}
+}
+
+// A post-swap warning is surfaced on errOut without failing the command.
+func TestWriteOutcome_UpdatedWithWarning(t *testing.T) {
+	var out, errOut bytes.Buffer
+	WriteOutcome(&out, &errOut, testConfig(), selfupdate.Outcome{
+		Action:          selfupdate.ActionUpdated,
+		Target:          "1.1.0",
+		PostSwapWarning: errors.New("version probe mismatch"),
+	})
+	if !strings.Contains(errOut.String(), "version probe mismatch") {
+		t.Errorf("stderr %q does not contain the post-swap warning", errOut.String())
+	}
+}
+
+func TestWriteOutcome_AfterUpdateWarningUsesStderr(t *testing.T) {
+	var out, errOut bytes.Buffer
+	WriteOutcome(&out, &errOut, testConfig(), selfupdate.Outcome{
+		Action:             selfupdate.ActionAlreadyCurrent,
+		AfterUpdateWarning: errors.New("skills refresh canceled"),
+	})
+	if !strings.Contains(errOut.String(), "post-update warning") || !strings.Contains(errOut.String(), "skills refresh canceled") {
+		t.Errorf("stderr %q does not contain the separate post-update warning", errOut.String())
+	}
+}
+
+// --- WriteOutcomeJSON ---
+
+func TestWriteOutcomeJSON_AllActions(t *testing.T) {
+	mgr := selfupdate.Homebrew("brew upgrade tool")
+	cases := []struct {
+		name    string
+		outcome selfupdate.Outcome
+		wantAct string
+	}{
+		{"redirected", selfupdate.Outcome{Action: selfupdate.ActionRedirected, Detection: selfupdate.Detection{Manager: &mgr}}, "redirected"},
+		{"redirected_no_manager", selfupdate.Outcome{Action: selfupdate.ActionRedirected}, "redirected"},
+		{"already_current", selfupdate.Outcome{Action: selfupdate.ActionAlreadyCurrent, Result: selfupdate.CheckResult{Current: "1.0.0"}}, "already_current"},
+		{"aborted", selfupdate.Outcome{Action: selfupdate.ActionAborted, Target: "1.1.0"}, "aborted"},
+		{"updated", selfupdate.Outcome{Action: selfupdate.ActionUpdated, Target: "1.1.0"}, "updated"},
+		{"manager_executed", selfupdate.Outcome{Action: selfupdate.ActionManagerExecuted, Detection: selfupdate.Detection{Manager: &mgr}}, "manager_executed"},
+		{"planned", selfupdate.Outcome{Action: selfupdate.ActionPlanned, Target: "1.1.0", PlannedURL: "https://example.test/asset"}, "planned"},
+		{"updated_with_downgrade_and_warning", selfupdate.Outcome{
+			Action: selfupdate.ActionUpdated, Target: "0.9.0", Downgrade: true,
+			PostSwapWarning: errors.New("mismatch"),
+		}, "updated"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var out bytes.Buffer
+			if err := WriteOutcomeJSON(&out, c.outcome); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			var got map[string]any
+			if jsonErr := json.Unmarshal(out.Bytes(), &got); jsonErr != nil {
+				t.Fatalf("output is not valid JSON: %v\noutput: %s", jsonErr, out.String())
+			}
+			if got["action"] != c.wantAct {
+				t.Errorf("action = %v, want %q", got["action"], c.wantAct)
+			}
+		})
+	}
+}
+
+func TestWriteOutcomeJSON_ManagedAvailabilityAndWarningStayStructured(t *testing.T) {
+	mgr := selfupdate.Homebrew("brew upgrade --cask tool")
+	var out bytes.Buffer
+	err := WriteOutcomeJSON(&out, selfupdate.Outcome{
+		Action:              selfupdate.ActionRedirected,
+		Detection:           selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr},
+		Result:              selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0"},
+		ReleaseCheckWarning: errors.New("github unavailable"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("JSON does not parse: %v", err)
+	}
+	if got["current"] != "1.0.0" || got["latest"] != "1.1.0" || got["release_check_warning"] != "github unavailable" {
+		t.Errorf("JSON = %#v, want current/latest/warning", got)
+	}
+}
+
+func TestWriteOutcomeJSON_AfterUpdateWarningKeepsStdoutParseable(t *testing.T) {
+	var out bytes.Buffer
+	if err := WriteOutcomeJSON(&out, selfupdate.Outcome{
+		Action:             selfupdate.ActionAlreadyCurrent,
+		AfterUpdateWarning: errors.New("skills refresh canceled"),
+	}); err != nil {
+		t.Fatalf("WriteOutcomeJSON() error = %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("stdout JSON does not parse: %v\n%s", err, out.String())
+	}
+	if got["after_update_warning"] != "skills refresh canceled" {
+		t.Errorf("after_update_warning = %v, want skills refresh canceled", got["after_update_warning"])
+	}
+}
+
+func TestWriteOutcomeJSON_WriteError(t *testing.T) {
+	err := WriteOutcomeJSON(errWriter{err: errors.New("write fail")}, selfupdate.Outcome{Action: selfupdate.ActionUpdated})
+	if err == nil {
+		t.Fatal("expected the writer's error to propagate, got nil")
+	}
+}
+
+// --- WriteCheck ---
+
+func TestWriteCheck_UpToDate(t *testing.T) {
+	var out bytes.Buffer
+	WriteCheck(&out, testConfig(), selfupdate.CheckResult{Current: "1.0.0", Latest: "1.0.0", Verdict: selfupdate.UpToDate})
+	if !strings.Contains(out.String(), "up to date") {
+		t.Errorf("stdout %q does not report up to date", out.String())
+	}
+}
+
+// REQ: ahead-of-latest — a check on an ahead-of-latest build reads clearly
+// and is never confused with an ordinary "up to date" report.
+func TestWriteCheck_Ahead(t *testing.T) {
+	var out bytes.Buffer
+	WriteCheck(&out, testConfig(), selfupdate.CheckResult{Current: "2.0.0", Latest: "1.0.0", Verdict: selfupdate.Ahead})
+	if !strings.Contains(out.String(), "ahead") || !strings.Contains(out.String(), "2.0.0") || !strings.Contains(out.String(), "1.0.0") {
+		t.Errorf("stdout %q does not report ahead-of-latest with both versions", out.String())
+	}
+}
+
+func TestWriteCheck_Undetermined(t *testing.T) {
+	var out bytes.Buffer
+	WriteCheck(&out, testConfig(), selfupdate.CheckResult{Current: "dev", Latest: "1.1.0", Verdict: selfupdate.Undetermined})
+	if !strings.Contains(strings.ToLower(out.String()), "undetermined") {
+		t.Errorf("stdout %q does not mention undetermined", out.String())
+	}
+}
+
+func TestWriteCheck_UpdateAvailable(t *testing.T) {
+	var out bytes.Buffer
+	WriteCheck(&out, testConfig(), selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0", Verdict: selfupdate.UpdateAvailable})
+	if !strings.Contains(out.String(), "1.0.0") || !strings.Contains(out.String(), "1.1.0") {
+		t.Errorf("stdout %q does not report the available update", out.String())
+	}
+}
+
+// --- WriteCheckJSON ---
+
+func TestWriteCheckJSON_CarriesInstallMethod(t *testing.T) {
+	mgr := selfupdate.Homebrew("brew upgrade --cask tool")
+	var out bytes.Buffer
+	if err := WriteCheckJSON(&out, testConfig(),
+		selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0", Verdict: selfupdate.UpdateAvailable},
+		selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("check JSON does not parse: %v\n%s", err, out.String())
+	}
+	for key, want := range map[string]string{
+		"current":         "1.0.0",
+		"latest":          "1.1.0",
+		"verdict":         "update_available",
+		"install_method":  "managed",
+		"manager":         "Homebrew",
+		"upgrade_command": "brew upgrade --cask tool",
+	} {
+		if got[key] != want {
+			t.Errorf("check JSON[%q] = %v, want %q\n%s", key, got[key], want, out.String())
+		}
+	}
+}
+
+func TestWriteCheckJSON_NoManagerOmitsManagerFields(t *testing.T) {
+	var out bytes.Buffer
+	if err := WriteCheckJSON(&out, testConfig(),
+		selfupdate.CheckResult{Current: "1.0.0", Latest: "1.0.0", Verdict: selfupdate.UpToDate},
+		selfupdate.Detection{Method: selfupdate.Manual}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("check JSON does not parse: %v\n%s", err, out.String())
+	}
+	if _, ok := got["manager"]; ok {
+		t.Errorf("check JSON unexpectedly contains 'manager' with no Manager set:\n%s", out.String())
+	}
+}
+
+func TestWriteCheckJSON_ExecutableManagerIsMachineReadable(t *testing.T) {
+	mgr := selfupdate.Homebrew("brew upgrade --cask tool").WithExecutableUpgrade("brew", "upgrade", "--cask", "tool")
+	var out bytes.Buffer
+	if err := WriteCheckJSON(&out, testConfig(),
+		selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0", Verdict: selfupdate.UpdateAvailable},
+		selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("check JSON does not parse: %v\n%s", err, out.String())
+	}
+	if got["managed_update_executable"] != true {
+		t.Errorf("managed_update_executable = %v, want true\n%s", got["managed_update_executable"], out.String())
+	}
+}
+
+func TestWriteCheckJSON_CarriesUpgradeHint(t *testing.T) {
+	mgr := selfupdate.Manager{Name: "the system package manager", UpgradeHint: "apt, dnf, or pacman"}
+	var out bytes.Buffer
+	if err := WriteCheckJSON(&out, testConfig(),
+		selfupdate.CheckResult{Current: "1.0.0", Latest: "1.1.0", Verdict: selfupdate.UpdateAvailable},
+		selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("check JSON does not parse: %v\n%s", err, out.String())
+	}
+	if got["upgrade_hint"] != "apt, dnf, or pacman" {
+		t.Errorf("check JSON[upgrade_hint] = %v, want %q\n%s", got["upgrade_hint"], "apt, dnf, or pacman", out.String())
+	}
+	if _, ok := got["upgrade_command"]; ok {
+		t.Errorf("check JSON unexpectedly contains upgrade_command with none set:\n%s", out.String())
+	}
+}
+
+func TestWriteCheckJSON_WriteError(t *testing.T) {
+	err := WriteCheckJSON(errWriter{err: errors.New("write fail")}, testConfig(),
+		selfupdate.CheckResult{Verdict: selfupdate.UpToDate}, selfupdate.Detection{})
+	if err == nil {
+		t.Fatal("expected the writer's error to propagate, got nil")
+	}
+}
+
+// --- WriteNextStep ---
+
+func TestWriteNextStep_PerInstallMethod(t *testing.T) {
+	mgr := selfupdate.Homebrew("brew upgrade --cask tool")
+	cases := []struct {
+		name      string
+		detection selfupdate.Detection
+		want      []string
+	}{
+		{
+			name:      "managed names the manager command",
+			detection: selfupdate.Detection{Method: selfupdate.Managed, Manager: &mgr},
+			want:      []string{"Homebrew", "brew upgrade --cask tool"},
+		},
+		{
+			name: "executable manager points back to self-update",
+			detection: func() selfupdate.Detection {
+				executable := selfupdate.Homebrew("brew upgrade --cask tool").WithExecutableUpgrade("brew", "upgrade", "--cask", "tool")
+				return selfupdate.Detection{Method: selfupdate.Managed, Manager: &executable}
+			}(),
+			want: []string{"through Homebrew", "tool self-update"},
+		},
+		{
+			name: "redirect-only manager with only a hint renders a natural sentence, never Run:",
+			detection: func() selfupdate.Detection {
+				hintOnly := selfupdate.Manager{Name: "the system package manager", UpgradeHint: "apt, dnf, or pacman"}
+				return selfupdate.Detection{Method: selfupdate.Managed, Manager: &hintOnly}
+			}(),
+			want: []string{"the system package manager", "Update it with apt, dnf, or pacman."},
+		},
+		{
+			name:      "manual names this very command",
+			detection: selfupdate.Detection{Method: selfupdate.Manual},
+			want:      []string{"To upgrade, run: tool self-update"},
+		},
+		{
+			name:      "ambiguous prints the refusal guidance",
+			detection: selfupdate.Detection{Method: selfupdate.Ambiguous},
+			want:      []string{"ambiguous"},
+		},
+		{
+			name:      "managed without a manager falls back to guidance",
+			detection: selfupdate.Detection{Method: selfupdate.Managed},
+			want:      []string{"ambiguous"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			WriteNextStep(&out, testConfig(), tc.detection, "tool self-update")
+			for _, want := range tc.want {
+				if !strings.Contains(out.String(), want) {
+					t.Errorf("next-step output missing %q:\n%s", want, out.String())
+				}
+			}
+		})
+	}
+}
+
+// WriteNextStep's redirect-only branch must not print "Run:" (or the
+// multi-line "Run the following to upgrade:" form) when there is no
+// UpgradeCommand — only the natural-sentence hint form.
+func TestWriteNextStep_RedirectOnlyHintNeverSaysRun(t *testing.T) {
+	hintOnly := selfupdate.Manager{Name: "the system package manager", UpgradeHint: "apt, dnf, or pacman"}
+	var out bytes.Buffer
+	WriteNextStep(&out, testConfig(), selfupdate.Detection{Method: selfupdate.Managed, Manager: &hintOnly}, "tool self-update")
+	if strings.Contains(out.String(), "Run") {
+		t.Errorf("next-step output %q must not say \"Run\" for prose, not a command", out.String())
+	}
+}
+
+// --- WriteAmbiguousGuidance ---
+
+func TestWriteAmbiguousGuidance_NoManagers(t *testing.T) {
+	var out bytes.Buffer
+	WriteAmbiguousGuidance(&out, testConfig())
+	if !strings.Contains(strings.ToLower(out.String()), "ambiguous") {
+		t.Errorf("stdout %q does not print ambiguous-install guidance", out.String())
+	}
+	if !strings.Contains(out.String(), "acme/tool") {
+		t.Errorf("stdout %q does not reference the repository for manual download", out.String())
+	}
+}
+
+func TestWriteAmbiguousGuidance_ListsEveryManager(t *testing.T) {
+	cfg := testConfig()
+	cfg.Managers = []selfupdate.Manager{
+		selfupdate.Homebrew("brew upgrade tool"),
+		selfupdate.Scoop("scoop update tool"),
+	}
+	var out bytes.Buffer
+	WriteAmbiguousGuidance(&out, cfg)
+	if !strings.Contains(out.String(), "brew upgrade tool") || !strings.Contains(out.String(), "scoop update tool") {
+		t.Errorf("stdout %q does not list every configured manager's upgrade command", out.String())
+	}
+}

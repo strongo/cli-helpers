@@ -1,0 +1,13 @@
+{
+  "repo": "chatwright/cli",
+  "tag": "v0.8.0",
+  "version": "0.8.0",
+  "assets": [
+    "chatwright_0.8.0_checksums.txt",
+    "chatwright_0.8.0_darwin_amd64.tar.gz",
+    "chatwright_0.8.0_darwin_arm64.tar.gz",
+    "chatwright_0.8.0_linux_amd64.tar.gz",
+    "chatwright_0.8.0_linux_arm64.tar.gz",
+    "chatwright_0.8.0_windows_amd64.zip"
+  ]
+}

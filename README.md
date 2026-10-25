@@ -1,10 +1,11 @@
-# selfupdate
+# cli-helpers
 
-`github.com/strongo/selfupdate` lets a Go CLI update its own binary in
+`github.com/strongo/cli-helpers/selfupdate` lets a Go CLI update its own binary in
 place — safely. It decides how the running binary was installed before it
 touches anything: a package-manager-owned install (Homebrew, Scoop, WinGet)
-is never overwritten, only redirected to that manager's own upgrade command;
-a manual install (a release archive someone unpacked, or a `go install`
+is never overwritten directly. It is redirected to that manager's own upgrade
+command by default, or can explicitly delegate to structured manager argv; a
+manual install (a release archive someone unpacked, or a `go install`
 target) is downloaded, sha256-verified against the release's own checksums,
 and swapped in atomically. Everything specific to one CLI — its identity,
 its managers, its naming conventions, its exit codes — is supplied by the
@@ -15,14 +16,39 @@ this package implements, and `cmd/selfupdate/` for a complete, runnable
 consumer (this module's own reference CLI, which updates itself from this
 repository's GitHub releases using nothing but the public API below).
 
+`github.com/strongo/cli-helpers/daemonlifecycle` supplies the narrow
+OS-sensitive layer shared by CLI daemons: owner-only state paths,
+cancellable advisory file locks, a detached start that returns to a piped
+caller (`ConfigureDetached`, `StartDetached`), and a clock-step-proof pid identity
+(`ProcessIdentity`, `TerminateIfSameProcess`) on Linux, macOS and Windows
+without cgo. Readiness, timeouts, lifecycle state, and recovery policy remain
+consumer-owned.
+
+`github.com/strongo/cli-helpers/cliinstall` gives every fleet CLI an
+`install` command: `<cli> install` lists the other fleet CLIs relevant to
+this one, each with its installed status; `<cli> install <name>...` shows
+details and installs them the same way the host itself was installed —
+`brew install --cask` on a Homebrew host, or a verified direct release
+download otherwise — reusing `selfupdate`'s own download, checksum and
+placement machinery rather than re-implementing it. See
+`spec/features/cli-install/README.md` for the full behavioral contract and
+[Install command](#install-command) below for wiring.
+
+`github.com/strongo/cli-helpers/fsutil` holds two UI-free path helpers
+shared by CLIs and terminal apps: `ExpandHome` (expands a leading `~` or `~/`,
+returning the path unchanged if the home directory is unknown) and `DirExists`
+(false with a nil error for a missing path, the stat error for any other
+failure). Standard library only.
+
 ## Safety guarantees
 
-- **A managed install is redirected, never overwritten.** `Classify`
+- **A managed install is never overwritten directly.** `Classify`
   resolves symlinks first (a Homebrew cask shim usually is one) and checks
-  the result against each configured `Manager`'s path markers. A match
-  routes to `ActionRedirected` under every option combination — including an
-  explicit version pin and a skipped confirmation — before any download or
-  write is even considered.
+  the result against each configured `Manager`'s path markers. A match routes
+  to `ActionRedirected` unless the consumer explicitly configured an
+  executable and argv. Executable mode confirms and invokes the manager
+  without a shell; it still never downloads or writes the managed binary
+  itself, and it refuses release pins the manager cannot guarantee.
 - **An unrecognized install is never treated as safe to overwrite.** A path
   that matches neither a manager nor a plausible manual location (`go/bin`,
   or directly inside a `bin` directory) is `Ambiguous`, not `Manual`.
@@ -49,8 +75,87 @@ repository's GitHub releases using nothing but the public API below).
 ## Install
 
 ```
-go get github.com/strongo/selfupdate
+go get github.com/strongo/cli-helpers/selfupdate
 ```
+
+## Import migration
+
+The package now lives in the `github.com/strongo/cli-helpers` module. Maintained
+consumers must replace these imports together:
+
+| Previous import | Current import |
+| --- | --- |
+| `github.com/strongo/selfupdate` | `github.com/strongo/cli-helpers/selfupdate` |
+| `github.com/strongo/selfupdate/cobracmd` | `github.com/strongo/cli-helpers/selfupdate/cobracmd` |
+| `github.com/strongo/selfupdate/cliui` | `github.com/strongo/cli-helpers/selfupdate/cliui` |
+
+Historical `github.com/strongo/selfupdate` tags remain available at their
+published versions. New `github.com/strongo/cli-helpers` releases use the new
+module path, so consumers must not request the old path at `@latest`.
+
+## Build a publishable skills snapshot
+
+`cmd/skillsbundle` is the shared, offline producer for every Strongo CLI and
+skills plugin. CI resolves a branch or tag to its full commit SHA first, checks
+out the plugin repository locally, and invokes the producer against that exact
+committed tree. It never reads uncommitted or ignored checkout files, fetches
+the network, or accepts a short SHA.
+
+Create a descriptor with plugin identity, repository, source path, full
+revision, plugin version, and optional CLI compatibility bounds. `digest` may
+be omitted; if supplied it must match the committed content. `source.version`
+is the plugin's own version, independent of any CLI release tag.
+
+```json
+{"plugin":{"publisher":"strongo","name":"example-skills"},"source":{"repository":"github.com/strongo/example-skills","path":"skills","revision":"0123456789012345678901234567890123456789","version":"1.2.3"}}
+```
+
+Run it from a colocated CLI repository or from a separately checked-out plugin
+repository:
+
+```sh
+go run github.com/strongo/cli-helpers/cmd/skillsbundle \
+  --descriptor ci/skills-bundle.json --repo "$GITHUB_WORKSPACE" --out dist/skills
+```
+
+The fresh output directory contains `skillsync-bundle.tar`,
+`skillsync-bundle.json`, and `embed/{bundle.json,content/...}`. All come from
+one captured committed snapshot, preserving tracked dotfiles and executable
+modes. If `origin` exists, its normalized repository identity must agree with
+the descriptor; without one, the tool verifies local Git commit/tree provenance
+but cannot independently attest the repository name. It never overwrites an
+existing output path and returns an error rather than claiming publication on a
+partial failure.
+
+Use `all:` when embedding the generated directory so tracked dotfiles remain
+available to the embedded snapshot. The descriptor retains executable paths,
+because `embed.FS` does not preserve executable modes.
+
+```go
+import "embed"
+
+//go:embed all:generated/skills/embed
+var generatedSkills embed.FS
+```
+
+## Adopting an existing skill folder, or not
+
+`skillsync.Sync` adopts an unmanaged target folder that already is the bundled
+skill (matching `SKILL.md` name, no file the bundle does not ship): it keeps a
+durable backup, replaces the folder, and reports `adopted`. That stays the
+default. A host that must not take a folder over without being asked, such as a
+server answering clients of several versions, sets `Options.NoAdopt`: the same
+folder is then reported as a `conflict` with the reason `unmanaged target`,
+left byte-identical, with `Change.Adoptable` (`"adoptable": true` in JSON) set
+so the host can offer the take-over and call `Sync` again without `NoAdopt`.
+The decision is made inside the target lock, at the write and after any pending
+recovery journal has been recovered, so no check of the host's own can go stale.
+Every report is byte-identical with the flag on and off except for a folder that
+very call would have adopted. `NoAdopt` governs the call's own take-over, not a
+transaction an earlier call began: if a pending recovery journal is an
+interrupted adoption of the same folder, begun by a call that did not set
+`NoAdopt`, the next call recovers it forward, the folder ends up owned and is
+reported `unchanged`, and that call makes no backup of its own.
 
 ## Wiring example
 
@@ -61,8 +166,8 @@ package cli
 
 import (
 	"github.com/spf13/cobra"
-	"github.com/strongo/selfupdate"
-	"github.com/strongo/selfupdate/cobracmd"
+	"github.com/strongo/cli-helpers/selfupdate"
+	"github.com/strongo/cli-helpers/selfupdate/cobracmd"
 )
 
 // version is stamped at link time, e.g. -ldflags "-X your/module.version=v1.2.3".
@@ -78,7 +183,7 @@ func newSelfUpdateCommand() *cobra.Command {
 		// "unknown" instead.
 		UndeterminedVersions: []string{"unknown"},
 		Managers: []selfupdate.Manager{
-			selfupdate.Homebrew("brew upgrade --cask wb"),
+			selfupdate.HomebrewCask("wb"),
 		},
 		SupportedPlatforms: []selfupdate.Platform{
 			{GOOS: "darwin", GOARCH: "amd64"},
@@ -117,9 +222,79 @@ func (wbErrors) UpdateAvailable(res selfupdate.CheckResult) error {
 }
 ```
 
+`HomebrewCask` and `HomebrewFormula` provide the same managed-update behavior
+to every consumer: refresh Homebrew metadata, run the package-specific upgrade
+as structured argv with Homebrew's `--yes`, verify the installed binary, and
+then run any configured post-update hook. The Cobra command asks once in an
+interactive terminal; `--yes` skips that prompt for non-interactive automation.
+
+A binary found in a system package directory (`/usr/bin`, `%ProgramFiles%`, and
+so on) is redirected with a hint naming the OS's own tooling; on Windows the
+default reads "Windows Update, the installer (MSI/EXE) that placed it there, or,
+for a copy extracted from an archive, a new download of that archive". A CLI
+that knows how it is distributed sets `Config.SystemPackageHint` (a fixed
+fragment) or `Config.SystemPackageHintFor(goos, dir)` to replace it;
+`Config.Classify(path)` gives the same verdict, hint included, to
+`--explain-path`-style tooling.
+
 A CLI that doesn't use Cobra calls `cfg.Check(ctx)` and `cfg.Update(ctx,
 opts)` directly — `cobracmd` is optional sugar over the same two calls; the
-root package has no command-framework dependency at all.
+root package has no command-framework dependency at all. It doesn't have to
+be hand-rolled from scratch either: `github.com/strongo/cli-helpers/selfupdate/cliui`
+holds the same confirmation prompt, non-interactive refusal, and text/JSON
+writers `cobracmd` itself is built from, with no Cobra (or any other
+framework) dependency:
+
+```go
+package cli
+
+import (
+	"context"
+	"os"
+
+	"github.com/strongo/cli-helpers/selfupdate"
+	"github.com/strongo/cli-helpers/selfupdate/cliui"
+)
+
+func selfUpdate(ctx context.Context, cfg selfupdate.Config, yes bool) error {
+	confirm := cliui.Confirm(cliui.ConfirmOptions{
+		In:  os.Stdin,
+		Out: os.Stdout,
+		Yes: yes, // wire from your own --yes/-y flag; nil Interactive -> cliui.IsTerminal
+	})
+
+	outcome, err := cfg.Update(ctx, selfupdate.Options{Confirm: confirm})
+	if err != nil {
+		if selfupdate.KindOf(err) == selfupdate.KindAmbiguous {
+			cliui.WriteAmbiguousGuidance(os.Stdout, cfg)
+		}
+		return err // map to your own exit code however you already do
+	}
+	cliui.WriteOutcome(os.Stdout, os.Stderr, cfg, outcome)
+	return nil
+}
+```
+
+`cobracmd` and `cliui` implement the exact same behavior — the former is
+just the Cobra flag/wiring layer on top of the latter — so a Cobra CLI and a
+hand-rolled one built from `cliui` directly print byte-identical output for
+the same `Outcome`/`CheckResult`.
+
+### Post-update integrations
+
+`Options.AfterUpdate` is an optional typed callback for work that must run from
+the installed binary after self-update, such as refreshing a CLI-matched skill
+bundle. It receives the completed `Outcome` and an absolute
+`ExecutableIdentity` with both the invocation path and its symlink-resolved
+target. The callback runs only after an update, an already-current result, or a
+successful executable package-manager update. For package-manager updates the
+identity is resolved after the manager finishes, so it follows a changed cask
+or version path.
+
+`cobracmd.CommandOptions.AfterUpdate` passes the same callback to the core.
+Callback failures are non-fatal `Outcome.AfterUpdateWarning` values: text output
+writes them to stderr and JSON keeps stdout parseable with an
+`after_update_warning` field.
 
 ### Why exit codes and output belong to the host, not this package
 
@@ -154,3 +329,143 @@ operation, and TTY check it makes is overridable — see `Config.ReleasesAPIURL`
 without a real terminal. The package's own test suite (this repo) exercises
 every `FailureKind`, every `Manager`, and both exit-code-contract shapes this
 way — see `*_test.go` for the pattern.
+
+## Install command
+
+`github.com/strongo/cli-helpers/cliinstall` gives every fleet CLI a shared
+`install` command: `<cli> install` lists the fleet CLIs relevant to that
+host, each with its live status (installed or not; version, labelled build
+date and short commit when installed), a one-line description and a
+one-line relevance note; `<cli> install <name>...` shows fuller details,
+confirms once, and installs consistently with how the host itself was
+installed — `brew install --cask` on a Homebrew host whose target publishes
+a cask for the host OS, otherwise a verified direct release download placed
+beside a manual host or in the per-user bin directory. Both are entirely
+offline and read-only until an install is actually confirmed
+(cli-install#req:list-offline-read-only).
+
+The catalog of installable CLIs and the host → target relevance texts are
+compiled into `cliinstall` itself, so a host sees exactly the catalog its own
+`cli-helpers` version was built with; see
+`spec/features/cli-install/README.md` for the full behavioral contract.
+
+A minimal CLI wires one `cliinstall/cobracmd.CommandOptions` and builds a
+Cobra command from it, the same shape as the self-update wiring above:
+
+```go
+package cli
+
+import (
+	"errors"
+
+	"github.com/spf13/cobra"
+
+	"github.com/strongo/cli-helpers/cliinstall/cobracmd"
+	"github.com/strongo/cli-helpers/selfupdate"
+)
+
+func newInstallCommand() *cobra.Command {
+	return cobracmd.New(cobracmd.CommandOptions{
+		HostID: "datatug", // this CLI's own catalog id
+		Errors: datatugInstallErrors{}, // maps *selfupdate.Failure/*cobracmd.UsageError onto datatug's own exit codes
+	})
+}
+
+// datatugInstallErrors implements cobracmd.ErrorMapper. Every host MUST map
+// the three new failure kinds explicitly — selfupdate.KindUnknownTarget,
+// KindNoInstallDir, KindDestinationExists — never through a self-update
+// default branch (cli-install#req:host-owned-exit-codes).
+type datatugInstallErrors struct{}
+
+func (datatugInstallErrors) Failure(err error) error {
+	var usage *cobracmd.UsageError
+	if errors.As(err, &usage) {
+		return exitError{code: 2, err: err} // invalid arguments
+	}
+	switch selfupdate.KindOf(err) {
+	case selfupdate.KindUnknownTarget:
+		return exitError{code: 2, err: err} // invalid arguments
+	case selfupdate.KindNoInstallDir, selfupdate.KindDestinationExists:
+		return exitError{code: 1, err: err} // general failure
+	default:
+		return exitError{code: 1, err: err}
+	}
+}
+```
+
+`cliinstall.InstallEnv.RunManaged` — the Homebrew cask command runner — is
+wired automatically by `cobracmd.New`'s command from the same
+`selfupdate/cliui.ManagedCommandRunner` self-update's own adapter uses, from
+the command's own `stdin`/`stdout`/`stderr`; a host never wires this itself.
+`--dry-run`, `--format text|json`, `--all`, `--yes/-y` and `--dir` are all
+registered automatically. A host with no Cobra dependency at all builds the
+same listing, details and install flow directly from `cliinstall.Probe`/
+`cliinstall.Install` plus the framework-neutral `cliinstall/cliui` writers,
+exactly as a hand-rolled self-update CLI does from `selfupdate/cliui`.
+
+## Upgrade command
+
+`cliinstall/cobracmd` also builds `upgrade`, the fleet-wide counterpart to a
+host's own `self-update`: `<cli> upgrade` (no arguments) reports every
+*installed* catalog CLI plus the host itself — current version, latest
+stable release, verdict and the exact command or destination an upgrade
+would use — without changing anything, and ends with the next step;
+`<cli> upgrade --all` and `<cli> upgrade <name>...` upgrade what the report
+showed, after one confirmation covering every target that would actually be
+replaced or have a manager command executed. `--check` reports the same way
+without applying anything; `--dry-run` walks the same decision path for
+named/`--all` targets without asking for confirmation. `upgrade --all` means
+every *installed* catalog id, not the host's own relevance matrix — a target
+that is merely relevant but not installed has nothing to upgrade.
+
+The host itself is always upgraded last, classified and versioned from its
+OWN `self-update` `Config` (never from a `PATH` probe of its own binary) —
+`<cli> self-update` and `<cli> upgrade <cli>` reach the exact same library
+call and report the same outcome (cli-install#req:self-update-equals-upgrade-self).
+A separate PATH copy of the host, if one exists, is reported as a warning
+and left untouched.
+
+```go
+package cli
+
+import (
+	"github.com/spf13/cobra"
+
+	"github.com/strongo/cli-helpers/cliinstall"
+	"github.com/strongo/cli-helpers/cliinstall/cobracmd"
+	"github.com/strongo/cli-helpers/selfupdate"
+)
+
+func newUpgradeCommand() *cobra.Command {
+	return cobracmd.NewUpgrade(cobracmd.UpgradeCommandOptions{
+		HostID: "datatug", // this CLI's own catalog id
+		Errors: datatugUpgradeErrors{}, // implements both cobracmd.ErrorMapper and cobracmd.UpgradeErrorMapper
+		// HostConfig is the SAME selfupdate.Config datatug's own self-update
+		// command builds — same Managers, same CurrentVersion, same release
+		// endpoints — so `upgrade datatug` and `self-update` agree by
+		// construction, not by convention.
+		HostConfig:      datatugSelfUpdateConfig(),
+		HostAfterUpdate: datatugAfterUpdate, // the SAME hook, if any, self-update passes
+	})
+}
+
+// datatugUpgradeErrors extends datatugInstallErrors (see above) with the
+// upgrades-available method cli-install#req:upgrade-check requires; a host
+// that implements only cobracmd.ErrorMapper simply never receives that call.
+type datatugUpgradeErrors struct{ datatugInstallErrors }
+
+func (datatugUpgradeErrors) UpgradesAvailable(results []cliinstall.UpgradeResult) error {
+	return exitError{code: 5, err: errors.New("upgrades available")} // datatug's own dedicated code, if it wants one
+}
+```
+
+`cliinstall.UpgradeOptions.Env.RunManaged` is wired automatically the same
+way install's is — from `selfupdate/cliui.ManagedCommandRunner`, never by
+the host. `--all`, `--check`, `--yes/-y`, `--dry-run` and `--format
+text|json` are registered automatically; there is no `--dir` (upgrade always
+acts on the copy status-probing already located) and no `update` alias
+(REQ: update-alias-policy — `self-update`'s own `update` alias, where one
+already ships, is unaffected). A host with no Cobra dependency at all builds
+the same report, dry-run and upgrade flow directly from
+`cliinstall.PlanUpgrade`/`CheckUpgrades`/`Upgrade` plus the framework-neutral
+`cliinstall/cliui` upgrade writers.

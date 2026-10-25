@@ -1,0 +1,330 @@
+// Package skillsync installs immutable, CLI-pinned Agent Skills bundles into
+// supported harness directories. It owns no command framework or product
+// policy: callers supply their identity, embedded bundle snapshots, targets,
+// and any host-specific error mapping.
+package skillsync
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"sort"
+	"time"
+)
+
+var (
+	ErrInvalidConfig     = errors.New("invalid skills sync configuration")
+	ErrDigestMismatch    = errors.New("bundle digest mismatch")
+	ErrStateCorrupt      = errors.New("skills sync state is corrupt")
+	ErrRecoveryPending   = errors.New("skills sync recovery is pending")
+	ErrNoNewerCompatible = errors.New("no newer compatible bundle")
+	ErrSearchIncomplete  = errors.New("newer-compatible release search incomplete")
+)
+
+// Identity identifies the CLI that supplied a bundle. It is recorded as
+// provenance only; plugin ownership always uses PluginIdentity.
+type Identity struct {
+	Publisher string `json:"publisher"`
+	Name      string `json:"name"`
+}
+
+func (i Identity) String() string {
+	return i.Publisher + "/" + i.Name
+}
+
+// PluginIdentity is globally stable and deliberately separate from a skill
+// directory name, which avoids flat-directory collisions between products.
+//
+// A plugin identity is also Sync's independent-install and removal boundary:
+// one Sync call computes desired state, including removals, only within the
+// plugin keys present in that call's Config.Bundles, and only from skills
+// that plugin key already owns. Two skills sharing one PluginIdentity are
+// therefore installed and removed together — Sync-ing one of them alone
+// drops the other, because it is no longer "desired" under that shared key.
+// A caller that wants each skill installable and removable on its own (for
+// example a CLI offering per-skill consent, one `install <skill>` call per
+// bundle) MUST give each such skill its own PluginIdentity. Skills owned by a
+// different plugin key, or never registered with skillsync at all, are never
+// touched by a Sync call that does not name their key.
+type PluginIdentity struct {
+	Publisher string `json:"publisher"`
+	Name      string `json:"name"`
+}
+
+func (p PluginIdentity) String() string {
+	return p.Publisher + "/" + p.Name
+}
+
+// Compatibility limits the CLI versions a bundle can be installed by. Empty
+// bounds are open; values use numeric dot-separated versions, optionally with
+// a leading "v". Pre-release selection is intentionally host policy.
+type Compatibility struct {
+	MinCLI string `json:"min_cli,omitempty"`
+	MaxCLI string `json:"max_cli,omitempty"`
+}
+
+// Source is reproducible bundle provenance. Repository, Path, Revision, and
+// Digest identify exact bytes; Version names the plugin release for people
+// and plugin hosts. It is persisted with ownership state for diagnostics.
+type Source struct {
+	Repository    string        `json:"repository"`
+	Path          string        `json:"path"`
+	Revision      string        `json:"revision"`
+	Version       string        `json:"version"`
+	Digest        string        `json:"digest"`
+	Compatibility Compatibility `json:"compatibility,omitempty"`
+}
+
+// Bundle is an immutable source snapshot. Source is its sole provenance and
+// version authority. ExecutablePaths preserves the executable bits that
+// embed.FS cannot represent.
+type Bundle struct {
+	Plugin          PluginIdentity
+	Source          Source
+	FS              fs.FS
+	ExecutablePaths []string
+}
+
+// BundleDescriptor is serializable build metadata. EmbeddedBundle is the
+// common loader for go:embed snapshots, so hosts need not duplicate fs.Sub,
+// source-provenance validation, or digest checks.
+type BundleDescriptor struct {
+	Plugin          PluginIdentity `json:"plugin"`
+	Source          Source         `json:"source"`
+	ExecutablePaths []string       `json:"executable_paths,omitempty"`
+}
+
+// EmbeddedBundle binds one canonical embedded tree to its immutable metadata.
+func EmbeddedBundle(d BundleDescriptor, content fs.FS) (Bundle, error) {
+	b := Bundle{Plugin: d.Plugin, Source: d.Source, FS: content, ExecutablePaths: append([]string(nil), d.ExecutablePaths...)}
+	if _, err := validateBundle(b, ""); err != nil {
+		return Bundle{}, err
+	}
+	return b, nil
+}
+
+// ValidateDescriptor verifies provenance and descriptor-only fields before a
+// remote adapter uses them for release selection. Content and executable-file
+// existence are verified later by EmbeddedBundle.
+func ValidateDescriptor(d BundleDescriptor) error {
+	if !validPlugin(d.Plugin) || !validSource(d.Source) {
+		return fmt.Errorf("%w: descriptor requires plugin and source", ErrInvalidConfig)
+	}
+	seen := map[string]bool{}
+	for _, path := range d.ExecutablePaths {
+		if path == "." || !fs.ValidPath(path) || seen[path] {
+			return fmt.Errorf("%w: invalid executable path %q", ErrInvalidConfig, path)
+		}
+		seen[path] = true
+	}
+	return nil
+}
+
+// Config declares the installed CLI and its offline matched snapshots. A
+// development build may use an undetermined CurrentVersion only when its
+// embedded matched bundles declare no compatibility bounds; it never selects a
+// newer release by default.
+type Config struct {
+	CLI            Identity
+	CurrentVersion string
+	Bundles        []Bundle
+}
+
+// Options supplies a target and controls whether Sync changes it. Resolver is
+// reserved for explicit newer-compatible bundle selection; normal sync never
+// calls it and therefore never requires network access.
+type Options struct {
+	Dir                   string
+	DryRun                bool
+	PreferNewerCompatible bool
+	Resolver              Resolver
+	LockTimeout           time.Duration
+	Legacy                LegacyImport
+	// NoAdopt refuses to take over an unmanaged folder that already holds
+	// the bundled skill. By default (false) Sync adopts such a folder: it
+	// backs the folder up durably and replaces it with the bundle, reporting
+	// Adopted. With NoAdopt set, the same folder is reported as Conflict with
+	// the reason "unmanaged target", the folder is left byte-identical, and no
+	// backup is made; Change.Adoptable tells the caller the folder would have
+	// been adopted, so it can ask the person and run Sync again without
+	// NoAdopt. The decision is made inside the target lock together with the
+	// write, after any pending recovery journal has been recovered, so there is
+	// no window between a caller's own check and Sync's write. Folders that
+	// are not adoptable keep their specific reason either way, and every
+	// report is byte-identical with the flag on and off except for a folder
+	// this call would have adopted.
+	//
+	// NoAdopt is about this call's own take-over. It does not stop Sync from
+	// completing the recovery journal of an earlier call: when that journal
+	// is an interrupted adoption of the same folder (begun by a call that did
+	// not set NoAdopt), the recovery rolls forward, the folder ends up owned
+	// and is reported Unchanged, and this call makes no backup of its own. So
+	// "left byte-identical, no ownership recorded" holds for what this call
+	// would have started, not for a transaction an earlier call began.
+	NoAdopt bool
+}
+
+// LegacyImport enables only a host's explicit one-time marker migration.
+// MarkerFile is relative to the target directory and Plugin is the identity
+// that will own matching, verified legacy skills.
+type LegacyImport struct {
+	MarkerFile string
+	Plugin     PluginIdentity
+}
+
+// Resolver resolves an explicitly requested newer compatible bundle. It must
+// return a complete, digest-pinned Bundle; Sync verifies it before planning.
+type Resolver interface {
+	Resolve(context.Context, Bundle) (Bundle, error)
+}
+
+// ReleaseSource retrieves one newer source snapshot chosen against a CLI
+// version. Implementations may read a signed release archive or a local
+// cache; the shared resolver still validates its immutable descriptor and
+// content digest before it reaches Sync.
+type ReleaseSource interface {
+	NewerCompatible(context.Context, Source, string) (BundleDescriptor, fs.FS, error)
+}
+
+// ReleaseResolver is the standard explicit newer-compatible adapter. Put it
+// in Options.Resolver at CLI wiring time; ordinary sync does not invoke it.
+type ReleaseResolver struct {
+	Source         ReleaseSource
+	CurrentVersion string
+}
+
+func (r ReleaseResolver) Resolve(ctx context.Context, matched Bundle) (Bundle, error) {
+	if r.Source == nil {
+		return Bundle{}, fmt.Errorf("%w: release source is required", ErrInvalidConfig)
+	}
+	version := r.CurrentVersion
+	if version == "" {
+		return Bundle{}, fmt.Errorf("%w: current CLI version is required", ErrInvalidConfig)
+	}
+	descriptor, content, err := r.Source.NewerCompatible(ctx, matched.Source, version)
+	if errors.Is(err, ErrNoNewerCompatible) {
+		return matched, nil
+	}
+	if err != nil {
+		return Bundle{}, err
+	}
+	if descriptor.Plugin != matched.Plugin || descriptor.Source.Repository != matched.Source.Repository || descriptor.Source.Path != matched.Source.Path {
+		return Bundle{}, fmt.Errorf("%w: newer release changed canonical plugin source", ErrInvalidConfig)
+	}
+	if !validVersion(descriptor.Source.Version) || !validVersion(matched.Source.Version) || versionCompare(descriptor.Source.Version, matched.Source.Version) <= 0 {
+		return Bundle{}, fmt.Errorf("%w: selected release %q is not newer than %q", ErrInvalidConfig, descriptor.Source.Version, matched.Source.Version)
+	}
+	return EmbeddedBundle(descriptor, content)
+}
+
+type Action string
+
+const (
+	Added     Action = "added"
+	Updated   Action = "updated"
+	Unchanged Action = "unchanged"
+	Removed   Action = "removed"
+	Conflict  Action = "conflict"
+	// Adopted marks an existing, unrecorded target folder that classify
+	// proved was already this bundled skill (matching SKILL.md frontmatter
+	// name, no foreign files) and that Sync therefore took ownership of
+	// instead of refusing as Conflict. Its pre-adoption content is preserved;
+	// see Change.BackupPath.
+	Adopted Action = "adopted"
+)
+
+type Change struct {
+	Plugin  PluginIdentity `json:"plugin"`
+	Name    string         `json:"name"`
+	Action  Action         `json:"action"`
+	Outcome Outcome        `json:"outcome,omitempty"`
+	Reason  string         `json:"reason,omitempty"`
+	// BackupPath is set only for an applied Adopted change. It names the
+	// durable, timestamped copy of the folder's complete pre-adoption
+	// content, preserved outside any transaction so it survives that
+	// transaction's own commit-time cleanup.
+	BackupPath string `json:"backup_path,omitempty"`
+	// Adoptable is set only on a Conflict that Options.NoAdopt caused: the
+	// unmanaged folder is proven to be this skill (matching SKILL.md name, no
+	// file the bundle does not ship) and this very call would have Adopted it
+	// without NoAdopt. It is false on every other change, including a
+	// conflicting folder that adoption would also have refused and a folder
+	// the plugin's other unresolved conflict withdraws (that one reports
+	// "plugin has unresolved conflicts" with or without NoAdopt).
+	Adoptable bool `json:"adoptable,omitempty"`
+}
+
+// Outcome tells callers whether a planned mutation reached durable ownership.
+// Conflict and unchanged entries deliberately have no mutation outcome.
+type Outcome string
+
+const (
+	Planned    Outcome = "planned"
+	Applied    Outcome = "applied"
+	Restored   Outcome = "restored"
+	Incomplete Outcome = "incomplete"
+)
+
+// Skill is one valid skill directory in a bundle.
+type Skill struct{ Name, Digest string }
+type Report struct {
+	Dir        string           `json:"dir"`
+	CLI        Identity         `json:"cli"`
+	CLIVersion string           `json:"cli_version"`
+	DryRun     bool             `json:"dry_run"`
+	Bundles    []ResolvedBundle `json:"bundles"`
+	Changes    []Change         `json:"changes"`
+}
+type ResolvedBundle struct {
+	Plugin          PluginIdentity `json:"plugin"`
+	Source          Source         `json:"source"`
+	PriorCLIVersion string         `json:"prior_cli_version,omitempty"`
+}
+
+// Status is the marker-only query hosts use for drift banners; it never walks
+// installed skill trees or contacts a release source.
+type Status struct {
+	Installed           bool                         `json:"installed"`
+	Plugins             map[string]Source            `json:"plugins"`
+	SupplierCLIVersions map[string]map[string]string `json:"supplier_cli_versions,omitempty"`
+}
+
+func (r Report) Names(a Action) []string {
+	return r.NamesFor(a)
+}
+
+// ChangesFor returns action-matched changes, optionally limited to exact
+// mutation outcomes. It keeps renderers from mistaking restored work for a
+// completed update.
+func (r Report) ChangesFor(a Action, outcomes ...Outcome) []Change {
+	accepted := map[Outcome]bool{}
+	for _, outcome := range outcomes {
+		accepted[outcome] = true
+	}
+	changes := make([]Change, 0)
+	for _, c := range r.Changes {
+		if c.Action == a && (len(accepted) == 0 || accepted[c.Outcome]) {
+			changes = append(changes, c)
+		}
+	}
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Name < changes[j].Name })
+	return changes
+}
+
+// NamesFor returns names from ChangesFor in deterministic order.
+func (r Report) NamesFor(a Action, outcomes ...Outcome) []string {
+	var names []string
+	for _, c := range r.ChangesFor(a, outcomes...) {
+		names = append(names, c.Name)
+	}
+	return names
+}
+func (r Report) Changed() bool {
+	for _, c := range r.Changes {
+		if c.Action == Added || c.Action == Updated || c.Action == Removed || c.Action == Adopted {
+			return true
+		}
+	}
+	return false
+}

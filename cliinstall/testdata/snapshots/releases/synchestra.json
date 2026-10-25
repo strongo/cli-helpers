@@ -1,0 +1,13 @@
+{
+  "repo": "synchestra-io/synchestra-releases",
+  "tag": "cli-v0.20.3",
+  "version": "0.20.3",
+  "assets": [
+    "synchestra_0.20.3_checksums.txt",
+    "synchestra_0.20.3_darwin_amd64.tar.gz",
+    "synchestra_0.20.3_darwin_arm64.tar.gz",
+    "synchestra_0.20.3_linux_amd64.tar.gz",
+    "synchestra_0.20.3_linux_arm64.tar.gz",
+    "synchestra_0.20.3_windows_amd64.zip"
+  ]
+}

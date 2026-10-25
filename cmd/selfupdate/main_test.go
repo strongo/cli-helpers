@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/strongo/selfupdate"
+	"github.com/strongo/cli-helpers/selfupdate"
 )
 
 // These tests exercise this CLI's own wiring — config construction, command
@@ -24,14 +24,19 @@ func TestBuildConfig_SelfHostingIdentity(t *testing.T) {
 	if cfg.BinaryName != "selfupdate" {
 		t.Errorf("BinaryName = %q, want selfupdate", cfg.BinaryName)
 	}
-	if cfg.Repository != "strongo/selfupdate" {
-		t.Errorf("Repository = %q, want strongo/selfupdate", cfg.Repository)
+	if cfg.Repository != "strongo/cli-helpers" {
+		t.Errorf("Repository = %q, want strongo/cli-helpers", cfg.Repository)
 	}
-	if cfg.CurrentVersion != version {
-		t.Errorf("CurrentVersion = %q, want the package-level version var %q", cfg.CurrentVersion, version)
+	if cfg.CurrentVersion != info.Version {
+		t.Errorf("CurrentVersion = %q, want the package-level buildinfo info.Version %q", cfg.CurrentVersion, info.Version)
 	}
-	if len(cfg.UndeterminedVersions) != 1 || cfg.UndeterminedVersions[0] != undeterminedVersion {
-		t.Errorf("UndeterminedVersions = %v, want [%q]", cfg.UndeterminedVersions, undeterminedVersion)
+	// UndeterminedVersions is deliberately left unset in buildConfig:
+	// selfupdate.Config's own withDefaults (see config.go) fills it with
+	// ["dev"] whenever it is empty, which is exactly the placeholder
+	// buildinfo.Get returns for an unstamped build — so buildConfig itself
+	// has nothing to set.
+	if len(cfg.UndeterminedVersions) != 0 {
+		t.Errorf("UndeterminedVersions = %v, want unset (Config defaults it to [\"dev\"])", cfg.UndeterminedVersions)
 	}
 	if len(cfg.VersionProbeArgs) != 1 || cfg.VersionProbeArgs[0] != "--version" {
 		t.Errorf("VersionProbeArgs = %v, want [--version] (matches cobra's own --version flag)", cfg.VersionProbeArgs)
@@ -59,11 +64,42 @@ func TestBuildConfig_SupportedPlatformsMatchGoreleaser(t *testing.T) {
 	}
 }
 
-// An unstamped local build (the default var value) honestly reports itself
-// as undetermined, not as some fake release (REQ: reference-cli-self-hosting).
-func TestVersion_DefaultsToUndeterminedPlaceholder(t *testing.T) {
-	if version != undeterminedVersion {
-		t.Errorf("version = %q, want the undetermined placeholder %q for an unstamped build", version, undeterminedVersion)
+// An unstamped local build (a `go test` binary, which carries no -ldflags)
+// honestly reports itself as buildinfo's "dev" placeholder, not as some fake
+// release (REQ: reference-cli-self-hosting).
+func TestInfo_DefaultsToDevPlaceholder(t *testing.T) {
+	if info.Version != "dev" {
+		t.Errorf("info.Version = %q, want the buildinfo placeholder %q for an unstamped build", info.Version, "dev")
+	}
+}
+
+// The root --version flag and the `version` subcommand must agree on the
+// version they report — the exact bug this buildinfo unification exists to
+// prevent (a fang-driven --version and a hand-rolled `version` subcommand
+// independently drifting) never gets the chance to recur here because both
+// surfaces are wired from the identical package-level info.
+func TestNewRootCmd_VersionSurfacesAgree(t *testing.T) {
+	root := newRootCmd()
+
+	var flagOut bytes.Buffer
+	root.SetOut(&flagOut)
+	root.SetArgs([]string{"--version"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("--version: unexpected error: %v", err)
+	}
+	if got := strings.TrimSpace(flagOut.String()); got != info.Short() {
+		t.Errorf("--version output = %q, want exactly info.Short() = %q", got, info.Short())
+	}
+
+	root = newRootCmd()
+	var subOut bytes.Buffer
+	root.SetOut(&subOut)
+	root.SetArgs([]string{"version"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("version: unexpected error: %v", err)
+	}
+	if got := strings.TrimSpace(subOut.String()); got != info.Long() {
+		t.Errorf("`version` subcommand output = %q, want exactly info.Long() = %q", got, info.Long())
 	}
 }
 
@@ -111,6 +147,11 @@ func TestExplainPath_ClassifiesWithoutNetworkOrRealPath(t *testing.T) {
 		{"winget", `C:\Users\u\AppData\Local\Microsoft\WinGet\Links\selfupdate.exe`, "managed by WinGet"},
 		{"manual", "/usr/local/bin/selfupdate", "manual install"},
 		{"ambiguous", "/tmp/wherever/selfupdate", "ambiguous"},
+		// No configured manager matches, but the built-in system-package
+		// check does (REQ: system-package-dirs-are-managed) — it has no
+		// single UpgradeCommand, so explainPath falls back to "update via"
+		// with the hint text rather than an empty "upgrade command: ".
+		{"system package directory", "/usr/bin/selfupdate", "update via"},
 	}
 
 	for _, tt := range tests {

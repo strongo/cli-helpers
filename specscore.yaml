@@ -1,7 +1,10 @@
 # SpecScore Repo Config Schema: https://specscore.md/repo-config
 
 project:
-    title: selfupdate — shared self-update for Go CLIs
+    title: cli-helpers — shared helpers for Go CLIs
     host: github.com
     org: strongo
-    repo: selfupdate
+    repo: cli-helpers
+
+# Plans live in this repository (same-repository Plan storage).
+plans_repo: strongo/cli-helpers
