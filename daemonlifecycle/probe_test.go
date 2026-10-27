@@ -459,7 +459,8 @@ func TestTerminateIfSameProcessNeverSignalsAnotherIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case <-exited:
+	case err := <-exited:
+		t.Logf("terminated process wait: %v", err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("the matching process was not terminated")
 	}
