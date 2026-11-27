@@ -86,7 +86,7 @@ jobs:
         run: go test -count=1 ./cliinstall/... ./selfupdate/...
 
   strongo_workflow:
-    uses: strongo/cicd/.github/workflows/workflow.yml@main
+    uses: strongo/cicd/.github/workflows/workflow.yml@v1.25.6
     permissions:
       contents: write
     secrets:
